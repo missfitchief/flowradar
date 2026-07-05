@@ -7,5 +7,11 @@
   "types": "./src/index.ts",
   "scripts": {
     "build": "tsc -b"
+  },
+  "dependencies": {
+    "@flowradar/core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0"
   }
 }
