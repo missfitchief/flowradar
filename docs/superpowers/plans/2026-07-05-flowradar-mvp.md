@@ -24,7 +24,7 @@
 
 ```
 flowradar/
-  package.json  tsconfig.base.json  docker-compose.yml  .env.example  README.md  vitest.workspace.ts
+  package.json  tsconfig.base.json  docker-compose.yml  .env.example  README.md  vitest.config.ts (test.projects — Vitest 4 API)
   scripts/db-local.ts                  # embedded-postgres lifecycle (LITE)
   apps/web/                            # Next.js: app/(pages), app/api/(routes), components/, lib/
   apps/worker/src/index.ts             # runner bootstrap + job registry
@@ -106,7 +106,7 @@ export interface JobRunner { schedule(name: string, intervalMs: number, fn: () =
 
 ### Task 1: Monorepo scaffold
 
-**Files:** Create root `package.json` (workspaces `apps/*`,`packages/*`; scripts: `dev`→`npm -w apps/web run dev`, `worker`→`npm -w apps/worker run dev`, `db:migrate`, `db:seed`, `db:studio`, `test`→`vitest run`, `typecheck` (tsc -b all), `build`→`npm -w apps/web run build`, `verify`→`typecheck && test && build`), `tsconfig.base.json` (strict, NodeNext), `vitest.workspace.ts`, `docker-compose.yml` (postgres:16 on 5432 + redis:7 on 6379, volumes), `.env.example` (all vars Spec §13 with comments), README skeleton, workspace `package.json`+`tsconfig.json` for all 5 workspaces with placeholder `src/index.ts`.
+**Files:** Create root `package.json` (workspaces `apps/*`,`packages/*`; scripts: `dev`→`npm -w apps/web run dev`, `worker`→`npm -w apps/worker run dev`, `db:migrate`, `db:seed`, `db:studio`, `test`→`vitest run`, `typecheck` (tsc -b all), `build`→`npm -w apps/web run build`, `verify`→`typecheck && test && build`), `tsconfig.base.json` (strict, NodeNext), `vitest.config.ts (test.projects — Vitest 4 API)`, `docker-compose.yml` (postgres:16 on 5432 + redis:7 on 6379, volumes), `.env.example` (all vars Spec §13 with comments), README skeleton, workspace `package.json`+`tsconfig.json` for all 5 workspaces with placeholder `src/index.ts`.
 
 - [ ] Write all files; `npm install` at root — expect clean resolve, zero vulnerabilities blocking.
 - [ ] `npm run typecheck` — expect pass (placeholders).
