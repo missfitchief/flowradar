@@ -163,6 +163,14 @@ export interface TokenWindowAggregate {
   exitedSmartPct: number;
   topHolderExits: number;
   newSmartBuyers: number;
+  /**
+   * Rule B growth check (base window buyer count -> target window buyer
+   * count) needs the EARLY-window buyer count, which is not derivable from
+   * this single-window aggregate alone. Optional/nullable: aggregation
+   * wires it in Task 15. Missing (undefined/null) means rule B "cannot
+   * evaluate growth" and must not fire (see rules/ruleB.ts).
+   */
+  earlyWindowBuyerCount?: number | null;
 }
 
 // ---------------------------------------------------------------------------

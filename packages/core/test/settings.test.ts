@@ -14,6 +14,7 @@ describe('SettingsSchema / DEFAULT_SETTINGS / parseSettings', () => {
     expect(result.rules.A.minWallets).toBe(25);
 
     // every other rules.A field retained from defaults
+    expect(result.rules.A.watchMinWallets).toBe(DEFAULT_SETTINGS.rules.A.watchMinWallets);
     expect(result.rules.A.windowMin).toBe(DEFAULT_SETTINGS.rules.A.windowMin);
     expect(result.rules.A.minBuyVolumeUsd).toBe(DEFAULT_SETTINGS.rules.A.minBuyVolumeUsd);
     expect(result.rules.A.maxSoldPct).toBe(DEFAULT_SETTINGS.rules.A.maxSoldPct);
@@ -44,5 +45,9 @@ describe('SettingsSchema / DEFAULT_SETTINGS / parseSettings', () => {
 
   it('parseSettings throws on an invalid type', () => {
     expect(() => parseSettings({ alerts: { cooldownMin: 'x' } })).toThrow();
+  });
+
+  it('DEFAULT_SETTINGS.rules.A.watchMinWallets is 10 (tiered rule A WATCH floor)', () => {
+    expect(DEFAULT_SETTINGS.rules.A.watchMinWallets).toBe(10);
   });
 });

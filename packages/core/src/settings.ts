@@ -27,6 +27,7 @@ const ProfitableWalletSchema = z.object({
 
 const RuleASchema = z.object({
   minWallets: z.number(),
+  watchMinWallets: z.number(),
   windowMin: z.number(),
   minBuyVolumeUsd: z.number(),
   maxSoldPct: z.number(),
@@ -159,6 +160,7 @@ export const DEFAULT_SETTINGS: Settings = {
   rules: {
     A: {
       minWallets: 20,
+      watchMinWallets: 10,
       windowMin: 30,
       minBuyVolumeUsd: 25000,
       maxSoldPct: 30,
