@@ -1,8 +1,10 @@
+import Link from 'next/link';
 import { parseSettings } from '@flowradar/core';
 import { prisma } from '@/lib/db';
 
 // DB-backed dashboard — must render per-request, never freeze at build time.
 export const dynamic = 'force-dynamic';
+import { Button } from '@/components/ui/button';
 import { LeaderboardTable } from '@/components/wallets/LeaderboardTable';
 import type {
   LeaderboardChain,
@@ -209,11 +211,16 @@ export default async function WalletsPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold tracking-tight">Wallet Leaderboard</h1>
-      <p className="mt-2 text-sm text-muted-foreground">Tracked and imported wallets by 30d performance</p>
-      <p className="mt-1 text-sm text-muted-foreground">
-        {totalWalletCount} wallet{totalWalletCount === 1 ? '' : 's'} · {profitableCount} meet profitable thresholds
-      </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Wallet Leaderboard</h1>
+          <p className="mt-2 text-sm text-muted-foreground">Tracked and imported wallets by 30d performance</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {totalWalletCount} wallet{totalWalletCount === 1 ? '' : 's'} · {profitableCount} meet profitable thresholds
+          </p>
+        </div>
+        <Button render={<Link href="/wallets/import" />}>Import CSV</Button>
+      </div>
 
       <div className="mt-6">
         <LeaderboardTable rows={rows} />

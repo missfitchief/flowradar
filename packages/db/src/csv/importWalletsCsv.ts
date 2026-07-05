@@ -39,6 +39,19 @@
 // scoring-pass.ts's buildBasicAggregate already reads "latest WalletStats per
 // wallet" (computedAt desc), so a CSV import row with a later computedAt
 // naturally wins without any special-casing.
+//
+// CSV `source` column (Task 12 controller adjudication, superseding the
+// Task-6-era plan's now-stale "source=csv" framing above): this column is
+// free-text *provenance* the CSV author supplies (e.g. "gmgn list", "manual
+// export") — NOT a StatsSource enum value. WalletStats.source stays hard
+// -coded 'csv' regardless of this column's content (a CSV row is always
+// database-of-record "csv" data — see StatsSource enum, 3 fixed values:
+// csv/computed/provider). When the column's value is present and isn't
+// literally "csv" (a CSV author writing "csv" in their own source column
+// is just restating the obvious and carries no new information), it's
+// appended to Wallet.notes as a `source: <value>` line — idempotently, so
+// re-importing the same file twice (or two files citing the same source)
+// never duplicates the note on that wallet.
 
 import { computeWalletScore } from '@flowradar/core';
 import type { Chain } from '@flowradar/core';
@@ -195,7 +208,13 @@ interface ParsedRow {
   tradeCount30d: number;
   avgTradeSizeUsd: number;
   tags: string[];
-  source: string;
+  /**
+   * Free-text provenance from the CSV's own `source` column (e.g. "gmgn
+   * list"), trimmed. `null` when the column is empty or literally "csv" —
+   * either way carries nothing worth writing to Wallet.notes (see file
+   * header comment). Never used as a StatsSource value.
+   */
+  sourceNote: string | null;
 }
 
 function parseNumberField(raw: string): number | null {
@@ -251,11 +270,23 @@ function validateRow(raw: Record<string, string>): { ok: true; row: ParsedRow } 
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
 
-  const source = raw.source?.trim() || 'csv';
+  const sourceRaw = raw.source?.trim() ?? '';
+  const sourceNote = sourceRaw !== '' && sourceRaw.toLowerCase() !== 'csv' ? sourceRaw : null;
 
   return {
     ok: true,
-    row: { walletAddress, chain, pnl30d, realizedPnl30d, unrealizedPnl30d, winRate, tradeCount30d, avgTradeSizeUsd, tags, source }
+    row: {
+      walletAddress,
+      chain,
+      pnl30d,
+      realizedPnl30d,
+      unrealizedPnl30d,
+      winRate,
+      tradeCount30d,
+      avgTradeSizeUsd,
+      tags,
+      sourceNote
+    }
   };
 }
 
@@ -405,6 +436,31 @@ const KNOWN_WALLET_LABELS: ReadonlySet<string> = new Set<WalletLabel>([
   'unknown'
 ]);
 
+/**
+ * Builds the `source: <value>` line this module appends to Wallet.notes for
+ * a CSV row's free-text `source` column (see file header + ParsedRow.sourceNote
+ * comments). Kept as a named helper so the exact line format is defined once
+ * and reused by both the write path below and its idempotency check.
+ */
+function sourceNoteLine(sourceNote: string): string {
+  return `source: ${sourceNote}`;
+}
+
+/**
+ * Appends `source: <value>` to `currentNotes` unless a line with that exact
+ * value is already present (idempotent re-import — decision 3's own
+ * requirement) — returns `null` when no update is needed (value already
+ * noted), so the caller can skip the write entirely rather than issuing a
+ * no-op UPDATE.
+ */
+function nextNotes(currentNotes: string | null, sourceNote: string | null): string | null {
+  if (sourceNote === null) return null;
+  const line = sourceNoteLine(sourceNote);
+  const existingLines = (currentNotes ?? '').split('\n').filter((l) => l.length > 0);
+  if (existingLines.includes(line)) return null; // already noted — idempotent no-op
+  return [...existingLines, line].join('\n');
+}
+
 async function upsertWalletFromCsvRow(prisma: PrismaClient, row: ParsedRow): Promise<void> {
   const now = new Date();
 
@@ -415,11 +471,22 @@ async function upsertWalletFromCsvRow(prisma: PrismaClient, row: ParsedRow): Pro
       chain: row.chain,
       firstSeenAt: now,
       lastActiveAt: now,
-      isWatched: true
+      isWatched: true,
+      notes: row.sourceNote !== null ? sourceNoteLine(row.sourceNote) : null
     },
     update: {},
-    select: { id: true }
+    select: { id: true, notes: true }
   });
+
+  // The `create` branch above already sets notes for a brand-new wallet;
+  // this handles the pre-existing-wallet case (upsert's `update: {}` above
+  // intentionally never touches notes, so a second pass here decides,
+  // per-row, whether an update is actually needed — see nextNotes's
+  // idempotency check).
+  const updatedNotes = nextNotes(wallet.notes, row.sourceNote);
+  if (updatedNotes !== null) {
+    await prisma.wallet.update({ where: { id: wallet.id }, data: { notes: updatedNotes } });
+  }
 
   const scoreInput = deriveWalletScoreInput(row);
   const scoreResult = computeWalletScore(scoreInput);
