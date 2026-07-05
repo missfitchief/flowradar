@@ -1,40 +1,56 @@
-// interim aggregate — replaced by @flowradar/core aggregateWindow in Task 15
+// FlowRadar — shared flow-scoring pass (Task 6 brief: "move the reusable
+// job-body into packages/db ... have BOTH worker job and seed call it — do
+// not copy-paste the logic twice").
 //
-// Builds a minimal TokenWindowAggregate for one token from stored
-// WalletTokenTrade/WalletStats/WalletClassification/TokenMarketSnapshot rows,
-// covering the trailing 24h window only. This exists so flowScoring.ts (Task
-// 5) has something real to feed computeFlowScore before Task 15 lands the
-// full aggregateWindow() (which additionally needs clustering, rotation, and
-// G-rule inputs that don't exist yet — see brief decision 3). Every field
-// this interim builder can't yet compute honestly (uniqueEntityCount beyond
-// smartWalletCount, liquidityChangePct, inflowSpike, exitedSmartPct,
-// topHolderExits, newSmartBuyers) is set to a documented placeholder value
-// rather than a fabricated number.
+// This module carries the exact logic that was Task 5's
+// apps/worker/src/pipeline/basicAggregate.ts (interim TokenWindowAggregate
+// builder) + apps/worker/src/jobs/flowScoring.ts (the per-token loop that
+// builds an aggregate, fetches risk, computes flowScore, persists one
+// TokenFlowSnapshot row). Moved here verbatim (not reimplemented) so both the
+// worker's scheduled job and the seed script call the identical code path —
+// apps/worker/src/jobs/flowScoring.ts is now a thin wrapper around
+// runFlowScoringPass() below.
+//
+// interim aggregate — replaced by @flowradar/core aggregateWindow in Task 15.
 //
 // Window anchor: "trailing 24h" is anchored to the TOKEN'S OWN most recent
-// trade timestamp (not the caller-supplied `now`/wall clock). The mock
-// world's 7 scenarios are deliberately scripted at different fixed points
-// across its full 72h history (Spec-driven realism — a live system's tokens
-// don't all trade "right now" either), so anchoring to wall-clock `now`
-// would make every scenario except the ones scripted in the final 24h of
-// that history permanently unscoreable, no matter how long the worker runs
-// (the mock world's scripted content doesn't move forward in time — only
-// `now` does, and it never catches up to a fixed-offset-from-genesis event
-// that's already >24h in the past relative to the world's horizon). Scoring
-// "the most recent 24h this token actually traded in" is both the more
-// generally useful definition for a real historical token and the one that
-// makes every mock scenario's flowScore comparable and correct — matching
-// this task's NOVA-scores-highest verification requirement without
-// special-casing the mock world.
+// trade timestamp (not wall-clock `now`). The mock world's scenarios are
+// scripted at different fixed points across its full 72h history, so
+// anchoring to wall-clock `now` would make every scenario except the ones
+// scripted in the final 24h permanently unscoreable (see Task 5 report "Bug
+// found and fixed: aggregate window anchor" for the full incident writeup).
+// Scoring "the most recent 24h this token actually traded in" is both the
+// more generally useful definition for a real historical token and the one
+// that makes every mock scenario's flowScore comparable and correct.
 
-import type { Chain, Settings, TokenWindowAggregate } from '@flowradar/core';
-import type { PrismaClient } from '@flowradar/db';
+import { computeFlowScore } from '@flowradar/core';
+import type { Chain, RiskReport, Settings, TokenWindowAggregate } from '@flowradar/core';
+import type { PrismaClient } from '@prisma/client';
 
 type ProfitableWalletThresholds = Settings['profitableWallet'];
 
-const WINDOW_MINUTES = 1440; // trailing 24h, per brief decision 3
+const WINDOW_MINUTES = 1440; // trailing 24h, per Task 5 brief decision 3
 const DEFAULT_WALLET_SCORE = 50;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/** Minimal risk-lookup shape a caller must provide — deliberately narrower than the full JobContext/ProviderResolver types (which live in apps/worker), so packages/db doesn't need to depend on apps/worker. */
+export interface RiskProviderLike {
+  getTokenRisk(chain: Chain, address: string): Promise<RiskReport>;
+}
+
+export type RiskProviderResolver = (chain: Chain) => RiskProviderLike;
+
+export interface ScoringPassLogger {
+  info(message: string, meta?: Record<string, unknown>): void;
+  error(message: string, meta?: Record<string, unknown>): void;
+}
+
+export interface ScoringPassResult {
+  tokensConsidered: number;
+  scored: number;
+  skippedNoWindow: number;
+  errors: number;
+}
 
 interface BuyerAccumulator {
   walletId: string;
@@ -251,4 +267,92 @@ function isProfitableWallet(
     realized >= thresholds.minRealized &&
     avgTradeSizeUsd >= thresholds.minAvgTradeSizeUsd
   );
+}
+
+/**
+ * Runs one full flow-scoring pass: for every token with >=1 BUY/SELL trade
+ * ever, builds an interim aggregate, fetches a RiskReport from the resolved
+ * risk provider, runs computeFlowScore, and persists one TokenFlowSnapshot
+ * row (windowMinutes 1440, signalStatus 'watching'). Shared by
+ * apps/worker/src/jobs/flowScoring.ts (scheduled worker tick) and
+ * packages/db/src/seed.ts (one-shot seed pass) — identical logic, single
+ * source of truth, per Task 6 brief's explicit "do not copy-paste" instruction.
+ */
+export async function runFlowScoringPass(
+  prisma: PrismaClient,
+  settings: Settings,
+  resolveRiskProvider: RiskProviderResolver,
+  log?: ScoringPassLogger
+): Promise<ScoringPassResult> {
+  const now = new Date();
+
+  // Every token that has at least one trade, ever (a token with zero trades
+  // has nothing to aggregate and is skipped — buildBasicAggregate would
+  // return null for it anyway, but this avoids the query entirely for the
+  // common case of many never-traded noise tokens).
+  const tokensWithTrades = await prisma.token.findMany({
+    where: { trades: { some: {} } },
+    select: { id: true, chain: true, address: true, symbol: true }
+  });
+
+  let scored = 0;
+  let skippedNoWindow = 0;
+  let errors = 0;
+
+  for (const token of tokensWithTrades) {
+    try {
+      const agg = await buildBasicAggregate(prisma, token.id, token.chain as Chain, settings, now);
+      if (!agg) {
+        skippedNoWindow += 1;
+        continue;
+      }
+
+      const riskProvider = resolveRiskProvider(token.chain as Chain);
+      const risk = await riskProvider.getTokenRisk(token.chain as Chain, token.address);
+
+      const result = computeFlowScore(agg, risk, settings);
+
+      await prisma.tokenFlowSnapshot.create({
+        data: {
+          tokenId: token.id,
+          ts: now,
+          windowMinutes: agg.windowMinutes,
+          flowScore: result.score,
+          smartWalletCount: agg.smartWalletCount,
+          humanLikeCount: agg.humanLikeCount,
+          possibleBotCount: agg.possibleBotCount,
+          uniqueEntityCount: agg.uniqueEntityCount,
+          clusterAdjustedWalletCount: agg.uniqueEntityCount,
+          entityConcentrationRisk: 0,
+          trackedBuyVolumeUsd: agg.trackedBuyVolumeUsd,
+          trackedSellVolumeUsd: agg.trackedSellVolumeUsd,
+          netFlowUsd: agg.netFlowUsd,
+          buySellRatio: agg.buySellRatio,
+          avgEntryMcap: agg.avgEntryMcap ?? 0,
+          currentMcap: agg.currentMcap ?? 0,
+          mcapExpansionFromAvgEntry: agg.mcapExpansionFromAvgEntry ?? 0,
+          holdersGrowth: 0,
+          liquidityChange: agg.liquidityChangePct ?? 0,
+          signalStatus: 'watching',
+          componentBreakdown: result.components
+        }
+      });
+      scored += 1;
+    } catch (err) {
+      errors += 1;
+      log?.error(`flowScoring: failed to score ${token.symbol}`, {
+        tokenId: token.id,
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
+  }
+
+  const summary: ScoringPassResult = {
+    tokensConsidered: tokensWithTrades.length,
+    scored,
+    skippedNoWindow,
+    errors
+  };
+  log?.info('flowScoring cycle complete', { ...summary });
+  return summary;
 }

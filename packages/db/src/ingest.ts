@@ -26,6 +26,18 @@
 // non-nullable column always gets a concrete number — 0 reads honestly as
 // "no data yet" for a UI that always shows *something* rather than crashing
 // on a missing snapshot row.
+//
+// marketCapAtTrade / walletScoreAtTime "as of" semantics (Task 6 fix): both
+// are looked up as of the TRADE'S OWN timestamp (latest snapshot/stats row
+// with ts/computedAt <= trade.ts), not "latest overall". The original Task 5
+// implementation queried "latest overall" (orderBy ts desc, no upper bound),
+// which is only correct when ingest always runs in strict chronological order
+// relative to snapshot writes (true for the live worker's real-time polling
+// loop, but false for a seed script that writes a token's full 72h market
+// series up front and then ingests trades scattered across that same 72h —
+// under "latest overall", every trade in the batch would see the *final*
+// snapshot's market cap regardless of when it actually happened). Fixed here
+// so both call sites work correctly under either ingestion order.
 
 import type { PrismaClient } from '@prisma/client';
 import { Prisma } from '@prisma/client';
@@ -198,8 +210,8 @@ async function ingestSwapLeg(
   const amountToken = Number(leg.amountToken);
   const amountUsd = leg.amountUsd ?? 0;
   const priceUsd = amountUsd > 0 && amountToken > 0 ? amountUsd / amountToken : 0;
-  const marketCapAtTrade = await latestMarketCapUsd(prisma, token.id);
-  const walletScoreAtTime = await latestWalletScore(prisma, walletId);
+  const marketCapAtTrade = await latestMarketCapUsd(prisma, token.id, tx.ts);
+  const walletScoreAtTime = await latestWalletScore(prisma, walletId, tx.ts);
 
   await upsertTrade(prisma, {
     chain,
@@ -240,8 +252,8 @@ async function ingestTokenTransferLeg(
       const amountToken = Number(leg.amountToken);
       const amountUsd = leg.amountUsd ?? 0;
       const priceUsd = amountUsd > 0 && amountToken > 0 ? amountUsd / amountToken : 0;
-      const marketCapAtTrade = await latestMarketCapUsd(prisma, token.id);
-      const walletScoreAtTime = await latestWalletScore(prisma, walletId);
+      const marketCapAtTrade = await latestMarketCapUsd(prisma, token.id, tx.ts);
+      const walletScoreAtTime = await latestWalletScore(prisma, walletId, tx.ts);
 
       await upsertTrade(prisma, {
         chain,
@@ -303,8 +315,8 @@ async function ingestLpLeg(
   const amountToken = Number(leg.amountToken);
   const amountUsd = leg.amountUsd ?? 0;
   const priceUsd = amountUsd > 0 && amountToken > 0 ? amountUsd / amountToken : 0;
-  const marketCapAtTrade = await latestMarketCapUsd(prisma, token.id);
-  const walletScoreAtTime = await latestWalletScore(prisma, walletId);
+  const marketCapAtTrade = await latestMarketCapUsd(prisma, token.id, tx.ts);
+  const walletScoreAtTime = await latestWalletScore(prisma, walletId, tx.ts);
 
   await upsertTrade(prisma, {
     chain,
@@ -434,22 +446,50 @@ async function upsertMoneyFlowEdge(prisma: PrismaClient, input: EdgeWriteInput):
   }
 }
 
-async function latestMarketCapUsd(prisma: PrismaClient, tokenId: string): Promise<number> {
-  const latest = await prisma.tokenMarketSnapshot.findFirst({
-    where: { tokenId },
+/**
+ * Latest TokenMarketSnapshot.marketCapUsd as of `asOf` (snapshot ts <= asOf),
+ * not "latest overall" — see file header. Falls back to the latest snapshot
+ * ever (ignoring `asOf`) only if every existing snapshot is strictly after
+ * `asOf` (a trade older than any known snapshot still gets *some* honest
+ * number rather than a spurious 0), and to 0 only if no snapshot exists at
+ * all yet.
+ */
+async function latestMarketCapUsd(prisma: PrismaClient, tokenId: string, asOf: Date): Promise<number> {
+  const asOfSnapshot = await prisma.tokenMarketSnapshot.findFirst({
+    where: { tokenId, ts: { lte: asOf } },
     orderBy: { ts: 'desc' },
     select: { marketCapUsd: true }
   });
-  return latest ? Number(latest.marketCapUsd) : 0;
+  if (asOfSnapshot) return Number(asOfSnapshot.marketCapUsd);
+
+  const earliest = await prisma.tokenMarketSnapshot.findFirst({
+    where: { tokenId },
+    orderBy: { ts: 'asc' },
+    select: { marketCapUsd: true }
+  });
+  return earliest ? Number(earliest.marketCapUsd) : 0;
 }
 
-async function latestWalletScore(prisma: PrismaClient, walletId: string): Promise<number> {
-  const latest = await prisma.walletStats.findFirst({
-    where: { walletId },
+/**
+ * Latest WalletStats.walletScore as of `asOf` (computedAt <= asOf), not
+ * "latest overall" — same "as of" reasoning as latestMarketCapUsd above.
+ * Falls back to the earliest stats row if every row is strictly after `asOf`,
+ * and to 0 only if the wallet has no stats row at all yet.
+ */
+async function latestWalletScore(prisma: PrismaClient, walletId: string, asOf: Date): Promise<number> {
+  const asOfStats = await prisma.walletStats.findFirst({
+    where: { walletId, computedAt: { lte: asOf } },
     orderBy: { computedAt: 'desc' },
     select: { walletScore: true }
   });
-  return latest ? latest.walletScore : 0;
+  if (asOfStats) return asOfStats.walletScore;
+
+  const earliest = await prisma.walletStats.findFirst({
+    where: { walletId },
+    orderBy: { computedAt: 'asc' },
+    select: { walletScore: true }
+  });
+  return earliest ? earliest.walletScore : 0;
 }
 
 function assertNever(value: never): never {

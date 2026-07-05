@@ -12,11 +12,12 @@
     "build": "tsc -b",
     "generate": "prisma generate",
     "db:migrate": "tsx ../../scripts/db-local.ts ensure && prisma migrate dev --name init",
-    "db:seed": "node -e \"console.log('seed arrives in Task 6')\"",
+    "db:seed": "tsx ../../scripts/db-local.ts ensure && tsx src/seed.ts",
     "db:studio": "tsx ../../scripts/db-local.ts ensure && prisma studio"
   },
   "dependencies": {
     "@flowradar/core": "*",
+    "@flowradar/providers": "*",
     "@prisma/client": "^6.19.2",
     "dotenv": "^17.4.2",
     "embedded-postgres": "^16.14.0-beta.17",
