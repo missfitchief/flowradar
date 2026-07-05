@@ -7,7 +7,7 @@ Source: user-provided 17-module requirements brief (brainstormed, decisions lock
 
 ## 1. Product summary
 
-Local-first Solana + BNB Chain intelligence dashboard + worker bot. Discovers early "insider-like" tokens by tracking profitable wallets, capital rotation, wallet clusters, smart-wallet accumulation, fresh-wallet funding, bridge movement, and token flow. Analytics only.
+Local-first Solana + BNB Chain intelligence dashboard + worker bot. **FlowRadar is a wallet-driven early-token detection system** — the edge is NOT scanning every new coin/pair; it is tracking strong/profitable/watched wallets continuously and surfacing a token early when they cluster-buy or accumulate it. Primary loop: watched wallets → new buys → same-token clustering → accumulation detection → entity adjustment → FlowScore → alert the TOKEN (not just the wallets). Tokens enter the system only via tracked-wallet activity (a tracked/linked/freshly-funded wallet buys it, or it appears in a profit-rotation path); global new-token/pair scanning is explicitly a later optional module, not MVP. Analytics only.
 
 **Non-goals / hard constraints (enforced in code and copy):**
 - No trading execution, no market manipulation, no chain spam (read-only public APIs, throttled).
@@ -125,7 +125,7 @@ Per-provider token-bucket rate limiter + retry w/ exponential backoff (×3) + `P
 
 | Rule | Trigger (defaults) | Severity |
 |---|---|---|
-| A Smart Cluster Buy | ≥20 profitable wallets buy within rolling 30 min; tracked buy vol ≥ $25k; net flow > 0; <30% of buyers have sold; mcap $100k–$5M; liq ≥ $20k; token age < 7d OR inflow spike (window buy vol ≥ 3× trailing 6h avg) | HIGH |
+| A Smart Cluster Buy (tiered) | ≥10 watched/profitable wallets buy within rolling 30 min ⇒ WATCH tier; ≥20 ⇒ HIGH tier with: tracked buy vol ≥ $25k; net flow > 0; <30% of buyers have sold; mcap $100k–$5M; liq ≥ $20k; token age < 7d OR inflow spike (window buy vol ≥ 3× trailing 6h avg). All tiers entity-adjusted: signal carries raw_wallet_count, unique_entity_count, largest_cluster_size, entity_concentration_risk — 40 wallets from 1 cluster ≠ 40 independent wallets | WATCH→HIGH |
 | B Accumulation → Breakout | ≥20 buyers grows to ≥40 within 24h window; mcap expansion ≤ 2×; net position > 0; sell vol ≤ 25% of buy vol | HIGH |
 | C Human Concentration | ≥70% buyers human_like/smart_money; bot+sniper ≤ 20%; no single block holds >30% of window buys; funding diversity ≥ max(3, 30% of buyers) distinct roots where detectable (check skipped if unknown) | WATCH→HIGH |
 | D Whale + Smart Confirm | ≥1 whale buy ≥ $10k; ≥15 profitable wallets buy; buy/sell ratio > 3 | HIGH |
@@ -133,7 +133,7 @@ Per-provider token-bucket rate limiter + retry w/ exponential backoff (×3) + `P
 | F Profit Rotation | A exits X with realized PnL ≥ $500; transfer/bridge within 24h; B receives 80–105% of sent value; B buys Y within 60 min; Y mcap ≤ $5M | HIGH |
 | G Exit / Danger | any of: ≥30% tracked smart wallets exited (sold ≥80% of position); net flow < 0 AND ≥3 of top-5 scored holders sold; liquidity −30% within 1h; mcap +100% in 6h with <3 new smart buyers | CRITICAL |
 
-Rules A/C/D/E evaluate on rolling 30-min windows; B/F/G on 24h windows. Both aggregates computed per pass by the signal worker.
+Rules A/C/D/E evaluate on rolling 30-min windows; B/F/G on 24h windows. Both aggregates computed per pass by the signal worker. The scoring pass additionally computes multi-window accumulation counts — smart_wallet_count over 30m/1h/6h, tracked buy/sell volume, net smart flow, buy/sell ratio, percent_wallets_sold, avg_smart_entry_mcap vs current_mcap — stored in the flow snapshot's metrics JSON so rising-count accumulation is visible without extra snapshot rows.
 
 **Entity clustering:** `calculateWalletLinkConfidence(a,b)` with the brief's exact weight table (direct transfer +35, repeated +20, same funding source +25, same gas funder +10, bridge amount/time match +30, amount similarity >90% +15, dest buys new token <60 min +15, fresh-wallet activation +15, same rotation behavior +10, repeated cross-launch pattern +25; CEX/mixer interruption −30, router-only −20, weak amount match −15, dust-only −25), clamped 0–100. Bands: 0–30 weak, 31–60 possible, 61–80 probable, 81–100 strong. Clusters = union-find over pairs ≥ `entityConfidenceThreshold` (default 61); evidence JSON retained per pair; FlowScore consumes `uniqueEntityCount` (raw count always shown alongside).
 
@@ -227,7 +227,7 @@ npm run verify            # typecheck + tests + build
 
 ## 14. Deferred (explicitly out of MVP)
 
-Discord sender implementation, GeckoTerminal adapter, Birdeye/Moralis/Bitquery full adapters, live cross-chain bridge matching beyond registry+heuristics, backtest UI beyond a simple results page, wallet-graph alerts on live data, auth/multi-user.
+Discord sender implementation, GeckoTerminal adapter, Birdeye/Moralis/Bitquery full adapters, live cross-chain bridge matching beyond registry+heuristics, backtest UI beyond a simple results page, wallet-graph alerts on live data, auth/multi-user, and **global new-token/pair discovery** (scanning/ranking every newly created token) — token discovery is wallet-driven by design in the MVP.
 
 ## 15. Flagged risks and assumptions
 
