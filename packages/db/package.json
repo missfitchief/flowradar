@@ -5,10 +5,26 @@
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
+  "prisma": {
+    "schema": "prisma/schema.prisma"
+  },
   "scripts": {
     "build": "tsc -b",
-    "db:migrate": "node -e \"console.log('db arrives in Task 2')\"",
-    "db:seed": "node -e \"console.log('db arrives in Task 2')\"",
-    "db:studio": "node -e \"console.log('db arrives in Task 2')\""
+    "generate": "prisma generate",
+    "db:migrate": "tsx ../../scripts/db-local.ts ensure && prisma migrate dev --name init",
+    "db:seed": "node -e \"console.log('seed arrives in Task 6')\"",
+    "db:studio": "tsx ../../scripts/db-local.ts ensure && prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.2",
+    "dotenv": "^17.4.2",
+    "embedded-postgres": "^16.14.0-beta.17",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "@types/pg": "^8.20.0",
+    "prisma": "^6.19.2",
+    "tsx": "^4.23.0"
   }
 }

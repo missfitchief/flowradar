@@ -1,0 +1,717 @@
+// FlowRadar — Prisma schema
+//
+// Normative source: docs/superpowers/specs/2026-07-05-flowradar-design.md §4 "Data model".
+// 22 models, ordered exactly as spec §4 (section comments below carry the spec numbering).
+//
+// Precision policy (spec §4):
+//   - USD amounts:        Decimal(20,4)
+//   - Token amounts:      Decimal(38,18)
+//   - Prices:             Decimal(24,12)
+//   - Rates/percentages:  Float
+//   - Block/slot numbers: BigInt
+//   - Enums for chain/action/rule/severity/status/label/node/relationship types.
+//   - BSC addresses stored lowercase, rendered checksummed at the UI layer; Solana
+//     base58 addresses stored as-is (both are plain String columns here).
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ---------------------------------------------------------------------------
+// Shared enums
+// ---------------------------------------------------------------------------
+
+enum ChainId {
+  SOLANA
+  BSC
+}
+
+/// WalletStats.source — where a stats window's numbers ultimately came from.
+enum StatsSource {
+  csv
+  computed
+  provider
+}
+
+/// WalletClassification.label — 11 values.
+/// Spec §4 model 4 anchors this list as "human_like … unknown, 11 values per brief";
+/// the brief's full list is not present in this repo. Smallest-reasonable-call: the
+/// endpoints plus every classification term the design spec itself uses elsewhere
+/// (smart_money / bot / sniper / whale / cex-related wallets / fresh-wallet funding /
+/// "insider-like" tokens / AddressRegistry's DEPLOYER category), padded to 11 with two
+/// low-risk, commonly-needed adjacent categories (market_maker, developer) that later
+/// tasks can rely on without a schema change. See task-2-report.md for the full record.
+enum WalletLabel {
+  human_like
+  smart_money
+  whale
+  bot
+  sniper
+  fresh_wallet
+  insider_like
+  market_maker
+  cex_related
+  developer
+  unknown
+}
+
+/// WalletTokenTrade.action
+enum TradeAction {
+  BUY
+  SELL
+  TRANSFER_IN
+  TRANSFER_OUT
+  LP_ADD
+  LP_REMOVE
+}
+
+/// TokenFlowSnapshot.signalStatus
+enum FlowSignalStatus {
+  watching
+  hot
+  profit_rotation
+  exit_warning
+  dead
+}
+
+/// Signal.rule — rules A-G (spec §6 signal rules table).
+enum SignalRule {
+  A
+  B
+  C
+  D
+  E
+  F
+  G
+}
+
+/// Signal.severity / used by BacktestResult context via Signal
+enum SignalSeverity {
+  INFO
+  WATCH
+  HIGH
+  CRITICAL
+}
+
+/// Alert.type
+enum AlertType {
+  SIGNAL
+  ROTATION
+  WALLET_GRAPH
+  TEST
+}
+
+/// Alert.channel
+enum AlertChannel {
+  TELEGRAM
+  DISCORD
+}
+
+/// MoneyFlowEdge.actionType — 12 values.
+/// Spec §4 model 14 anchors this as "12 values per brief" without enumerating them.
+/// Smallest-reasonable-call: reuse the 8 TxLeg.kind values from spec §5 verbatim
+/// (NormalizedTx/TxLeg is spec-normative there), since MoneyFlowEdge records the same
+/// underlying value-movement events, plus 4 money-flow-specific additions the design
+/// text explicitly discusses (CEX deposit/withdrawal, and rotation-transfer framing
+/// used by ProfitRotationSignal/Money Flow page). See task-2-report.md.
+enum MoneyFlowActionType {
+  native_transfer
+  token_transfer
+  swap_leg
+  lp_add
+  lp_remove
+  bridge_deposit
+  bridge_withdrawal
+  contract_interaction
+  cex_deposit
+  cex_withdrawal
+  rotation_transfer
+  unknown
+}
+
+/// WalletGraphSearch.mode
+enum WalletGraphMode {
+  DIRECT
+  CAPITAL_FLOW
+  ENTITY_DISCOVERY
+  FULL_RAW
+}
+
+/// WalletGraphSearch.status
+enum WalletGraphSearchStatus {
+  queued
+  running
+  done
+  failed
+  truncated
+}
+
+/// WalletGraphNode.nodeType
+enum WalletGraphNodeType {
+  WALLET
+  BRIDGE
+  CEX
+  ROUTER
+  POOL
+  TOKEN_CONTRACT
+  CONTRACT
+  UNKNOWN
+}
+
+/// WalletGraphEdge.relationship — 13 values.
+/// Spec §4 model 20 anchors this as "13 values per brief" without enumerating them.
+/// Smallest-reasonable-call: relationship *verbs* consistent with the BFS/clustering
+/// text in spec §6 (direct transfer, funding source, gas funder, bridge/CEX/router/pool
+/// counterparties, swap counterparty, rotation path, entity-cluster link) plus an
+/// unknown/other fallback. Distinct in kind from WalletGraphNodeType (node kind) and
+/// AddressRegistry.category (static address tagging) — this enum describes the edge's
+/// *relationship semantics*, not the counterparty's static category. See task-2-report.md.
+enum WalletGraphRelationship {
+  DIRECT_TRANSFER
+  FUNDING_SOURCE
+  GAS_FUNDER
+  BRIDGE_COUNTERPARTY
+  CEX_COUNTERPARTY
+  ROUTER_COUNTERPARTY
+  POOL_COUNTERPARTY
+  SWAP_COUNTERPARTY
+  TOKEN_CONTRACT_INTERACTION
+  CONTRACT_INTERACTION
+  ROTATION_PATH
+  ENTITY_CLUSTER_LINK
+  UNKNOWN
+}
+
+/// BacktestResult.horizon
+enum BacktestHorizon {
+  M15
+  H1
+  H6
+  H24
+  D3
+  D7
+}
+
+/// AddressRegistry.category
+enum AddressCategory {
+  CEX
+  BRIDGE
+  ROUTER
+  POOL
+  DEPLOYER
+  MIXER
+  TOKEN_CONTRACT
+}
+
+// ---------------------------------------------------------------------------
+// 1. Chain
+// ---------------------------------------------------------------------------
+
+model Chain {
+  id                  ChainId @id
+  name                String
+  nativeSymbol        String
+  explorerTxUrl       String
+  explorerAddressUrl  String
+
+  @@map("chains")
+}
+
+// ---------------------------------------------------------------------------
+// 2. Wallet
+// ---------------------------------------------------------------------------
+
+model Wallet {
+  id              String    @id @default(cuid())
+  address         String
+  chain           ChainId
+  firstSeenAt     DateTime
+  lastActiveAt    DateTime
+  isWatched       Boolean   @default(false)
+  isExcluded      Boolean   @default(false)
+  exclusionReason String?
+  notes           String?
+
+  stats           WalletStats[]
+  classifications WalletClassification[]
+  trades          WalletTokenTrade[]
+  clusterLinks    EntityClusterWallet[]
+  rotationsAsSource ProfitRotationSignal[] @relation("ProfitRotationSource")
+  rotationsAsDest   ProfitRotationSignal[] @relation("ProfitRotationDest")
+
+  @@unique([address, chain])
+  @@map("wallets")
+}
+
+// ---------------------------------------------------------------------------
+// 3. WalletStats
+// ---------------------------------------------------------------------------
+
+model WalletStats {
+  id                String      @id @default(cuid())
+  walletId          String
+  window            String // e.g. "30d" — fixed rolling-window label, not a bounded enum per spec §4.
+  pnlUsd            Decimal     @db.Decimal(20, 4)
+  realizedPnlUsd    Decimal     @db.Decimal(20, 4)
+  unrealizedPnlUsd  Decimal     @db.Decimal(20, 4)
+  winRate           Float
+  tradeCount        Int
+  avgTradeSizeUsd   Decimal     @db.Decimal(20, 4)
+  walletScore       Float
+  scoreComponents   Json
+  pnlConfidence     Float // 0-100
+  source            StatsSource
+  computedAt        DateTime
+
+  wallet            Wallet      @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
+  @@map("wallet_stats")
+}
+
+// ---------------------------------------------------------------------------
+// 4. WalletClassification
+// ---------------------------------------------------------------------------
+
+model WalletClassification {
+  id         String      @id @default(cuid())
+  walletId   String
+  label      WalletLabel
+  confidence Float
+  evidence   Json
+
+  wallet     Wallet      @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
+  @@map("wallet_classifications")
+}
+
+// ---------------------------------------------------------------------------
+// 5. Token
+// ---------------------------------------------------------------------------
+
+model Token {
+  id             String   @id @default(cuid())
+  chain          ChainId
+  address        String
+  symbol         String
+  name           String
+  decimals       Int
+  pairAddress    String?
+  dex            String?
+  firstSeenAt    DateTime
+  tokenCreatedAt DateTime?
+  website        String?
+  twitter        String?
+  telegram       String?
+  riskFlags      Json
+
+  marketSnapshots   TokenMarketSnapshot[]
+  trades            WalletTokenTrade[]
+  flowSnapshots     TokenFlowSnapshot[]
+  signals           Signal[]
+  alerts            Alert[]
+  sourceRotations   ProfitRotationSignal[] @relation("ProfitRotationSourceToken")
+  destRotations     ProfitRotationSignal[] @relation("ProfitRotationDestToken")
+
+  @@unique([chain, address])
+  @@map("tokens")
+}
+
+// ---------------------------------------------------------------------------
+// 6. TokenMarketSnapshot
+// ---------------------------------------------------------------------------
+
+model TokenMarketSnapshot {
+  id             String   @id @default(cuid())
+  tokenId        String
+  ts             DateTime
+  priceUsd       Decimal  @db.Decimal(24, 12)
+  marketCapUsd   Decimal  @db.Decimal(20, 4)
+  fdvUsd         Decimal  @db.Decimal(20, 4)
+  liquidityUsd   Decimal  @db.Decimal(20, 4)
+  vol5m          Decimal  @db.Decimal(20, 4)
+  vol1h          Decimal  @db.Decimal(20, 4)
+  vol6h          Decimal  @db.Decimal(20, 4)
+  vol24h         Decimal  @db.Decimal(20, 4)
+  holderCount    Int
+
+  token          Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([tokenId, ts])
+  @@map("token_market_snapshots")
+}
+
+// ---------------------------------------------------------------------------
+// 7. WalletTokenTrade
+// ---------------------------------------------------------------------------
+
+model WalletTokenTrade {
+  id                 String      @id @default(cuid())
+  walletId           String
+  tokenId            String
+  chain              ChainId
+  action             TradeAction
+  amountToken        Decimal     @db.Decimal(38, 18)
+  amountUsd           Decimal     @db.Decimal(20, 4)
+  txHash             String
+  blockOrSlot        BigInt
+  ts                 DateTime
+  priceUsd           Decimal     @db.Decimal(24, 12)
+  marketCapAtTrade   Decimal     @db.Decimal(20, 4)
+  walletScoreAtTime  Float
+  entityClusterId    String?
+  provider           String
+
+  wallet             Wallet        @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  token              Token         @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  entityCluster      EntityCluster? @relation(fields: [entityClusterId], references: [id])
+
+  @@unique([chain, txHash, walletId, tokenId, action])
+  @@index([walletId])
+  @@index([tokenId])
+  @@index([entityClusterId])
+  @@map("wallet_token_trades")
+}
+
+// ---------------------------------------------------------------------------
+// 8. TokenFlowSnapshot
+// ---------------------------------------------------------------------------
+
+model TokenFlowSnapshot {
+  id                          String           @id @default(cuid())
+  tokenId                     String
+  ts                          DateTime
+  windowMinutes               Int
+  flowScore                   Float
+  smartWalletCount            Int
+  humanLikeCount              Int
+  possibleBotCount            Int
+  uniqueEntityCount           Int
+  clusterAdjustedWalletCount  Int
+  entityConcentrationRisk     Float
+  trackedBuyVolumeUsd         Decimal          @db.Decimal(20, 4)
+  trackedSellVolumeUsd        Decimal          @db.Decimal(20, 4)
+  netFlowUsd                  Decimal          @db.Decimal(20, 4)
+  buySellRatio                Float
+  avgEntryMcap                Decimal          @db.Decimal(20, 4)
+  currentMcap                 Decimal          @db.Decimal(20, 4)
+  mcapExpansionFromAvgEntry   Float
+  holdersGrowth                Float
+  liquidityChange              Float
+  signalStatus                FlowSignalStatus
+  componentBreakdown           Json
+
+  token                        Token            @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([tokenId, ts])
+  @@index([flowScore])
+  @@map("token_flow_snapshots")
+}
+
+// ---------------------------------------------------------------------------
+// 9. Signal
+// ---------------------------------------------------------------------------
+
+model Signal {
+  id                String         @id @default(cuid())
+  tokenId           String
+  rule              SignalRule
+  severity          SignalSeverity
+  triggeredAt       DateTime
+  reasons           Json
+  walletCount       Int
+  uniqueEntityCount Int
+  netFlowUsd        Decimal        @db.Decimal(20, 4)
+  mcapAtTrigger     Decimal        @db.Decimal(20, 4)
+  status            String
+
+  token             Token            @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  alerts            Alert[]
+  backtestResults   BacktestResult[]
+
+  @@index([severity, triggeredAt])
+  @@index([tokenId])
+  @@map("signals")
+}
+
+// ---------------------------------------------------------------------------
+// 10. Alert
+// ---------------------------------------------------------------------------
+
+model Alert {
+  id             String       @id @default(cuid())
+  signalId       String?
+  type           AlertType
+  channel        AlertChannel
+  tokenId        String?
+  rule           SignalRule?
+  sentAt         DateTime
+  payload        Json
+  deliveryStatus String
+  error          String?
+
+  signal         Signal?      @relation(fields: [signalId], references: [id])
+  token          Token?       @relation(fields: [tokenId], references: [id])
+
+  @@index([tokenId, rule, sentAt])
+  @@map("alerts")
+}
+
+// ---------------------------------------------------------------------------
+// 11. ProviderSyncState
+// ---------------------------------------------------------------------------
+
+model ProviderSyncState {
+  id           String   @id @default(cuid())
+  provider     String
+  chain        ChainId
+  scope        String // wallet address | "market" | token identifier
+  cursor       String?
+  lastSyncAt   DateTime?
+  lastError    String?
+  failCount    Int      @default(0)
+
+  @@unique([provider, chain, scope])
+  @@map("provider_sync_states")
+}
+
+// ---------------------------------------------------------------------------
+// 12. Settings
+// ---------------------------------------------------------------------------
+
+model Settings {
+  id        String   @id @default(cuid())
+  values    Json // Zod-validated Json of all thresholds (spec §7 defaults)
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+// ---------------------------------------------------------------------------
+// 13. ImportJob
+// ---------------------------------------------------------------------------
+
+model ImportJob {
+  id         String    @id @default(cuid())
+  filename   String
+  status     String
+  totalRows  Int
+  okRows     Int
+  errorRows  Int
+  errors     Json
+  createdAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@map("import_jobs")
+}
+
+// ---------------------------------------------------------------------------
+// 14. MoneyFlowEdge
+// ---------------------------------------------------------------------------
+
+model MoneyFlowEdge {
+  id                 String              @id @default(cuid())
+  sourceAddress      String
+  destinationAddress String
+  sourceChain        ChainId
+  destinationChain   ChainId
+  asset              String
+  amountToken        Decimal             @db.Decimal(38, 18)
+  amountUsd          Decimal             @db.Decimal(20, 4)
+  ts                 DateTime
+  txHash             String
+  actionType         MoneyFlowActionType
+  bridgeProtocol     String?
+  confidence         Float
+  providerSource     String
+  metadata           Json
+
+  @@index([sourceAddress, ts])
+  @@index([destinationAddress, ts])
+  @@index([txHash])
+  @@index([sourceChain, ts])
+  @@map("money_flow_edges")
+}
+
+// ---------------------------------------------------------------------------
+// 15. EntityCluster
+// ---------------------------------------------------------------------------
+
+model EntityCluster {
+  id                String   @id @default(cuid())
+  confidence        Float
+  walletCount       Int
+  total30dPnlUsd    Decimal  @db.Decimal(20, 4)
+  chains            ChainId[]
+  evidence          Json
+  mainFundingSource String?
+  updatedAt         DateTime @updatedAt
+
+  wallets           EntityClusterWallet[]
+  trades            WalletTokenTrade[]
+
+  @@map("entity_clusters")
+}
+
+// ---------------------------------------------------------------------------
+// 16. EntityClusterWallet
+// ---------------------------------------------------------------------------
+
+model EntityClusterWallet {
+  id             String        @id @default(cuid())
+  clusterId      String
+  walletId       String
+  linkConfidence Float
+  evidence       Json
+
+  cluster        EntityCluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  wallet         Wallet        @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([clusterId, walletId])
+  @@map("entity_cluster_wallets")
+}
+
+// ---------------------------------------------------------------------------
+// 17. ProfitRotationSignal
+// ---------------------------------------------------------------------------
+
+model ProfitRotationSignal {
+  id                    String   @id @default(cuid())
+  sourceWalletId        String
+  destWalletId          String
+  sourceTokenId         String
+  destTokenId           String
+  realizedProfitUsd     Decimal  @db.Decimal(20, 4)
+  transferredValueUsd   Decimal  @db.Decimal(20, 4)
+  chainPath             ChainId[]
+  timeGapMin            Float
+  confidence            Float
+  detectedAt            DateTime
+  destTokenMcapAtBuy    Decimal  @db.Decimal(20, 4)
+  currentDestPerfPct    Float
+
+  sourceWallet          Wallet @relation("ProfitRotationSource", fields: [sourceWalletId], references: [id], onDelete: Cascade)
+  destWallet            Wallet @relation("ProfitRotationDest", fields: [destWalletId], references: [id], onDelete: Cascade)
+  sourceToken           Token  @relation("ProfitRotationSourceToken", fields: [sourceTokenId], references: [id], onDelete: Cascade)
+  destToken             Token  @relation("ProfitRotationDestToken", fields: [destTokenId], references: [id], onDelete: Cascade)
+
+  @@index([sourceWalletId])
+  @@index([destWalletId])
+  @@map("profit_rotation_signals")
+}
+
+// ---------------------------------------------------------------------------
+// 18. WalletGraphSearch
+// ---------------------------------------------------------------------------
+
+model WalletGraphSearch {
+  id           String                  @id @default(cuid())
+  rootAddress  String
+  chain        ChainId
+  mode         WalletGraphMode
+  params       Json
+  status       WalletGraphSearchStatus
+  nodeCount    Int
+  edgeCount    Int
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  error        String?
+
+  nodes        WalletGraphNode[]
+  edges        WalletGraphEdge[]
+
+  @@map("wallet_graph_searches")
+}
+
+// ---------------------------------------------------------------------------
+// 19. WalletGraphNode
+// ---------------------------------------------------------------------------
+
+model WalletGraphNode {
+  id                String              @id @default(cuid())
+  searchId          String
+  address           String
+  depth             Int
+  nodeType          WalletGraphNodeType
+  totalSentUsd      Decimal             @db.Decimal(20, 4)
+  totalReceivedUsd  Decimal             @db.Decimal(20, 4)
+  netFlowUsd        Decimal             @db.Decimal(20, 4)
+  interactionCount  Int
+  firstSeen         DateTime
+  lastSeen          DateTime
+  tags              String[]
+  confidence        Float
+
+  search            WalletGraphSearch @relation(fields: [searchId], references: [id], onDelete: Cascade)
+
+  @@unique([searchId, address])
+  @@map("wallet_graph_nodes")
+}
+
+// ---------------------------------------------------------------------------
+// 20. WalletGraphEdge
+// ---------------------------------------------------------------------------
+
+model WalletGraphEdge {
+  id              String                  @id @default(cuid())
+  searchId        String
+  sourceAddress   String
+  destAddress     String
+  relationship    WalletGraphRelationship
+  totalUsd        Decimal                 @db.Decimal(20, 4)
+  txCount         Int
+  firstTs         DateTime
+  lastTs          DateTime
+  sampleTxHashes  String[]
+
+  search          WalletGraphSearch @relation(fields: [searchId], references: [id], onDelete: Cascade)
+
+  @@index([searchId])
+  @@map("wallet_graph_edges")
+}
+
+// ---------------------------------------------------------------------------
+// 21. BacktestResult
+// ---------------------------------------------------------------------------
+
+model BacktestResult {
+  id                    String          @id @default(cuid())
+  signalId              String
+  horizon               BacktestHorizon
+  maxUpsidePct          Float
+  maxDrawdownPct        Float
+  roiPct                Float
+  timeTo2xMin           Float?
+  timeTo5xMin           Float?
+  timeTo10xMin          Float?
+  smartExitedBeforeDump Boolean?
+  notes                 String?
+
+  signal                Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@unique([signalId, horizon])
+  @@map("backtest_results")
+}
+
+// ---------------------------------------------------------------------------
+// 22. AddressRegistry
+// ---------------------------------------------------------------------------
+
+model AddressRegistry {
+  id           String          @id @default(cuid())
+  chain        ChainId
+  address      String
+  category     AddressCategory
+  label        String
+  source       String
+  doNotExpand  Boolean         @default(true)
+
+  @@unique([chain, address])
+  @@map("address_registry")
+}
