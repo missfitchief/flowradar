@@ -1,5 +1,8 @@
 import { parseSettings } from '@flowradar/core';
 import { prisma } from '@/lib/db';
+
+// DB-backed dashboard — must render per-request, never freeze at build time.
+export const dynamic = 'force-dynamic';
 import { LeaderboardTable } from '@/components/wallets/LeaderboardTable';
 import type {
   LeaderboardChain,

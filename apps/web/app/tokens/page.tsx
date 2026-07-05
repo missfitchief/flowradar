@@ -1,5 +1,8 @@
 import Link from 'next/link';
 import { prisma } from '@/lib/db';
+
+// DB-backed dashboard — must render per-request, never freeze at build time.
+export const dynamic = 'force-dynamic';
 import { Badge } from '@/components/ui/badge';
 import {
   Table,

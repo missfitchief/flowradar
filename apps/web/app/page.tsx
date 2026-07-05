@@ -3,6 +3,9 @@ import { AutoRefresh } from '@/components/AutoRefresh';
 import { HotTokensTable } from '@/components/tokens/HotTokensTable';
 import type { HotTokenRow } from '@/components/tokens/HotTokensTable';
 
+// DB-backed dashboard — must render per-request, never freeze at build time.
+export const dynamic = 'force-dynamic';
+
 // Overview page — spec §8 item 1: hot tokens table sorted by FlowScore desc,
 // 30s poll (via <AutoRefresh>, which just calls router.refresh() on an
 // interval — this server component re-runs its query on every refresh).
