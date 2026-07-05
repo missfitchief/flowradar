@@ -12,7 +12,7 @@ import type { TokenWindowAggregate } from '../src/types';
 // HIGH conditions (all must hold, on top of count >= minWallets):
 //   buyVol >= minBuyVolumeUsd (25000)
 //   netFlow > 0
-//   soldPct < maxSoldPct (30)              [soldPct = sellVol/buyVol * 100]
+//   soldPct < maxSoldPct (30)              [soldPct = % of buyers with sellUsd > 0]
 //   mcap in [mcapMin, mcapMax] = [100000, 5000000]
 //   liq >= minLiquidityUsd (20000)
 //   tokenAgeDays < maxTokenAgeDays (7) OR inflowSpike
@@ -50,11 +50,23 @@ function makeAggregate(overrides: Partial<TokenWindowAggregate> = {}): TokenWind
 
 /** A fixture that satisfies every single HIGH-tier condition at smartWalletCount 20. */
 function makeAllHighConditionsAggregate(smartWalletCount: number): TokenWindowAggregate {
+  // Create 20 buyers: 4 with sellUsd > 0 (20% sold) < maxSoldPct (30)
+  const buyers = Array.from({ length: 20 }, (_, i) => ({
+    walletId: `w${i}`,
+    walletScore: 60,
+    labels: [],
+    buyUsd: 1500,
+    sellUsd: i < 4 ? 150 : 0, // First 4 have sold; rest have not
+    firstBuyTs: new Date('2026-07-05T00:05:00Z'),
+    blockOrSlot: BigInt(i)
+  }));
+
   return makeAggregate({
     smartWalletCount,
+    buyers,
     trackedBuyVolumeUsd: 30000, // >= minBuyVolumeUsd (25000)
-    trackedSellVolumeUsd: 3000, // soldPct = 3000/30000*100 = 10% < maxSoldPct (30)
-    netFlowUsd: 27000, // > 0
+    trackedSellVolumeUsd: 600, // realistic but load-bearing for rule A
+    netFlowUsd: 29400, // > 0
     currentMcap: 2000000, // within [100000, 5000000]
     liquidityUsd: 50000, // >= minLiquidityUsd (20000)
     tokenAgeDays: 2, // < maxTokenAgeDays (7)
@@ -105,11 +117,12 @@ describe('ruleA (tiered)', () => {
     expect(result.severity).toBe('HIGH');
   });
 
-  it('31% sold -> WATCH not HIGH (soldPct above maxSoldPct=30)', () => {
+  it('35% of buyers have sold -> WATCH not HIGH (soldPct above maxSoldPct=30)', () => {
     const agg = makeAllHighConditionsAggregate(20);
-    agg.trackedBuyVolumeUsd = 30000;
-    agg.trackedSellVolumeUsd = 9300; // 9300/30000*100 = 31%
-    agg.netFlowUsd = 30000 - 9300;
+    // Modify buyers: 7 out of 20 with sellUsd > 0 = 35% > maxSoldPct (30)
+    for (let i = 0; i < agg.buyers.length; i++) {
+      agg.buyers[i].sellUsd = i < 7 ? 150 : 0;
+    }
 
     const result = ruleA(agg, DEFAULT_SETTINGS);
 
@@ -158,15 +171,6 @@ describe('ruleA (tiered)', () => {
 
   it('metrics include rawWalletCount, uniqueEntityCount, largestClusterSize, and the volume/mcap inputs used', () => {
     const agg = makeAllHighConditionsAggregate(20);
-    agg.buyers = Array.from({ length: 20 }, (_, i) => ({
-      walletId: `w${i}`,
-      walletScore: 60,
-      labels: [],
-      buyUsd: 1500,
-      sellUsd: 150,
-      firstBuyTs: new Date('2026-07-05T00:05:00Z'),
-      blockOrSlot: BigInt(i)
-    }));
     agg.uniqueEntityCount = 15;
     agg.largestClusterSize = 3;
 

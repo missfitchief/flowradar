@@ -18,12 +18,9 @@
 //     liquidityUsd     >= rules.A.minLiquidityUsd
 //     tokenAgeDays     <  rules.A.maxTokenAgeDays  OR  inflowSpike
 //
-// soldPct derivation: TokenWindowAggregate has no directly-named "sold
-// percentage" field. The natural derivation from the two volume fields the
-// aggregate DOES expose is soldPct = trackedSellVolumeUsd /
-// trackedBuyVolumeUsd * 100 (0 when there is no tracked buy volume to divide
-// by) — this is a documented interpretation, not found verbatim elsewhere in
-// the spec/plan docs.
+// soldPct derivation: percentage of buyer WALLETS that have sold anything
+// (spec: "<30% of buyers have sold"). Computed as (buyers with sellUsd > 0) /
+// total buyers * 100. NOT a volume ratio of sellVol/buyVol.
 //
 // RuleResult.metrics carries rawWalletCount, uniqueEntityCount,
 // largestClusterSize (straight from the aggregate; clustering may not have
@@ -38,7 +35,8 @@ export const ruleA: Rule = (agg, settings) => {
 
   const buyVolumeUsd = agg.trackedBuyVolumeUsd;
   const sellVolumeUsd = agg.trackedSellVolumeUsd;
-  const soldPct = buyVolumeUsd > 0 ? (sellVolumeUsd / buyVolumeUsd) * 100 : 0;
+  // soldPct = share of buyer wallets that sold anything (spec: "<30% of buyers have sold") — NOT a volume ratio.
+  const soldPct = agg.buyers.length === 0 ? 0 : (agg.buyers.filter((b) => b.sellUsd > 0).length / agg.buyers.length) * 100;
   const mcapUsd = agg.currentMcap;
 
   const metrics: RuleResult['metrics'] = {
@@ -89,7 +87,7 @@ export const ruleA: Rule = (agg, settings) => {
       severity: 'HIGH',
       reasons: [
         `${count} smart/watched wallets bought >= HIGH floor of ${A.minWallets}.`,
-        `Buy volume $${buyVolumeUsd.toFixed(0)} >= $${A.minBuyVolumeUsd}, net flow positive, sold ${soldPct.toFixed(1)}% < ${A.maxSoldPct}% cap.`,
+        `Buy volume $${buyVolumeUsd.toFixed(0)} >= $${A.minBuyVolumeUsd}, net flow positive, ${soldPct.toFixed(1)}% of buyers have sold < ${A.maxSoldPct}% cap.`,
         `Mcap $${(mcapUsd ?? 0).toFixed(0)} within [$${A.mcapMin}, $${A.mcapMax}], liquidity $${(agg.liquidityUsd ?? 0).toFixed(0)} >= $${A.minLiquidityUsd}.`,
         agg.inflowSpike
           ? 'Inflow spike detected (age-or-spike condition satisfied via spike).'

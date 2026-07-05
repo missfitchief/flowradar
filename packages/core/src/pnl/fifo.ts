@@ -119,6 +119,7 @@ export function computeFifoPnl(trades: FifoTradeRow[], currentPriceUsd: number |
   if (anyOverSell) confidence -= 20;
   if (currentPriceUsd === null) confidence -= 15;
   if (tradeCount < 4) confidence -= 10;
+  // floor is conservative headroom — current penalties bottom out at 45; keep for future penalty additions.
   confidence = Math.max(10, confidence);
 
   return { realizedUsd, unrealizedUsd, winRate, tradeCount, confidence };
