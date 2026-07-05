@@ -359,6 +359,33 @@ Process: WebFetch official Helius docs (parsed transaction history + RPC). Imple
 - [ ] walletDiscovery + walletStatsRefresh jobs implemented (computed L2 PnL via `computeFifoPnl` over stored trades → WalletStats source=computed, CSV rows untouched).
 - [ ] Review checklist; fix biggest gap. Commit `chore: wave 4 gate`.
 
+# Wave 4.5 — External Smart Wallet Source Connectors (Spec §5b, added 2026-07-05)
+
+Executed after Task 30 (Wave 4 gate), before Wave 5 polish. Goal: FlowRadar bootstraps its wallet universe with ZERO user CSV and zero API keys (mock candidate source), with live connectors docs-verified or cleanly stubbed.
+
+### Task 34: Connector framework + schema + mock candidate source (TDD)
+
+**Files:** Modify `packages/db/prisma/schema.prisma` (+ migration `connectors`): `ExternalWalletSource` + `CandidateWallet` models per Spec §5b (CandidateWallet unique (walletAddress, chain, source); validationStatus enum pending|validating|promoted|rejected; promotedWalletId FK→Wallet nullable). Create `packages/providers/src/candidates/{types,mockSource}.ts` — `CandidateSourceProvider { name: string; chains: Chain[]; fetchCandidates(chain, opts: {limit?: number}): Promise<ExternalCandidate[]> }`, `ExternalCandidate = {walletAddress, chain, sourceRank?, claimedPnlUsd?, claimedWinRate?, claimedTradeCount?, claimedRoi?, metadata?}`; `MockCandidateSource` derives a deterministic leaderboard from the mock world (top ~30 wallets by scripted profitability) PLUS poisoned entries that MUST later fail validation: 2 router/CEX addresses from the registry, 2 possible_bot wallets, 1 wallet below thresholds. Create `apps/worker/src/jobs/externalWalletSource.ts` (iterate enabled ExternalWalletSource rows → resolve provider by name (mock mode ⇒ MockCandidateSource for all) → upsert CandidateWallets pending, dedupe on the unique tuple, update source lastSyncAt/status; per-source try/catch). Seed: create the 6 ExternalWalletSource rows (solana_tracker_pnl, birdeye_wallet_pnl, birdeye_top_traders, kolscan, gmgn_smart_money, cielo — enabled per settings, apiKeyEnvName filled, rateLimitPerMinute defaults).
+
+**Interfaces:** Produces CandidateSourceProvider + candidate job consumed by Task 35; settings gains `connectors: { sourcesEnabled: Record<string, boolean>, syncHours: 6, validationBatchSize: 100, topTraderBackfill: { mcapExpansionMin: 2, lookbackHours: 24, topN: 20 } }` (added to core SettingsSchema + DEFAULT_SETTINGS + tests, owned by this task).
+
+- [ ] TDD: mock source determinism + poisoned entries present; job dedupe (second run adds 0 rows); disabled source skipped; migration applies.
+- [ ] Root typecheck/test green. Commit `feat(connectors): candidate source framework, schema, mock leaderboard source (TDD)` + trailer.
+
+### Task 35: Candidate validation + promotion + top-trader backfill (TDD)
+
+**Files:** Create `packages/core/src/candidates/validate.ts` (pure: `evaluateCandidate(candidate, evidence: {pnl?: {pnl30d, realized, winRate, tradeCount, confidence}, registryCategory?: string, labels?: string[]}, settings) → {verdict: 'promote'|'reject'|'insufficient', confidence: 0–100, reason?}` — thresholds from settings.profitableWallet; auto-reject registryCategory in CEX/ROUTER/POOL/BRIDGE or labels containing possible_bot/mev/sniper-dominant; confidence blends claimed-vs-validated agreement), `apps/worker/src/jobs/{walletCandidateValidation,tokenTopTraderBackfill}.ts`. Validation job: pending candidates (batch from settings) → evidence: provider wallet-PnL capability if available else local `computeFifoPnl` over ingested trades else claimed-only (⇒ 'insufficient' stays pending with lastSeenAt bump, never promoted on claims alone unless claimed data meets thresholds AND source is a validator-grade source — NO: claims alone NEVER promote; document); promote ⇒ upsert Wallet (isWatched=true) + WalletStats(source 'provider' or 'computed') + WalletClassification, set promotedWalletId; reject ⇒ rejectionReason. Backfill job: tokens whose latest mcap ≥ settings multiple vs 24h-ago snapshot → provider topTraders capability (add `TokenTopTradersProvider.getTopTraders(chain, tokenAddress, {limit})` interface + mock impl from world buyers) → insert candidates source `birdeye_top_traders`.
+
+**Interfaces:** Consumes T34 framework. Produces promotion pipeline; **trust-boundary test (required):** insert an unvalidated CandidateWallet for a fresh address → run signal-engine aggregate → assert the address contributes NOTHING to smartWalletCount/uniqueEntityCount until promoted, then promote and assert it counts.
+
+- [ ] TDD (validate.ts fixture matrix: pass, each threshold-miss, registry reject, bot reject, insufficient-evidence hold). Job run in mock mode: poisoned candidates rejected with reasons, ≥20 promoted, counts logged. Root verify green. Commit `feat(connectors): validation + promotion pipeline, top-trader backfill (TDD)` + trailer.
+
+### Task 36: Live connector adapters (docs-verified or stubbed) + Source Health page
+
+**Files:** Create `packages/providers/src/candidates/{solanaTracker,birdeyeCandidates,kolscan,gmgn,cielo}.ts` — for each: WebFetch official docs first; implement only what docs verify (SolanaTracker top-PnL wallets, SOLANA_TRACKER_API_KEY; Birdeye wallet-PnL + token top-traders, BIRDEYE_API_KEY; Cielo, CIELO_API_KEY); KOLScan/GMGN: no hardcoded unofficial endpoints — typed stubs returning status 'stub' with TODO(provider) + configurable GMGN_API_BASE env respected when set. Missing key ⇒ ProviderStatus 'missing_key', source status reflects it. Create `apps/web/app/sources/page.tsx` + nav link — per-source rows (enabled toggle → PATCH /api/sources, status, lastSyncAt, candidates found/validated/promoted via CandidateWallet groupBy, last error) + README section (env vars table + trust rule).
+
+- [ ] Adapter mapper unit tests on fixture payloads for docs-verified adapters; page renders mock-mode counts; toggle persists. Root verify green. Commit `feat(connectors): live source adapters (verified-or-stubbed) + source health page` + trailer.
+
 # Wave 5 — Backtest + Polish + Done Bar (Spec Phases 11–12)
 
 ### Task 31: Backtest (TDD) + page

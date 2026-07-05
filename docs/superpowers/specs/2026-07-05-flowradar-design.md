@@ -113,6 +113,18 @@ WalletDiscoveryProvider.getCandidateWallets(chain, opts) → WalletCandidate[]  
 
 Per-provider token-bucket rate limiter + retry w/ exponential backoff (×3) + `ProviderSyncState` cursors and error log. One provider failing never crashes a worker loop.
 
+### 5b. External Smart Wallet Source Connectors (added 2026-07-05)
+
+FlowRadar bootstraps its own candidate wallet universe from external public/on-chain intelligence — no CSV required (CSV stays supported as `csv_import`). No exhaustive chain scanning: candidate FEEDERS only, in priority order: **Solana Tracker** PnL leaderboard (`solana_tracker_pnl`, primary Solana seed), **Birdeye** wallet-PnL as validator + token top-traders as source (`birdeye_wallet_pnl` / `birdeye_top_traders`), **KOLScan** leaderboard (`kolscan`, candidate-only until revalidated), **GMGN** smart-money (`gmgn_smart_money`, candidate + cross-check only; no hardcoded unofficial endpoints — configurable base URL, stub unless documented access), **Cielo** (`cielo`, optional).
+
+Models: `ExternalWalletSource` (name, type, enabled, chainSupport, apiKeyEnvName, rateLimitPerMinute, status, lastSyncAt, metadataJson) and `CandidateWallet` (walletAddress, chain, source, sourceRank, claimedPnlUsd/WinRate/TradeCount/Roi, firstSeenAt, lastSeenAt, validationStatus pending|validating|promoted|rejected, validationConfidence 0–100, promotedWalletId?, rejectionReason?; unique (walletAddress, chain, source)).
+
+Workers: `externalWalletSourceWorker` (pull candidates from enabled sources, dedupe, never promote blindly); `walletCandidateValidationWorker` (validate via provider wallet-PnL where available else local FIFO swap-PnL approximation; thresholds = settings.profitableWallet: pnl_30d ≥ 4000, trades ≥ 8, winRate ≥ 35%, realized ≥ 1000 where available; reject routers/pools/CEX/bridges/obvious bots via AddressRegistry + labels; promote passing candidates to tracked `Wallet` rows with WalletStats + isWatched); `tokenTopTraderBackfillWorker` (tokens with recent strong moves → top traders from supported providers → same validation path).
+
+UI: **Source Health page** (`/sources`) — per source: enabled, status, last sync, candidates found / validated / promoted, errors/rate-limit state.
+
+**Critical trust rule (test-enforced):** the live signal engine reads ONLY validated/promoted tracked wallets; `CandidateWallet` rows never influence counts, scores, or signals until promotion.
+
 ## 6. Core engine (pure functions, unit-tested)
 
 **WalletScore (0–100):** pnl 25%, winRate 15%, tradeCount 10%, humanLikelihood 15%, avgEntryQuality 10%, holdingQuality 10%, recentPerformance 15%; botPenalty up to −30; result × confidence multiplier (0.5–1.0 from pnlConfidence); clamp 0–100. Components stored in `scoreComponents`.
