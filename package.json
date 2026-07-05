@@ -1,0 +1,26 @@
+{
+  "name": "flowradar",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/web",
+    "worker": "npm run dev -w apps/worker",
+    "db:migrate": "npm run db:migrate -w packages/db",
+    "db:seed": "npm run db:seed -w packages/db",
+    "db:studio": "npm run db:studio -w packages/db",
+    "test": "vitest run",
+    "typecheck": "tsc -b apps/web apps/worker packages/core packages/db packages/providers",
+    "build": "npm run build -w apps/web",
+    "verify": "npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9",
+    "tsx": "^4.23.0"
+  }
+}

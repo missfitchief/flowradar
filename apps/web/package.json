@@ -1,0 +1,12 @@
+{
+  "name": "web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "dev": "node -e \"console.log('web scaffold arrives in Task 7')\"",
+    "build": "node -e \"console.log('web scaffold arrives in Task 7')\""
+  }
+}

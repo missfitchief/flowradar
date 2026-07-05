@@ -1,0 +1,14 @@
+{
+  "name": "@flowradar/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "db:migrate": "node -e \"console.log('db arrives in Task 2')\"",
+    "db:seed": "node -e \"console.log('db arrives in Task 2')\"",
+    "db:studio": "node -e \"console.log('db arrives in Task 2')\""
+  }
+}

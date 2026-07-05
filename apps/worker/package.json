@@ -1,0 +1,12 @@
+{
+  "name": "worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "dev": "node -e \"console.log('worker scaffold arrives in Task 5')\"",
+    "build": "tsc -b"
+  }
+}
