@@ -8,6 +8,8 @@
 //     Prisma-generated enums) so packages/core stays dependency-free of @prisma/client.
 //   - Spec §6 "Core engine" / §7 intervals table — scoring + interval shapes.
 
+import type { Settings } from './settings.js';
+
 // ---------------------------------------------------------------------------
 // Chain / trade / tx-leg vocabularies
 // ---------------------------------------------------------------------------
@@ -187,11 +189,12 @@ export interface RuleResult {
  * and rotationCandidates (rule F) — see Tasks 14, 23."
  */
 export interface FundingEvent {
-  fundedWalletId: string;
   funderWalletId: string;
+  fundedWalletId: string;
+  fundedAddressFresh: boolean;
   amountUsd: number;
   ts: Date;
-  fundedWalletPriorTxCount: number;
+  fundedFirstBuy?: { tokenId: string; usd: number; ts: Date; mcapAtBuy: number | null };
 }
 
 /** Candidate profit-rotation link (rule F: A exits X, B receives, B buys Y). */
@@ -214,21 +217,7 @@ export interface RuleExtras {
   rotationCandidates?: RotationCandidate[];
 }
 
-export type Rule = (agg: TokenWindowAggregate, settings: unknown, extra?: RuleExtras) => RuleResult;
-
-// ---------------------------------------------------------------------------
-// Scoring inputs
-// ---------------------------------------------------------------------------
-
-export interface WalletScore {
-  score: number;
-  components: Record<string, number>;
-}
-
-export interface FlowScore {
-  score: number;
-  components: Record<string, number>;
-}
+export type Rule = (agg: TokenWindowAggregate, settings: Settings, extra?: RuleExtras) => RuleResult;
 
 // ---------------------------------------------------------------------------
 // Cluster / link confidence
