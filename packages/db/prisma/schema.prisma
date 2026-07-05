@@ -514,6 +514,7 @@ model MoneyFlowEdge {
   providerSource     String
   metadata           Json
 
+  @@unique([txHash, sourceAddress, destinationAddress, actionType])
   @@index([sourceAddress, ts])
   @@index([destinationAddress, ts])
   @@index([txHash])

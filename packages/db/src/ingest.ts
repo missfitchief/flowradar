@@ -28,6 +28,7 @@
 // on a missing snapshot row.
 
 import type { PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import type { Chain, NormalizedTx, TokenMarket, TxLeg } from '@flowradar/core';
 
 const PROVIDER_SOURCE = 'mock';
@@ -384,13 +385,10 @@ interface EdgeWriteInput {
 }
 
 /**
- * MoneyFlowEdge has no unique constraint in schema (Task 5 brief decision 1
- * defines dedupe manually: skip when a row with the same
- * txHash+sourceAddress+destinationAddress+actionType already exists). A plain
- * findFirst-then-create is sufficient — every ingest call in this codebase
- * runs sequentially (jobs process one wallet/tx set at a time), so there is
- * no concurrent-write race on the same leg to guard against with a DB-level
- * constraint.
+ * MoneyFlowEdge dedup is now enforced by DB-level unique constraint
+ * (txHash, sourceAddress, destinationAddress, actionType). A direct create
+ * wrapped in try/catch swallows P2002 (unique violation), making re-ingest
+ * of the same edge a silent no-op.
  *
  * sourceChain/destinationChain are set to the same `chain` the caller passes
  * (the chain the leg's own NormalizedTx belongs to) — a bridge's two sides
@@ -402,40 +400,38 @@ interface EdgeWriteInput {
  */
 async function upsertMoneyFlowEdge(prisma: PrismaClient, input: EdgeWriteInput): Promise<void> {
   const { chain, tx, leg, actionType } = input;
-  const existing = await prisma.moneyFlowEdge.findFirst({
-    where: {
-      txHash: tx.txHash,
-      sourceAddress: leg.from,
-      destinationAddress: leg.to,
-      actionType
-    },
-    select: { id: true }
-  });
-  if (existing) return;
 
   const bridgeProtocol =
     (actionType === 'bridge_deposit' || actionType === 'bridge_withdrawal') && leg.programOrContract
       ? leg.programOrContract
       : null;
 
-  await prisma.moneyFlowEdge.create({
-    data: {
-      sourceAddress: leg.from,
-      destinationAddress: leg.to,
-      sourceChain: chain,
-      destinationChain: chain,
-      asset: leg.asset.symbol,
-      amountToken: Number(leg.amountToken),
-      amountUsd: leg.amountUsd ?? 0,
-      ts: tx.ts,
-      txHash: tx.txHash,
-      actionType,
-      bridgeProtocol,
-      confidence: 100,
-      providerSource: PROVIDER_SOURCE,
-      metadata: {}
+  try {
+    await prisma.moneyFlowEdge.create({
+      data: {
+        sourceAddress: leg.from,
+        destinationAddress: leg.to,
+        sourceChain: chain,
+        destinationChain: chain,
+        asset: leg.asset.symbol,
+        amountToken: Number(leg.amountToken),
+        amountUsd: leg.amountUsd ?? 0,
+        ts: tx.ts,
+        txHash: tx.txHash,
+        actionType,
+        bridgeProtocol,
+        confidence: 100,
+        providerSource: PROVIDER_SOURCE,
+        metadata: {}
+      }
+    });
+  } catch (error) {
+    // dedupe enforced by DB unique; P2002 = already ingested
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      return;
     }
-  });
+    throw error;
+  }
 }
 
 async function latestMarketCapUsd(prisma: PrismaClient, tokenId: string): Promise<number> {
