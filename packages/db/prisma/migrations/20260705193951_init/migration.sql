@@ -5,7 +5,7 @@ CREATE TYPE "ChainId" AS ENUM ('SOLANA', 'BSC');
 CREATE TYPE "StatsSource" AS ENUM ('csv', 'computed', 'provider');
 
 -- CreateEnum
-CREATE TYPE "WalletLabel" AS ENUM ('human_like', 'smart_money', 'whale', 'bot', 'sniper', 'fresh_wallet', 'insider_like', 'market_maker', 'cex_related', 'developer', 'unknown');
+CREATE TYPE "WalletLabel" AS ENUM ('human_like', 'smart_money', 'whale', 'possible_bot', 'sniper', 'mev', 'deployer_related', 'copy_trader', 'cex_related', 'bridge_related', 'unknown');
 
 -- CreateEnum
 CREATE TYPE "TradeAction" AS ENUM ('BUY', 'SELL', 'TRANSFER_IN', 'TRANSFER_OUT', 'LP_ADD', 'LP_REMOVE');
@@ -26,7 +26,7 @@ CREATE TYPE "AlertType" AS ENUM ('SIGNAL', 'ROTATION', 'WALLET_GRAPH', 'TEST');
 CREATE TYPE "AlertChannel" AS ENUM ('TELEGRAM', 'DISCORD');
 
 -- CreateEnum
-CREATE TYPE "MoneyFlowActionType" AS ENUM ('native_transfer', 'token_transfer', 'swap_leg', 'lp_add', 'lp_remove', 'bridge_deposit', 'bridge_withdrawal', 'contract_interaction', 'cex_deposit', 'cex_withdrawal', 'rotation_transfer', 'unknown');
+CREATE TYPE "MoneyFlowActionType" AS ENUM ('transfer', 'swap', 'bridge_deposit', 'bridge_withdrawal', 'cex_deposit', 'cex_withdrawal', 'dex_buy', 'dex_sell', 'lp_add', 'lp_remove', 'contract_interaction');
 
 -- CreateEnum
 CREATE TYPE "WalletGraphMode" AS ENUM ('DIRECT', 'CAPITAL_FLOW', 'ENTITY_DISCOVERY', 'FULL_RAW');
@@ -38,7 +38,7 @@ CREATE TYPE "WalletGraphSearchStatus" AS ENUM ('queued', 'running', 'done', 'fai
 CREATE TYPE "WalletGraphNodeType" AS ENUM ('WALLET', 'BRIDGE', 'CEX', 'ROUTER', 'POOL', 'TOKEN_CONTRACT', 'CONTRACT', 'UNKNOWN');
 
 -- CreateEnum
-CREATE TYPE "WalletGraphRelationship" AS ENUM ('DIRECT_TRANSFER', 'FUNDING_SOURCE', 'GAS_FUNDER', 'BRIDGE_COUNTERPARTY', 'CEX_COUNTERPARTY', 'ROUTER_COUNTERPARTY', 'POOL_COUNTERPARTY', 'SWAP_COUNTERPARTY', 'TOKEN_CONTRACT_INTERACTION', 'CONTRACT_INTERACTION', 'ROTATION_PATH', 'ENTITY_CLUSTER_LINK', 'UNKNOWN');
+CREATE TYPE "WalletGraphRelationship" AS ENUM ('direct_transfer', 'native_transfer', 'token_transfer', 'stablecoin_transfer', 'bridge_deposit', 'bridge_withdrawal', 'cex_deposit', 'cex_withdrawal', 'swap_router_interaction', 'lp_interaction', 'contract_interaction', 'deployer_interaction', 'unknown');
 
 -- CreateEnum
 CREATE TYPE "BacktestHorizon" AS ENUM ('M15', 'H1', 'H6', 'H24', 'D3', 'D7');

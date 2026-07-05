@@ -39,24 +39,18 @@ enum StatsSource {
 }
 
 /// WalletClassification.label — 11 values.
-/// Spec §4 model 4 anchors this list as "human_like … unknown, 11 values per brief";
-/// the brief's full list is not present in this repo. Smallest-reasonable-call: the
-/// endpoints plus every classification term the design spec itself uses elsewhere
-/// (smart_money / bot / sniper / whale / cex-related wallets / fresh-wallet funding /
-/// "insider-like" tokens / AddressRegistry's DEPLOYER category), padded to 11 with two
-/// low-risk, commonly-needed adjacent categories (market_maker, developer) that later
-/// tasks can rely on without a schema change. See task-2-report.md for the full record.
+/// vocabulary fixed by product brief (Modules 1/5/6)
 enum WalletLabel {
   human_like
   smart_money
   whale
-  bot
+  possible_bot
   sniper
-  fresh_wallet
-  insider_like
-  market_maker
+  mev
+  deployer_related
+  copy_trader
   cex_related
-  developer
+  bridge_related
   unknown
 }
 
@@ -112,26 +106,20 @@ enum AlertChannel {
   DISCORD
 }
 
-/// MoneyFlowEdge.actionType — 12 values.
-/// Spec §4 model 14 anchors this as "12 values per brief" without enumerating them.
-/// Smallest-reasonable-call: reuse the 8 TxLeg.kind values from spec §5 verbatim
-/// (NormalizedTx/TxLeg is spec-normative there), since MoneyFlowEdge records the same
-/// underlying value-movement events, plus 4 money-flow-specific additions the design
-/// text explicitly discusses (CEX deposit/withdrawal, and rotation-transfer framing
-/// used by ProfitRotationSignal/Money Flow page). See task-2-report.md.
+/// MoneyFlowEdge.actionType — 11 values.
+/// vocabulary fixed by product brief (Modules 1/5/6)
 enum MoneyFlowActionType {
-  native_transfer
-  token_transfer
-  swap_leg
-  lp_add
-  lp_remove
+  transfer
+  swap
   bridge_deposit
   bridge_withdrawal
-  contract_interaction
   cex_deposit
   cex_withdrawal
-  rotation_transfer
-  unknown
+  dex_buy
+  dex_sell
+  lp_add
+  lp_remove
+  contract_interaction
 }
 
 /// WalletGraphSearch.mode
@@ -164,27 +152,21 @@ enum WalletGraphNodeType {
 }
 
 /// WalletGraphEdge.relationship — 13 values.
-/// Spec §4 model 20 anchors this as "13 values per brief" without enumerating them.
-/// Smallest-reasonable-call: relationship *verbs* consistent with the BFS/clustering
-/// text in spec §6 (direct transfer, funding source, gas funder, bridge/CEX/router/pool
-/// counterparties, swap counterparty, rotation path, entity-cluster link) plus an
-/// unknown/other fallback. Distinct in kind from WalletGraphNodeType (node kind) and
-/// AddressRegistry.category (static address tagging) — this enum describes the edge's
-/// *relationship semantics*, not the counterparty's static category. See task-2-report.md.
+/// vocabulary fixed by product brief (Modules 1/5/6)
 enum WalletGraphRelationship {
-  DIRECT_TRANSFER
-  FUNDING_SOURCE
-  GAS_FUNDER
-  BRIDGE_COUNTERPARTY
-  CEX_COUNTERPARTY
-  ROUTER_COUNTERPARTY
-  POOL_COUNTERPARTY
-  SWAP_COUNTERPARTY
-  TOKEN_CONTRACT_INTERACTION
-  CONTRACT_INTERACTION
-  ROTATION_PATH
-  ENTITY_CLUSTER_LINK
-  UNKNOWN
+  direct_transfer
+  native_transfer
+  token_transfer
+  stablecoin_transfer
+  bridge_deposit
+  bridge_withdrawal
+  cex_deposit
+  cex_withdrawal
+  swap_router_interaction
+  lp_interaction
+  contract_interaction
+  deployer_interaction
+  unknown
 }
 
 /// BacktestResult.horizon
@@ -358,7 +340,7 @@ model WalletTokenTrade {
   chain              ChainId
   action             TradeAction
   amountToken        Decimal     @db.Decimal(38, 18)
-  amountUsd           Decimal     @db.Decimal(20, 4)
+  amountUsd          Decimal     @db.Decimal(20, 4)
   txHash             String
   blockOrSlot        BigInt
   ts                 DateTime
@@ -368,8 +350,8 @@ model WalletTokenTrade {
   entityClusterId    String?
   provider           String
 
-  wallet             Wallet        @relation(fields: [walletId], references: [id], onDelete: Cascade)
-  token              Token         @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  wallet             Wallet         @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  token              Token          @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   entityCluster      EntityCluster? @relation(fields: [entityClusterId], references: [id])
 
   @@unique([chain, txHash, walletId, tokenId, action])
