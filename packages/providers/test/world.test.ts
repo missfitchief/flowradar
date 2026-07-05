@@ -61,7 +61,7 @@ describe('createMockWorld determinism', () => {
     expect(serializeWorld(w1)).toBe(serializeWorld(w2));
   });
 
-  it('never reads Date.now() or Math.random() (deterministic across process time)', () => {
+  it('determinism holds across repeated construction (structural proxy for no wall-clock/random reads)', () => {
     // Build the world "at two different wall-clock instants" (there is no
     // literal way to fake process time without vi.useFakeTimers affecting
     // Date.now, so instead we assert structurally: content must not depend

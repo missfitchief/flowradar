@@ -552,12 +552,13 @@ function buildGraphDemo(builder: WorldBuilder, rng: Rng): GraphDemoHandle {
   makeSimpleTx(builder, {
     chain: 'SOLANA',
     ts: new Date(t0.getTime() + 30 * MIN_MS),
-    kind: 'cex_deposit' as never, // MoneyFlowActionType value; TxLeg kind stays token_transfer-shaped below
+    kind: 'token_transfer',
     from: root.address,
     to: cex.address,
     asset: { symbol: 'SOL', decimals: 9 },
     amountToken: '10',
-    amountUsd: 1500
+    amountUsd: 1500,
+    programOrContract: 'CEX'
   });
   makeSimpleTx(builder, {
     chain: 'SOLANA',
