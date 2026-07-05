@@ -16,6 +16,7 @@
     "db:studio": "tsx ../../scripts/db-local.ts ensure && prisma studio"
   },
   "dependencies": {
+    "@flowradar/core": "*",
     "@prisma/client": "^6.19.2",
     "dotenv": "^17.4.2",
     "embedded-postgres": "^16.14.0-beta.17",
