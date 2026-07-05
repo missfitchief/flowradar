@@ -6,8 +6,8 @@
 // 300s) — Spec §7's hot/normal tiering, so actively-flowing tokens get
 // fresher price/liquidity data than quiet ones.
 
-import type { JobContext } from '../context.js';
-import { refreshMarketForTokens, partitionTokensByLatestFlowScore } from './marketDataShared.js';
+import type { JobContext } from '../context';
+import { refreshMarketForTokens, partitionTokensByLatestFlowScore } from './marketDataShared';
 
 const HOT_THRESHOLD = 50;
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createMockWorld } from '../src/mock/world.js';
-import type { MockWorld } from '../src/mock/world.js';
-import { GRAPH_DEMO_ROOT_ADDRESS } from '../src/mock/scenarios.js';
+import { createMockWorld } from '../src/mock/world';
+import type { MockWorld } from '../src/mock/world';
+import { GRAPH_DEMO_ROOT_ADDRESS } from '../src/mock/scenarios';
 import type { NormalizedTx, TxLeg } from '@flowradar/core';
 
 const GENESIS = new Date('2026-07-05T00:00:00Z');

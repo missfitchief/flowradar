@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeWalletScore } from '../src/scoring/walletScore.js';
+import { computeWalletScore } from '../src/scoring/walletScore';
 
 describe('computeWalletScore', () => {
   it('strong fixture scores >75 (expected ~86)', () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createMockWorld } from '../src/mock/world.js';
-import { MockProvider } from '../src/mock/provider.js';
+import { createMockWorld } from '../src/mock/world';
+import { MockProvider } from '../src/mock/provider';
 
 const GENESIS = new Date('2026-07-05T00:00:00Z');
 const SEED = 20260705;

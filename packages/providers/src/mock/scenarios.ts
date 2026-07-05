@@ -12,11 +12,11 @@
 // the world stays robust to small implementation-detail changes elsewhere.
 
 import type { Chain, NormalizedTx, RiskReport, WalletLabel } from '@flowradar/core';
-import type { Rng } from './prng.js';
-import { mixSeed, mulberry32, rngFloat, rngInt } from './prng.js';
-import { fakeBscAddress, fakeSolanaAddress } from './address.js';
-import { generateBaselineMarketSeries, makeSimpleTx, HOUR_MS, MIN_MS } from './world.js';
-import type { MockToken, MockWallet, WorldBuilder } from './world.js';
+import type { Rng } from './prng';
+import { mixSeed, mulberry32, rngFloat, rngInt } from './prng';
+import { fakeBscAddress, fakeSolanaAddress } from './address';
+import { generateBaselineMarketSeries, makeSimpleTx, HOUR_MS, MIN_MS } from './world';
+import type { MockToken, MockWallet, WorldBuilder } from './world';
 
 // ---------------------------------------------------------------------------
 // Public handles

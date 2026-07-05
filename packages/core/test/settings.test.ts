@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_SETTINGS, SettingsSchema, parseSettings } from '../src/settings.js';
+import { DEFAULT_SETTINGS, SettingsSchema, parseSettings } from '../src/settings';
 
 describe('SettingsSchema / DEFAULT_SETTINGS / parseSettings', () => {
   it('DEFAULT_SETTINGS parses through SettingsSchema', () => {

@@ -8,7 +8,7 @@
 //     Prisma-generated enums) so packages/core stays dependency-free of @prisma/client.
 //   - Spec §6 "Core engine" / §7 intervals table — scoring + interval shapes.
 
-import type { Settings } from './settings.js';
+import type { Settings } from './settings';
 
 // ---------------------------------------------------------------------------
 // Chain / trade / tx-leg vocabularies

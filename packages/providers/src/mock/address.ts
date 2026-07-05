@@ -6,8 +6,8 @@
 // classifiers/CSV validators exercise their format checks against
 // realistic-looking strings. Generation is fully driven by the injected Rng.
 
-import type { Rng } from './prng.js';
-import { rngInt, rngPick } from './prng.js';
+import type { Rng } from './prng';
+import { rngInt, rngPick } from './prng';
 
 // Base58 alphabet (Bitcoin/Solana variant): excludes 0, O, I, l.
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'.split('');

@@ -13,10 +13,10 @@
 // mock with documented TODO; never a crash").
 
 import type { Chain, ProviderStatus } from '@flowradar/core';
-import type { ProviderCapability, ProviderCapabilityMap } from './types.js';
-import { createMockWorld } from './mock/world.js';
-import type { MockWorld } from './mock/world.js';
-import { MockProvider } from './mock/provider.js';
+import type { ProviderCapability, ProviderCapabilityMap } from './types';
+import { createMockWorld } from './mock/world';
+import type { MockWorld } from './mock/world';
+import { MockProvider } from './mock/provider';
 
 const ALL_CAPABILITIES: ProviderCapability[] = [
   'walletActivity',

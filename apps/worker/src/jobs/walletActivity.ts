@@ -10,7 +10,7 @@
 
 import { ingestNormalizedTxs } from '@flowradar/db';
 import type { Chain, NormalizedTx } from '@flowradar/core';
-import type { JobContext } from '../context.js';
+import type { JobContext } from '../context';
 
 const PROVIDER_NAME = 'mock';
 const PAGE_LIMIT = 500;

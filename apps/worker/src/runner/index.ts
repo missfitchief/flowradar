@@ -6,12 +6,12 @@
 // connection" requirement.
 
 import type { JobRunner } from '@flowradar/core';
-import { InlineRunner } from './inline.js';
-import { BullMqRunner } from './bullmq.js';
+import { InlineRunner } from './inline';
+import { BullMqRunner } from './bullmq';
 
 export type { JobRunner } from '@flowradar/core';
-export { InlineRunner } from './inline.js';
-export { BullMqRunner } from './bullmq.js';
+export { InlineRunner } from './inline';
+export { BullMqRunner } from './bullmq';
 
 /**
  * Chooses the JobRunner implementation by REDIS_URL: empty/unset => LITE

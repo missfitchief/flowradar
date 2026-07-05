@@ -21,8 +21,8 @@
 //   riskSanity        = (1 - risk.penalty) * 5
 //   sum, clamp 0-100, round to 1 decimal.
 
-import type { Settings } from '../settings.js';
-import type { RiskReport, TokenWindowAggregate } from '../types.js';
+import type { Settings } from '../settings';
+import type { RiskReport, TokenWindowAggregate } from '../types';
 
 export interface FlowScoreResult {
   score: number;

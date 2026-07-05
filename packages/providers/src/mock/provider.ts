@@ -16,8 +16,8 @@ import type {
   TokenMetadataProvider,
   WalletActivityProvider,
   WalletDiscoveryProvider
-} from '../types.js';
-import type { MockWorld } from './world.js';
+} from '../types';
+import type { MockWorld } from './world';
 
 export interface MockProviderOptions {
   /**

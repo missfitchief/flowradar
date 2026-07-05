@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getProvider, getProviderStatuses } from '../src/registry.js';
+import { getProvider, getProviderStatuses } from '../src/registry';
 
 const ORIGINAL_MOCK_MODE = process.env.MOCK_MODE;
 

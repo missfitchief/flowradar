@@ -24,10 +24,10 @@ import { computeWalletScore } from '@flowradar/core';
 import { createMockWorld, MockProvider } from '@flowradar/providers';
 import type { MockWorld } from '@flowradar/providers';
 import type { Prisma } from '@prisma/client';
-import { prisma } from './client.js';
-import { ingestNormalizedTxs, snapshotMarket } from './ingest.js';
-import { runFlowScoringPass } from './scoring-pass.js';
-import { importWalletsCsv } from './csv/importWalletsCsv.js';
+import { prisma } from './client';
+import { ingestNormalizedTxs, snapshotMarket } from './ingest';
+import { runFlowScoringPass } from './scoring-pass';
+import { importWalletsCsv } from './csv/importWalletsCsv';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..');

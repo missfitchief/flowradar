@@ -18,7 +18,7 @@
 //   confidenceMultiplier = 0.5 + 0.5 * (pnlConfidence / 100), applied to the
 //     post-penalty sum, then clamp 0-100.
 
-import type { WalletStatsInput } from '../types.js';
+import type { WalletStatsInput } from '../types';
 
 export interface WalletScoreResult {
   score: number;

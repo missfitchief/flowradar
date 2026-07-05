@@ -8,7 +8,7 @@
 
 import { snapshotMarket } from '@flowradar/db';
 import type { Chain } from '@flowradar/core';
-import type { JobContext } from '../context.js';
+import type { JobContext } from '../context';
 
 interface TokenRef {
   id: string;

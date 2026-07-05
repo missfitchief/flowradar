@@ -7,8 +7,8 @@
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import net from 'node:net';
-import { prisma } from '../src/client.js';
-import { importWalletsCsv } from '../src/csv/importWalletsCsv.js';
+import { prisma } from '../src/client';
+import { importWalletsCsv } from '../src/csv/importWalletsCsv';
 
 function probePort(host: string, port: number, timeoutMs = 1000): Promise<boolean> {
   return new Promise((resolve) => {

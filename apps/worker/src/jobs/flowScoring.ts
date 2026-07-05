@@ -8,7 +8,7 @@
 // during this job's original Task 5 verification).
 
 import { runFlowScoringPass } from '@flowradar/db';
-import type { JobContext } from '../context.js';
+import type { JobContext } from '../context';
 
 export async function run(ctx: JobContext): Promise<void> {
   const { prisma, providers, settings, log } = ctx;

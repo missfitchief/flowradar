@@ -15,11 +15,11 @@
 // them programmatically instead of re-deriving them.
 
 import type { Chain, NormalizedTx, RiskReport, TokenMarket, WalletLabel } from '@flowradar/core';
-import { mixSeed, mulberry32 } from './prng.js';
-import type { Rng } from './prng.js';
-import { fakeBscAddress, fakeSolanaAddress } from './address.js';
-import { buildScenarios } from './scenarios.js';
-import type { ScenarioHandles } from './scenarios.js';
+import { mixSeed, mulberry32 } from './prng';
+import type { Rng } from './prng';
+import { fakeBscAddress, fakeSolanaAddress } from './address';
+import { buildScenarios } from './scenarios';
+import type { ScenarioHandles } from './scenarios';
 
 // ---------------------------------------------------------------------------
 // Public shapes

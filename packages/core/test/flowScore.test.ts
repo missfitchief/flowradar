@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { computeFlowScore } from '../src/scoring/flowScore.js';
-import { DEFAULT_SETTINGS } from '../src/settings.js';
-import type { RiskReport, TokenWindowAggregate } from '../src/types.js';
+import { computeFlowScore } from '../src/scoring/flowScore';
+import { DEFAULT_SETTINGS } from '../src/settings';
+import type { RiskReport, TokenWindowAggregate } from '../src/types';
 
 const zeroRisk: RiskReport = { flags: [], penalty: 0 };
 // A token with genuinely zero tracked activity (no liquidity, no mcap data)

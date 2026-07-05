@@ -14,7 +14,7 @@
     "db:seed": "npm run db:seed -w packages/db",
     "db:studio": "npm run db:studio -w packages/db",
     "test": "vitest run",
-    "typecheck": "tsc -b apps/web apps/worker packages/core packages/db packages/providers",
+    "typecheck": "tsc -b apps/worker packages/core packages/db packages/providers && npm run typecheck -w apps/web",
     "build": "npm run build -w apps/web",
     "verify": "npm run typecheck && npm run test && npm run build"
   },

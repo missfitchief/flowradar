@@ -4,7 +4,7 @@
 // runtime dependency). Every later task imports domain types/functions ONLY
 // from this package.
 
-export * from './types.js';
-export * from './settings.js';
-export * from './scoring/walletScore.js';
-export * from './scoring/flowScore.js';
+export * from './types';
+export * from './settings';
+export * from './scoring/walletScore';
+export * from './scoring/flowScore';

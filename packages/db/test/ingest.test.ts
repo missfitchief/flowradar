@@ -15,8 +15,8 @@
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import net from 'node:net';
 import type { NormalizedTx } from '@flowradar/core';
-import { prisma } from '../src/client.js';
-import { ingestNormalizedTxs, snapshotMarket } from '../src/ingest.js';
+import { prisma } from '../src/client';
+import { ingestNormalizedTxs, snapshotMarket } from '../src/ingest';
 
 const ADDR_PREFIX = 'T5TEST';
 const CHAIN = 'SOLANA' as const;

@@ -6,9 +6,9 @@
 // (apps/worker jobs, apps/web route handlers, packages/db seed script)
 // import everything they need from this one entry point.
 
-export * from './types.js';
-export * from './registry.js';
-export * from './rateLimiter.js';
-export * from './mock/world.js';
-export * from './mock/provider.js';
-export * from './mock/scenarios.js';
+export * from './types';
+export * from './registry';
+export * from './rateLimiter';
+export * from './mock/world';
+export * from './mock/provider';
+export * from './mock/scenarios';
