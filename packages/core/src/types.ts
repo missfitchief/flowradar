@@ -205,19 +205,33 @@ export interface FundingEvent {
   fundedFirstBuy?: { tokenId: string; usd: number; ts: Date; mcapAtBuy: number | null };
 }
 
-/** Candidate profit-rotation link (rule F: A exits X, B receives, B buys Y). */
+/**
+ * Candidate profit-rotation link (rule F: A exits sourceTokenId at a profit,
+ * transfers proceeds — directly or bridged — to destWalletId, which then
+ * buys destTokenId, the token CURRENTLY being evaluated).
+ *
+ * Shape per Task 14 binding decision 2 (rules/ruleF.ts is the sole consumer;
+ * a builder — Task 23 — is responsible for constructing these and for
+ * enforcing exit->transfer ordering upstream, so ruleF itself does not
+ * re-derive realizedProfitUsd/transferTs from raw trades).
+ */
 export interface RotationCandidate {
   sourceWalletId: string;
   destWalletId: string;
   sourceTokenId: string;
+  /** The token currently being evaluated (rule F only matches candidates for THIS token). */
   destTokenId: string;
-  realizedPnlUsd: number;
-  transferUsd: number;
+  realizedProfitUsd: number;
+  transferredValueUsd: number;
+  receivedValueUsd: number;
   transferTs: Date;
-  receiptUsd: number;
   receiptTs: Date;
   destBuyTs: Date;
-  destTokenMcapUsd: number | null;
+  destBuyUsd: number;
+  /** null = mcap unknown at buy time; rule F treats this as "cannot evaluate" -> does not fire for this candidate. */
+  destTokenMcapAtBuy: number | null;
+  bridged: boolean;
+  chainPath: string[];
 }
 
 export interface RuleExtras {

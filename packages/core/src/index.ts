@@ -14,3 +14,7 @@ export * from './rules/ruleA';
 export * from './rules/ruleB';
 export * from './rules/ruleC';
 export * from './rules/ruleD';
+export * from './rules/ruleE';
+export * from './rules/ruleF';
+export * from './rules/ruleG';
+export * from './rules/index';
