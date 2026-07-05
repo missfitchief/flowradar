@@ -9,7 +9,7 @@
 //   agg.earlyWindowBuyerCount is present (not null/undefined) AND
 //     >= rules.B.baseWallets
 //   agg.smartWalletCount      >= rules.B.targetWallets
-//   agg.mcapExpansionFromAvgEntry <= rules.B.maxMcapExpansion
+//   mcap multiplier (field+1)  <= rules.B.maxMcapExpansion (multiplier threshold)
 //   sellToBuyPct              <= rules.B.maxSellToBuyPct
 //     where sellToBuyPct = trackedSellVolumeUsd / trackedBuyVolumeUsd * 100
 //     (0 when there is no tracked buy volume).
@@ -31,10 +31,15 @@ export const ruleB: Rule = (agg, settings) => {
   const sellToBuyPct =
     agg.trackedBuyVolumeUsd > 0 ? (agg.trackedSellVolumeUsd / agg.trackedBuyVolumeUsd) * 100 : 0;
 
+  // field is growth ratio; settings threshold is the multiplier — bridge units here.
+  const mcapMultiplier =
+    agg.mcapExpansionFromAvgEntry === null ? null : agg.mcapExpansionFromAvgEntry + 1;
+
   const metrics: RuleResult['metrics'] = {
     earlyWindowBuyerCount: earlyCount ?? -1,
     smartWalletCount: agg.smartWalletCount,
     mcapExpansionFromAvgEntry: agg.mcapExpansionFromAvgEntry ?? -1,
+    mcapMultiplier: mcapMultiplier ?? -1,
     sellToBuyPct,
     canEvaluateGrowth
   };
@@ -51,7 +56,7 @@ export const ruleB: Rule = (agg, settings) => {
 
   const meetsBase = earlyCount >= B.baseWallets;
   const meetsTarget = agg.smartWalletCount >= B.targetWallets;
-  const meetsExpansion = agg.mcapExpansionFromAvgEntry !== null && agg.mcapExpansionFromAvgEntry <= B.maxMcapExpansion;
+  const meetsExpansion = mcapMultiplier !== null && mcapMultiplier <= B.maxMcapExpansion;
   const meetsSellPct = sellToBuyPct <= B.maxSellToBuyPct;
 
   const fired = meetsBase && meetsTarget && meetsExpansion && meetsSellPct;
@@ -60,7 +65,10 @@ export const ruleB: Rule = (agg, settings) => {
     const misses: string[] = [];
     if (!meetsBase) misses.push(`early buyer count ${earlyCount} below baseWallets ${B.baseWallets}`);
     if (!meetsTarget) misses.push(`current wallet count ${agg.smartWalletCount} below targetWallets ${B.targetWallets}`);
-    if (!meetsExpansion) misses.push(`mcap expansion ${agg.mcapExpansionFromAvgEntry} above cap ${B.maxMcapExpansion}`);
+    if (!meetsExpansion) {
+      const mult = mcapMultiplier ?? 'null';
+      misses.push(`mcap ${mult}× from avg entry above cap ${B.maxMcapExpansion}×`);
+    }
     if (!meetsSellPct) misses.push(`sell-to-buy ${sellToBuyPct.toFixed(1)}% above cap ${B.maxSellToBuyPct}%`);
 
     return {
@@ -78,7 +86,7 @@ export const ruleB: Rule = (agg, settings) => {
     severity: 'WATCH',
     reasons: [
       `Early-buyer base grew from ${earlyCount} to ${agg.smartWalletCount} wallets (targets: base ${B.baseWallets}, target ${B.targetWallets}).`,
-      `Mcap expansion ${agg.mcapExpansionFromAvgEntry}x within cap ${B.maxMcapExpansion}x; sell-to-buy ${sellToBuyPct.toFixed(1)}% within cap ${B.maxSellToBuyPct}%.`
+      `Mcap ${(mcapMultiplier as number).toFixed(2)}× from avg entry within cap ${B.maxMcapExpansion}×; sell-to-buy ${sellToBuyPct.toFixed(1)}% within cap ${B.maxSellToBuyPct}%.`
     ],
     metrics
   };

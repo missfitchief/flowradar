@@ -155,6 +155,7 @@ export interface TokenWindowAggregate {
   largestClusterSize: number;
   avgEntryMcap: number | null;
   currentMcap: number | null;
+  /** Growth ratio: currentMcap/avgEntryMcap − 1 (1.0 = +100% = 2× multiplier). Null when avg entry unknown. */
   mcapExpansionFromAvgEntry: number | null;
   liquidityUsd: number | null;
   liquidityChangePct: number | null;

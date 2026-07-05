@@ -45,11 +45,11 @@ function makeAggregate(overrides: Partial<TokenWindowAggregate> = {}): TokenWind
 }
 
 describe('ruleB', () => {
-  it('20 -> 44 growth, expansion 1.6x, sell 20% -> fires', () => {
+  it('20 -> 44 growth, multiplier 1.6x (growth 0.6), sell 20% -> fires', () => {
     const agg = makeAggregate({
       earlyWindowBuyerCount: 20,
       smartWalletCount: 44,
-      mcapExpansionFromAvgEntry: 1.6,
+      mcapExpansionFromAvgEntry: 0.6, // growth ratio: 0.6 = 1.6× multiplier
       trackedBuyVolumeUsd: 100000,
       trackedSellVolumeUsd: 20000 // 20% of buy volume
     });
@@ -58,13 +58,14 @@ describe('ruleB', () => {
 
     expect(result.fired).toBe(true);
     expect(result.rule).toBe('B');
+    expect(result.metrics.mcapMultiplier).toBe(1.6);
   });
 
   it('20 -> 39 growth (below targetWallets=40) -> does not fire', () => {
     const agg = makeAggregate({
       earlyWindowBuyerCount: 20,
       smartWalletCount: 39,
-      mcapExpansionFromAvgEntry: 1.6,
+      mcapExpansionFromAvgEntry: 0.6,
       trackedBuyVolumeUsd: 100000,
       trackedSellVolumeUsd: 20000
     });
@@ -74,11 +75,40 @@ describe('ruleB', () => {
     expect(result.fired).toBe(false);
   });
 
-  it('expansion 2.1x (above maxMcapExpansion=2) -> does not fire', () => {
+  it('multiplier 2.1x (growth 1.1, above cap 2.0x) -> does not fire', () => {
     const agg = makeAggregate({
       earlyWindowBuyerCount: 20,
       smartWalletCount: 44,
-      mcapExpansionFromAvgEntry: 2.1,
+      mcapExpansionFromAvgEntry: 1.1, // growth ratio: 1.1 = 2.1× multiplier > cap
+      trackedBuyVolumeUsd: 100000,
+      trackedSellVolumeUsd: 20000
+    });
+
+    const result = ruleB(agg, DEFAULT_SETTINGS);
+
+    expect(result.fired).toBe(false);
+  });
+
+  it('multiplier exactly 2.0x (growth 1.0, at cap boundary, inclusive) -> fires', () => {
+    const agg = makeAggregate({
+      earlyWindowBuyerCount: 20,
+      smartWalletCount: 44,
+      mcapExpansionFromAvgEntry: 1.0, // growth ratio: 1.0 = 2.0× multiplier (exactly at cap)
+      trackedBuyVolumeUsd: 100000,
+      trackedSellVolumeUsd: 20000
+    });
+
+    const result = ruleB(agg, DEFAULT_SETTINGS);
+
+    expect(result.fired).toBe(true);
+    expect(result.metrics.mcapMultiplier).toBe(2.0);
+  });
+
+  it('null mcapExpansionFromAvgEntry -> cannot evaluate -> does not fire', () => {
+    const agg = makeAggregate({
+      earlyWindowBuyerCount: 20,
+      smartWalletCount: 44,
+      mcapExpansionFromAvgEntry: null,
       trackedBuyVolumeUsd: 100000,
       trackedSellVolumeUsd: 20000
     });
@@ -92,7 +122,7 @@ describe('ruleB', () => {
     const agg = makeAggregate({
       earlyWindowBuyerCount: undefined,
       smartWalletCount: 44,
-      mcapExpansionFromAvgEntry: 1.6,
+      mcapExpansionFromAvgEntry: 0.6,
       trackedBuyVolumeUsd: 100000,
       trackedSellVolumeUsd: 20000
     });
@@ -106,7 +136,7 @@ describe('ruleB', () => {
     const agg = makeAggregate({
       earlyWindowBuyerCount: null as unknown as undefined,
       smartWalletCount: 44,
-      mcapExpansionFromAvgEntry: 1.6,
+      mcapExpansionFromAvgEntry: 0.6,
       trackedBuyVolumeUsd: 100000,
       trackedSellVolumeUsd: 20000
     });
@@ -120,7 +150,7 @@ describe('ruleB', () => {
     const agg = makeAggregate({
       earlyWindowBuyerCount: 10,
       smartWalletCount: 44,
-      mcapExpansionFromAvgEntry: 1.6,
+      mcapExpansionFromAvgEntry: 0.6,
       trackedBuyVolumeUsd: 100000,
       trackedSellVolumeUsd: 20000
     });
@@ -134,7 +164,7 @@ describe('ruleB', () => {
     const agg = makeAggregate({
       earlyWindowBuyerCount: 20,
       smartWalletCount: 44,
-      mcapExpansionFromAvgEntry: 1.6,
+      mcapExpansionFromAvgEntry: 0.6,
       trackedBuyVolumeUsd: 100000,
       trackedSellVolumeUsd: 30000 // 30% > 25%
     });
