@@ -46,6 +46,7 @@ import * as walletActivity from './jobs/walletActivity';
 import * as marketDataHot from './jobs/marketDataHot';
 import * as marketDataNormal from './jobs/marketDataNormal';
 import * as flowScoring from './jobs/flowScoring';
+import * as entityClustering from './jobs/entityClustering';
 import * as signalDetection from './jobs/signalDetection';
 import * as alertDispatch from './jobs/alertDispatch';
 import * as walletImport from './jobs/walletImport';
@@ -157,6 +158,7 @@ async function main(): Promise<void> {
     { name: 'marketDataHot', run: marketDataHot.run, intervalSec: settings.intervals.marketDataHotSec },
     { name: 'marketDataNormal', run: marketDataNormal.run, intervalSec: settings.intervals.marketDataNormalSec },
     { name: 'flowScoring', run: flowScoring.run, intervalSec: settings.intervals.flowScoringSec },
+    { name: 'entityClustering', run: entityClustering.run, intervalSec: settings.intervals.entityClusteringSec },
     { name: 'signalDetection', run: signalDetection.run, intervalSec: settings.intervals.signalDetectionSec },
     { name: 'alertDispatch', run: alertDispatch.run, intervalSec: settings.intervals.alertDispatchSec }
   ];

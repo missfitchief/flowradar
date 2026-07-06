@@ -21,6 +21,9 @@ export * from './rules/index';
 export * from './window/aggregate';
 export * from './alerts/templates';
 export * from './alerts/cooldown';
+export * from './cluster/linkConfidence';
+export * from './cluster/unionFind';
+export * from './cluster/clusterer';
 
 // Graph module: the unused sketch GraphNode/GraphEdge/RawGraphEdge that used
 // to live in ./types (never implemented or consumed — confirmed by repo-wide

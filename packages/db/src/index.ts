@@ -3,6 +3,7 @@ export * from './ingest';
 export * from './scoring-pass';
 export * from './fetchAggregateInputs';
 export * from './fundingEvents';
+export * from './clustering';
 export * from './signals';
 export * from './alerts';
 export * from './csv/importWalletsCsv';

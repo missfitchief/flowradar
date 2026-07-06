@@ -27,6 +27,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from './client';
 import { ingestNormalizedTxs, snapshotMarket } from './ingest';
 import { runFlowScoringPass } from './scoring-pass';
+import { runEntityClustering } from './clustering';
 import { runSignalDetectionPass } from './signals';
 import { dispatchPendingAlerts } from './alerts';
 import { importWalletsCsv } from './csv/importWalletsCsv';
@@ -587,6 +588,43 @@ async function runSelfCheck(
   });
 
   // ---------------------------------------------------------------------
+  // Entity-clustering self-checks (Task 22 binding decision 6): NOVA's
+  // 18-wallet single-funder cluster (packages/providers/src/mock/
+  // scenarios.ts's buildNova) must surface as >=1 EntityCluster with >=15
+  // members and confidence >=61, AND NOVA's latest TokenFlowSnapshot must
+  // show uniqueEntityCount < smartWalletCount (raw vs unique DIVERGE) — this
+  // requires the flow-scoring pass to have been RE-RUN after clustering
+  // (Phase 7.6, main()) so aggregateWindow's EntityClusterWallet read picks
+  // up the freshly-stamped memberships.
+  // ---------------------------------------------------------------------
+  const largestCluster = await prisma.entityCluster.findFirst({
+    orderBy: { walletCount: 'desc' }
+  });
+  const largestClusterOk = (largestCluster?.walletCount ?? 0) >= 15 && (largestCluster?.confidence ?? 0) >= 61;
+  rows.push({
+    check: 'largest EntityCluster has >=15 members and confidence >=61 (NOVA single-funder cluster)',
+    expected: 'walletCount >= 15, confidence >= 61',
+    actual: largestCluster
+      ? `walletCount=${largestCluster.walletCount}, confidence=${largestCluster.confidence.toFixed(1)}`
+      : 'no EntityCluster rows',
+    pass: largestClusterOk
+  });
+
+  const novaFlowSnapshot = await prisma.tokenFlowSnapshot.findFirst({
+    where: { token: { address: novaAddress } },
+    orderBy: { ts: 'desc' }
+  });
+  const novaRawCount = novaFlowSnapshot?.smartWalletCount ?? -1;
+  const novaUniqueCount = novaFlowSnapshot?.uniqueEntityCount ?? -1;
+  const novaDivergenceOk = novaFlowSnapshot !== null && novaUniqueCount < novaRawCount;
+  rows.push({
+    check: 'NOVA TokenFlowSnapshot uniqueEntityCount < smartWalletCount (raw vs unique diverge post-clustering)',
+    expected: 'uniqueEntityCount < smartWalletCount',
+    actual: novaFlowSnapshot ? `raw(smartWalletCount)=${novaRawCount}, unique(uniqueEntityCount)=${novaUniqueCount}` : 'no NOVA TokenFlowSnapshot found',
+    pass: novaDivergenceOk
+  });
+
+  // ---------------------------------------------------------------------
   // Alert self-checks (Task 16 binding decision 7): "Alert rows exist for
   // every seeded signal, all 'skipped_no_token', payload text non-empty
   // containing '$NOVA' for the NOVA A alert; print alert count." — this
@@ -775,6 +813,26 @@ async function printGraphSummary(searchId: string): Promise<void> {
   console.log('');
 }
 
+/** Prints the entity-clustering pass's own summary: cluster count, largest cluster size, NOVA raw vs unique counts (Task 22). */
+async function printClusterSummary(novaAddress: string): Promise<void> {
+  const clusterCount = await prisma.entityCluster.count();
+  const largestCluster = await prisma.entityCluster.findFirst({ orderBy: { walletCount: 'desc' } });
+  const novaFlowSnapshot = await prisma.tokenFlowSnapshot.findFirst({
+    where: { token: { address: novaAddress } },
+    orderBy: { ts: 'desc' }
+  });
+
+  console.log('Entity-clustering summary:');
+  console.log(`  clusters created:       ${clusterCount}`);
+  console.log(
+    `  largest cluster:        ${largestCluster ? `${largestCluster.walletCount} members, confidence=${largestCluster.confidence.toFixed(1)}` : '(none)'}`
+  );
+  console.log(
+    `  NOVA raw vs unique:     smartWalletCount(raw)=${novaFlowSnapshot?.smartWalletCount ?? 'n/a'}, uniqueEntityCount(unique)=${novaFlowSnapshot?.uniqueEntityCount ?? 'n/a'}`
+  );
+  console.log('');
+}
+
 async function printSummaryTable(): Promise<void> {
   const [wallets, tokens, trades, snapshots, flowSnapshots, addressRegistry, csvImportJob, signals, alerts] = await Promise.all([
     prisma.wallet.count(),
@@ -888,11 +946,62 @@ async function main(): Promise<void> {
   // Phase 7.5: signal pass (Task 15) — shared body with
   // apps/worker/src/jobs/signalDetection.ts, same worker/seed-sharing
   // pattern as the scoring pass above.
+  await runSignalDetectionPass(prisma, settings, {
+    info: (msg, meta) => log(msg, meta),
+    error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+  }).then((r) => log('signal detection pass complete.', { ...r.summary }));
+
+  // Phase 7.6: entity clustering pass (Task 22 binding decision 5/6) — shared
+  // body with apps/worker/src/jobs/entityClustering.ts. Runs AFTER the signal
+  // pass (clustering reads MoneyFlowEdge/WalletTokenTrade rows the signal
+  // pass doesn't mutate, so ordering relative to signals is otherwise free,
+  // but running it here keeps every "pass" phase grouped together before the
+  // alert/graph-demo/self-check phases).
+  //
+  // Per binding decision 6's documented order (signals -> clustering ->
+  // RE-SCORE), the flow-scoring pass is re-run immediately after so
+  // uniqueEntityCount reflects the freshly stamped entityClusterId
+  // memberships — otherwise TokenFlowSnapshot rows would still show the
+  // pre-clustering uniqueEntityCount===smartWalletCount shape from Phase 7
+  // and the NOVA raw-vs-unique divergence this task's self-check proves
+  // would never appear.
+  //
+  // TokenFlowSnapshot is an APPEND-ONLY time series in normal (worker-tick)
+  // operation — each call legitimately represents a new point in time. A
+  // one-shot seed script re-scoring twice within the same conceptual "now"
+  // is different: it would leave TWO snapshot rows per token (breaking the
+  // "flow snapshots == 28" / "latest 5 by flowScore" self-checks/pages,
+  // which assume one authoritative row per token). So the seed script
+  // deletes Phase 7's now-superseded snapshot rows before re-scoring, then
+  // re-runs signal detection ONE more time (dedupe means no duplicate
+  // Signal rows are created — see signals.ts's 24h dedupe window) purely so
+  // `updateSnapshotSignalStatus` writes signalStatus onto the NEW
+  // post-clustering snapshot row instead of leaving it at the scoring
+  // pass's default 'watching'. `signalsByToken` from this SECOND run is
+  // what feeds the self-check below (it reflects the exact same fired-rule
+  // set as the first run — clustering doesn't change which rules fire,
+  // only uniqueEntityCount/entityClusterId — so this is not a second
+  // independent signal computation, just re-attaching status to the
+  // surviving snapshot row).
+  const clusteringResult = await runEntityClustering(prisma, settings, {
+    info: (msg, meta) => log(msg, meta),
+    error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+  });
+  log('entity clustering pass complete.', { ...clusteringResult });
+
+  await prisma.tokenFlowSnapshot.deleteMany();
+
+  const rescoringResult = await runFlowScoringPass(prisma, settings, () => provider, {
+    info: (msg, meta) => log(msg, meta),
+    error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+  });
+  log('flow re-scoring pass complete (post-clustering).', { ...rescoringResult });
+
   const { summary: signalResult, perToken: signalsByToken } = await runSignalDetectionPass(prisma, settings, {
     info: (msg, meta) => log(msg, meta),
     error: (msg, meta) => log(`ERROR: ${msg}`, meta)
   });
-  log('signal detection pass complete.', { ...signalResult });
+  log('signal detection re-pass complete (post-clustering, for signalStatus only).', { ...signalResult });
 
   // Phase 7.75: alert dispatch pass (Task 16 binding decision 7) — shared
   // body with apps/worker/src/jobs/alertDispatch.ts. `sender: null` here
@@ -920,6 +1029,7 @@ async function main(): Promise<void> {
   printSelfCheckTable(selfCheckRows);
   printSignalSummaryTable(signalsByToken);
   await printGraphSummary(graphDemoResult.searchId);
+  await printClusterSummary(world.meta.scenarios.nova.tokenAddress);
 
   // Phase 9: summary table.
   await printSummaryTable();
