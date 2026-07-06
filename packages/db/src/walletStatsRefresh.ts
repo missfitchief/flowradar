@@ -34,6 +34,13 @@
 //                           each token's own sell count reproduces exactly
 //                           what a single combined-ledger FIFO run would have
 //                           reported, which is the more honest number).
+//                           If the wallet has zero SELLs across every token
+//                           (buys only, nothing realized yet), winRate is
+//                           written as 0 — not null, not skipped — since there
+//                           is no win/loss signal yet to report; this is a
+//                           neutral "no data" zero, the same convention
+//                           importWalletsCsv.ts uses when a CSV row has no
+//                           sell-derived win rate.
 //        avgTradeSizeUsd  = sum(amountUsd across all trades) / tradeCount.
 //        pnlConfidence    = MIN of the per-token confidences (the aggregate
 //                           is only as trustworthy as its least-confident

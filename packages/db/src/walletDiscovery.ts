@@ -10,24 +10,36 @@
 // For each enabled chain (settings.chainsEnabled), resolves
 // getProvider(chain, 'walletDiscovery'):
 //   - Provider present (MOCK_MODE, or a future live connector) => pulls
-//     candidate wallets via getCandidateWallets(chain), upserts a Wallet row
-//     per candidate (isWatched=false — discovery is NOT promotion; watching a
-//     wallet is a separate, deliberate decision left to the real Wave 4.5
-//     candidate->validate->promote pipeline) with
-//     notes='discovered:<providerName-or-mock>', and inserts a fresh
-//     WalletStats row (source='provider') seeded from the candidate's own
-//     claimed walletScore (the only figure WalletCandidate actually carries —
-//     see packages/providers/src/types.ts's GetCandidateWalletsOpts/
-//     WalletCandidate; there is no claimed pnl/winRate/tradeCount to persist,
-//     so those columns are written as neutral zeros with a low pnlConfidence,
-//     honestly reflecting "we only know a claimed score, nothing else yet").
+//     candidate wallets via getCandidateWallets(chain). Discovery introduces
+//     NEW candidates ONLY — re-discovering an address that already has a
+//     Wallet row (a user-watched wallet, a CSV-imported wallet, or a wallet
+//     with locally-computed stats) is a deliberate no-op: we look the address
+//     up BEFORE writing anything, and if it already exists we skip it
+//     entirely (no Wallet field touched, no WalletStats row inserted). This
+//     guards against a genuinely-existing wallet's real stats being
+//     clobbered by a fresh, zeroed 'provider' row that would otherwise become
+//     the latest-by-computedAt figure. The candidate->validate->promote
+//     pipeline (Wave 4.5) is what's expected to act on an already-known
+//     wallet, not this pass.
+//     For a genuinely NEW address only: creates a Wallet row (isWatched=false
+//     — discovery is NOT promotion; watching a wallet is a separate,
+//     deliberate decision left to the real Wave 4.5 candidate->validate->
+//     promote pipeline) with notes='discovered:<providerName-or-mock>', and
+//     inserts a fresh WalletStats row (source='provider') seeded from the
+//     candidate's own claimed walletScore (the only figure WalletCandidate
+//     actually carries — see packages/providers/src/types.ts's
+//     GetCandidateWalletsOpts/WalletCandidate; there is no claimed
+//     pnl/winRate/tradeCount to persist, so those columns are written as
+//     neutral zeros with a low pnlConfidence, honestly reflecting "we only
+//     know a claimed score, nothing else yet").
 //   - Provider resolution throws (live mode, no adapter implemented for this
 //     capability yet — see packages/providers/src/registry.ts's getProvider,
 //     which throws rather than returning a sentinel for unimplemented live
-//     capabilities) or getProviderFn itself is missing/returns null/undefined
-//     => logged as 'no live discovery provider (Wave 4.5 connectors add real
-//     sources)' and treated as a graceful no-op for that chain. Never throws
-//     past this module.
+//     capabilities) => logged distinctly as 'walletDiscovery: provider error
+//     for <chain>' and counted as an error for that chain. If getProviderFn
+//     itself is missing/returns null/undefined => logged as 'no live
+//     discovery provider (Wave 4.5 connectors add real sources)' and treated
+//     as a graceful no-op for that chain. Never throws past this module.
 
 import type { PrismaClient } from '@prisma/client';
 import type { Chain, Settings } from '@flowradar/core';
@@ -87,7 +99,7 @@ export async function runWalletDiscovery(
       log?.info('walletDiscovery: chain pass complete', { chain, candidatesFound: candidates.length });
     } catch (err) {
       errors += 1;
-      log?.error('walletDiscovery: no live discovery provider (Wave 4.5 connectors add real sources)', {
+      log?.error(`walletDiscovery: provider error for ${chain}`, {
         chain,
         error: err instanceof Error ? err.message : String(err)
       });
@@ -112,9 +124,23 @@ async function upsertCandidateWallet(
   const now = new Date();
   const note = 'discovered:mock';
 
-  const wallet = await prisma.wallet.upsert({
+  // Anti-clobber guard: check existence BEFORE writing anything. If this
+  // address already has a Wallet row — user-watched, CSV-imported, or
+  // already carrying locally-computed stats — re-discovering it is a no-op:
+  // we must not touch isWatched/notes, and we must not insert a fresh
+  // zeroed 'provider' WalletStats row (it would become the latest-by-
+  // computedAt figure and silently clobber the wallet's real stats). Only a
+  // genuinely NEW address gets created + seeded with provider stats below.
+  const existing = await prisma.wallet.findUnique({
     where: { address_chain: { address: candidate.address, chain } },
-    create: {
+    select: { id: true }
+  });
+  if (existing) {
+    return;
+  }
+
+  const wallet = await prisma.wallet.create({
+    data: {
       address: candidate.address,
       chain,
       firstSeenAt: now,
@@ -122,16 +148,8 @@ async function upsertCandidateWallet(
       isWatched: false,
       notes: note
     },
-    update: {},
-    select: { id: true, notes: true }
+    select: { id: true }
   });
-
-  // Idempotent notes append (only when not already present) — same pattern
-  // as csv/importWalletsCsv.ts's nextNotes helper.
-  const existingLines = (wallet.notes ?? '').split('\n').filter((l) => l.length > 0);
-  if (!existingLines.includes(note)) {
-    await prisma.wallet.update({ where: { id: wallet.id }, data: { notes: [...existingLines, note].join('\n') } });
-  }
 
   // WalletCandidate (packages/core/src/types.ts) only carries a claimed
   // walletScore — no pnl/winRate/tradeCount figure exists to persist, so

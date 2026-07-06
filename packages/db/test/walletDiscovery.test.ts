@@ -112,4 +112,129 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runWalletDiscovery', () 
     expect(result.errors).toBeGreaterThanOrEqual(2);
     expect(result.candidatesUpserted).toBe(0);
   });
+
+  it('collision guard: re-discovering an ALREADY-EXISTING isWatched wallet (source=computed latest stats) is a no-op — its isWatched and latest stats are untouched — while a genuinely NEW candidate in the same pass IS created', async () => {
+    const watchedAddress = `${ADDR_PREFIX}_watched_collision`;
+    const now = new Date();
+
+    const watchedWallet = await prisma.wallet.create({
+      data: {
+        address: watchedAddress,
+        chain: CHAIN,
+        firstSeenAt: now,
+        lastActiveAt: now,
+        isWatched: true,
+        notes: 'manually watched before discovery ran'
+      }
+    });
+    const computedStats = await prisma.walletStats.create({
+      data: {
+        walletId: watchedWallet.id,
+        window: '30d',
+        pnlUsd: 4321,
+        realizedPnlUsd: 4321,
+        unrealizedPnlUsd: 0,
+        winRate: 0.65,
+        tradeCount: 12,
+        avgTradeSizeUsd: 300,
+        walletScore: 77,
+        scoreComponents: { note: 'pre-existing computed fixture' },
+        pnlConfidence: 70,
+        source: 'computed',
+        computedAt: now
+      }
+    });
+
+    const newAddress = `${ADDR_PREFIX}_genuinely_new`;
+    const collidingProvider: WalletDiscoveryProvider = {
+      async getCandidateWallets(chain: Chain) {
+        return [
+          { walletId: 'collide-1', chain, address: watchedAddress, labels: ['whale'], walletScore: 5 },
+          { walletId: 'new-1', chain, address: newAddress, labels: ['smart_money'], walletScore: 63 }
+        ];
+      }
+    };
+
+    const result = await runWalletDiscovery(prisma, DEFAULT_SETTINGS, () => collidingProvider);
+    expect(result.errors).toBe(0);
+
+    // The pre-existing watched wallet: isWatched must still be true, notes untouched.
+    const watchedAfter = await prisma.wallet.findUnique({ where: { id: watchedWallet.id } });
+    expect(watchedAfter).not.toBeNull();
+    expect(watchedAfter!.isWatched).toBe(true);
+    expect(watchedAfter!.notes).toBe('manually watched before discovery ran');
+
+    // Its latest WalletStats must still be the original source=computed non-zero row —
+    // no new source=provider zeroed row inserted.
+    const watchedStatsAll = await prisma.walletStats.findMany({ where: { walletId: watchedWallet.id } });
+    expect(watchedStatsAll).toHaveLength(1);
+    expect(watchedStatsAll[0]!.id).toBe(computedStats.id);
+    expect(watchedStatsAll[0]!.source).toBe('computed');
+    expect(Number(watchedStatsAll[0]!.pnlUsd)).toBe(4321);
+
+    // A genuinely new candidate address in the SAME pass DOES get created.
+    const newWallet = await prisma.wallet.findUnique({
+      where: { address_chain: { address: newAddress, chain: CHAIN } }
+    });
+    expect(newWallet).not.toBeNull();
+    expect(newWallet!.isWatched).toBe(false);
+    expect(newWallet!.notes).toBe('discovered:mock');
+    const newStats = await prisma.walletStats.findFirst({ where: { walletId: newWallet!.id } });
+    expect(newStats).not.toBeNull();
+    expect(newStats!.source).toBe('provider');
+    expect(newStats!.walletScore).toBeCloseTo(63, 5);
+  });
+
+  it('collision guard: re-discovering an already-existing source=csv wallet is a no-op — csv stats untouched, no provider row inserted', async () => {
+    const csvAddress = `${ADDR_PREFIX}_csv_collision`;
+    const now = new Date();
+
+    const csvWallet = await prisma.wallet.create({
+      data: {
+        address: csvAddress,
+        chain: CHAIN,
+        firstSeenAt: now,
+        lastActiveAt: now,
+        isWatched: false,
+        notes: 'imported:csv'
+      }
+    });
+    const csvStats = await prisma.walletStats.create({
+      data: {
+        walletId: csvWallet.id,
+        window: '30d',
+        pnlUsd: 999,
+        realizedPnlUsd: 999,
+        unrealizedPnlUsd: 0,
+        winRate: 0.8,
+        tradeCount: 30,
+        avgTradeSizeUsd: 200,
+        walletScore: 91,
+        scoreComponents: { note: 'csv fixture' },
+        pnlConfidence: 85,
+        source: 'csv',
+        computedAt: now
+      }
+    });
+
+    const csvCollidingProvider: WalletDiscoveryProvider = {
+      async getCandidateWallets(chain: Chain) {
+        return [{ walletId: 'csv-collide-1', chain, address: csvAddress, labels: [], walletScore: 5 }];
+      }
+    };
+
+    const result = await runWalletDiscovery(prisma, DEFAULT_SETTINGS, () => csvCollidingProvider);
+    expect(result.errors).toBe(0);
+
+    const csvWalletAfter = await prisma.wallet.findUnique({ where: { id: csvWallet.id } });
+    expect(csvWalletAfter).not.toBeNull();
+    expect(csvWalletAfter!.isWatched).toBe(false);
+    expect(csvWalletAfter!.notes).toBe('imported:csv');
+
+    const csvStatsAll = await prisma.walletStats.findMany({ where: { walletId: csvWallet.id } });
+    expect(csvStatsAll).toHaveLength(1);
+    expect(csvStatsAll[0]!.id).toBe(csvStats.id);
+    expect(csvStatsAll[0]!.source).toBe('csv');
+    expect(Number(csvStatsAll[0]!.pnlUsd)).toBe(999);
+  });
 });

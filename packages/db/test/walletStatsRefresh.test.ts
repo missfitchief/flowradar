@@ -225,4 +225,102 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runWalletStatsRefresh', 
     expect(afterPass2.length).toBeGreaterThan(afterPass1.length);
     expect(afterPass2.every((r) => r.source === 'computed')).toBe(true);
   });
+
+  it('adversarial ordering: an OLDER csv row + a NEWER computed row means latest-by-computedAt is computed -> wallet IS refreshed (locks computedAt-desc predicate)', async () => {
+    const walletId = await makeWallet('adversarial-order');
+    const tokenId = await makeToken('adversarial-order');
+    const now = new Date();
+
+    await makeTrade(walletId, tokenId, 'BUY', 5, 50, 10, new Date(now.getTime() - 60 * 60_000));
+    await makeTrade(walletId, tokenId, 'SELL', 5, 100, 20, new Date(now.getTime() - 30 * 60_000));
+
+    // OLD csv row (early computedAt).
+    await prisma.walletStats.create({
+      data: {
+        walletId,
+        window: '30d',
+        pnlUsd: 1,
+        realizedPnlUsd: 1,
+        unrealizedPnlUsd: 0,
+        winRate: 0.5,
+        tradeCount: 2,
+        avgTradeSizeUsd: 75,
+        walletScore: 50,
+        scoreComponents: { note: 'old csv fixture' },
+        pnlConfidence: 85,
+        source: 'csv',
+        computedAt: new Date(now.getTime() - 20 * 60 * 60_000) // 20h ago
+      }
+    });
+
+    // NEWER computed row (latest by computedAt) — this is the row that must
+    // decide eligibility, not the older csv row.
+    await prisma.walletStats.create({
+      data: {
+        walletId,
+        window: '30d',
+        pnlUsd: 2,
+        realizedPnlUsd: 2,
+        unrealizedPnlUsd: 0,
+        winRate: 0.5,
+        tradeCount: 2,
+        avgTradeSizeUsd: 75,
+        walletScore: 50,
+        scoreComponents: { note: 'newer computed fixture' },
+        pnlConfidence: 60,
+        source: 'computed',
+        computedAt: new Date(now.getTime() - 10 * 60_000) // 10 min ago — newer than the csv row
+      }
+    });
+
+    const beforeCount = (await prisma.walletStats.findMany({ where: { walletId } })).length;
+    expect(beforeCount).toBe(2);
+
+    const result = await runWalletStatsRefresh(prisma);
+    // Must NOT be counted as skipped-csv: latest row is 'computed', not 'csv'.
+    expect(result.refreshed).toBeGreaterThanOrEqual(1);
+
+    const allRows = await prisma.walletStats.findMany({ where: { walletId }, orderBy: { computedAt: 'desc' } });
+    expect(allRows.length).toBe(3); // old csv + newer computed + freshly-inserted computed
+    expect(allRows[0]!.source).toBe('computed'); // newest row is the freshly-inserted one
+    expect(Number(allRows[0]!.realizedPnlUsd)).toBeCloseTo(50, 5); // proceeds 100 - cost 50
+  });
+
+  it('multi-token FIFO aggregation: wallet-level winRate is trade-weighted across combined sells, not a naive average of per-token winRates', async () => {
+    const walletId = await makeWallet('multi-token');
+    const tokenA = await makeToken('multi_a');
+    const tokenB = await makeToken('multi_b');
+    const now = new Date();
+    let t = now.getTime() - 10 * 60 * 60_000;
+    const nextTs = () => new Date((t += 60_000));
+
+    // Token A: ONE sell, a WIN. buy 10 @ $1 (cost $10), sell 10 @ $2 (proceeds $20) -> realized +10, winRate(A) = 1.0 (1/1).
+    await makeTrade(walletId, tokenA, 'BUY', 10, 10, 1, nextTs());
+    await makeTrade(walletId, tokenA, 'SELL', 10, 20, 2, nextTs());
+
+    // Token B: NINE sells, ALL losses. buy 90 @ $1 (cost $90), then 9 sells of 10 units @ $0.5 (proceeds $5 each, cost $10 each)
+    // -> realized -5 per sell * 9 = -45, winRate(B) = 0.0 (0/9).
+    await makeTrade(walletId, tokenB, 'BUY', 90, 90, 1, nextTs());
+    for (let i = 0; i < 9; i++) {
+      await makeTrade(walletId, tokenB, 'SELL', 10, 5, 0.5, nextTs());
+    }
+
+    const result = await runWalletStatsRefresh(prisma);
+    expect(result.refreshed).toBeGreaterThanOrEqual(1);
+
+    const stats = await prisma.walletStats.findFirst({ where: { walletId }, orderBy: { computedAt: 'desc' } });
+    expect(stats).not.toBeNull();
+
+    // Naive average of per-token winRates would be (1.0 + 0.0) / 2 = 0.5.
+    // Trade-weighted across the combined 10-sell ledger: (1*1.0 + 9*0.0) / 10 = 0.1.
+    // Assert the weighted value, and explicitly that it is NOT the naive average.
+    expect(Number(stats!.winRate)).toBeCloseTo(0.1, 5);
+    expect(Number(stats!.winRate)).not.toBeCloseTo(0.5, 5);
+
+    // pnl = sum of both tokens' FIFO realized (no remaining inventory in either token, so unrealized = 0).
+    // Token A realized = 20 - 10 = 10. Token B realized = (5 - 10) * 9 = -45. Total = 10 + (-45) = -35.
+    expect(Number(stats!.realizedPnlUsd)).toBeCloseTo(-35, 5);
+    expect(Number(stats!.pnlUsd)).toBeCloseTo(-35, 5);
+    expect(stats!.tradeCount).toBe(12); // 1 buy + 1 sell (token A) + 1 buy + 9 sells (token B)
+  });
 });
