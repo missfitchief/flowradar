@@ -49,6 +49,7 @@ import * as flowScoring from './jobs/flowScoring';
 import * as signalDetection from './jobs/signalDetection';
 import * as alertDispatch from './jobs/alertDispatch';
 import * as walletImport from './jobs/walletImport';
+import * as walletGraph from './jobs/walletGraph';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const HOUR_MS = 60 * 60 * 1000;
@@ -191,6 +192,11 @@ async function main(): Promise<void> {
   // JobContext is a fixed shape every job receives, per context.ts).
   walletImport.register({ prisma, settings, providers, log: createConsoleLogger('walletImport') }, runner);
   bootLog.info('registered job "walletImport" (on-demand, no schedule)');
+
+  // walletGraph (Task 20 binding decision 3): registered via runner.process(...),
+  // on-demand only, same pattern as walletImport above.
+  walletGraph.register({ prisma, settings, providers, log: createConsoleLogger('walletGraph') }, runner);
+  bootLog.info('registered job "walletGraph" (on-demand, no schedule)');
 
   await runner.start();
   bootLog.info('worker started — runner is now ticking scheduled jobs');

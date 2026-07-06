@@ -574,7 +574,14 @@ function buildGraphDemo(builder: WorldBuilder, rng: Rng): GraphDemoHandle {
 
   // Root also touches a CEX-tagged wallet and a router-tagged counterparty
   // directly (depth 1 neighbors), rounding out the "3-depth web incl. 1 CEX +
-  // 1 router node".
+  // 1 router node". Both use `token_transfer` (not `contract_interaction`):
+  // ingest.ts's ingestLeg treats `contract_interaction` legs as an explicit
+  // no-op (Task 5 decision — "skip, no row"), so a leg of that kind never
+  // produces a MoneyFlowEdge row and would be invisible to Task 20's
+  // DB-backed graph EdgeFetcher (which only reads MoneyFlowEdge rows). Using
+  // `token_transfer` for the router touch (mirroring the CEX touch just
+  // above it) keeps `programOrContract: 'ROUTER'` as a cosmetic tag while
+  // ensuring the edge actually lands in the graph the BFS engine reads.
   makeSimpleTx(builder, {
     chain: 'SOLANA',
     ts: new Date(t0.getTime() + 30 * MIN_MS),
@@ -589,7 +596,7 @@ function buildGraphDemo(builder: WorldBuilder, rng: Rng): GraphDemoHandle {
   makeSimpleTx(builder, {
     chain: 'SOLANA',
     ts: new Date(t0.getTime() + 45 * MIN_MS),
-    kind: 'contract_interaction',
+    kind: 'token_transfer',
     from: root.address,
     to: router.address,
     asset: { symbol: 'SOL', decimals: 9 },

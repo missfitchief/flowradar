@@ -6,4 +6,7 @@ export * from './fundingEvents';
 export * from './signals';
 export * from './alerts';
 export * from './csv/importWalletsCsv';
+export * from './graph/edgeFetcher';
+export * from './graph/runSearch';
+export * from './graph/csv';
 export * from '@prisma/client';

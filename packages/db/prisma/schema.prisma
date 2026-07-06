@@ -599,20 +599,25 @@ model ProfitRotationSignal {
 // ---------------------------------------------------------------------------
 
 model WalletGraphSearch {
-  id           String                  @id @default(cuid())
-  rootAddress  String
-  chain        ChainId
-  mode         WalletGraphMode
-  params       Json
-  status       WalletGraphSearchStatus
-  nodeCount    Int
-  edgeCount    Int
-  startedAt    DateTime?
-  finishedAt   DateTime?
-  error        String?
+  id            String                  @id @default(cuid())
+  rootAddress   String
+  chain         ChainId
+  mode          WalletGraphMode
+  params        Json
+  status        WalletGraphSearchStatus
+  nodeCount     Int
+  edgeCount     Int
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  error         String?
+  /// Task 20: { paths: TransactionPath[]; counts: { nodeCount, edgeCount, pathCount } } —
+  /// extractPaths() output + a small counts summary, persisted alongside the
+  /// row so GET /api/graph/[id] and the JSON export don't need to re-run
+  /// extractPaths against the persisted node/edge rows.
+  resultSummary Json?
 
-  nodes        WalletGraphNode[]
-  edges        WalletGraphEdge[]
+  nodes         WalletGraphNode[]
+  edges         WalletGraphEdge[]
 
   @@map("wallet_graph_searches")
 }

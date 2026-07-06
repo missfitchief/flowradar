@@ -21,7 +21,7 @@ import path from 'node:path';
 import { DEFAULT_SETTINGS } from '@flowradar/core';
 import type { Chain, Settings } from '@flowradar/core';
 import { computeWalletScore } from '@flowradar/core';
-import { createMockWorld, MockProvider } from '@flowradar/providers';
+import { createMockWorld, GRAPH_DEMO_ROOT_ADDRESS, MockProvider } from '@flowradar/providers';
 import type { MockWorld } from '@flowradar/providers';
 import type { Prisma } from '@prisma/client';
 import { prisma } from './client';
@@ -30,6 +30,7 @@ import { runFlowScoringPass } from './scoring-pass';
 import { runSignalDetectionPass } from './signals';
 import { dispatchPendingAlerts } from './alerts';
 import { importWalletsCsv } from './csv/importWalletsCsv';
+import { runGraphSearch } from './graph/runSearch';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
@@ -365,6 +366,36 @@ async function ingestAllWallets(world: MockWorld): Promise<{ walletsIngested: nu
 }
 
 // ---------------------------------------------------------------------------
+// Phase 7.9: demo WalletGraphSearch (Task 20 binding decision 7) — one
+// CAPITAL_FLOW/depth-3 search rooted at the graph-demo scenario's fixed root
+// address (GRAPH_DEMO_ROOT_ADDRESS), run via the same runGraphSearch shared
+// body apps/worker's walletGraph job and /api/graph both use. Must run AFTER
+// Phase 6 (ingestAllWallets) — the graph search reads MoneyFlowEdge rows,
+// which only exist once the graph-demo scenario's txs have been ingested.
+// ---------------------------------------------------------------------------
+
+async function seedGraphDemoSearch(): Promise<{ searchId: string; status: string; nodeCount: number; edgeCount: number }> {
+  const search = await prisma.walletGraphSearch.create({
+    data: {
+      rootAddress: GRAPH_DEMO_ROOT_ADDRESS,
+      chain: 'SOLANA',
+      mode: 'CAPITAL_FLOW',
+      params: { maxDepth: 3 },
+      status: 'queued',
+      nodeCount: 0,
+      edgeCount: 0
+    }
+  });
+
+  const result = await runGraphSearch(prisma, search.id);
+  log('seeded demo WalletGraphSearch (CAPITAL_FLOW, depth 3, rooted at GRAPH_DEMO_ROOT_ADDRESS).', {
+    searchId: search.id,
+    ...result
+  });
+  return { searchId: search.id, ...result };
+}
+
+// ---------------------------------------------------------------------------
 // Phase 8: self-check
 // ---------------------------------------------------------------------------
 
@@ -394,7 +425,8 @@ type SignalsByToken = Map<string, { symbol: string; fired: { rule: string; sever
 
 async function runSelfCheck(
   world: MockWorld,
-  signalsByToken: SignalsByToken
+  signalsByToken: SignalsByToken,
+  graphDemoSearchId: string
 ): Promise<{ rows: SelfCheckRow[]; hardFail: boolean; concerns: string[] }> {
   const rows: SelfCheckRow[] = [];
   const concerns: string[] = [];
@@ -594,6 +626,57 @@ async function runSelfCheck(
     pass: novaAlertOk
   });
 
+  // ---------------------------------------------------------------------
+  // Graph-demo self-check (Task 20 binding decision 7): the demo
+  // WalletGraphSearch seeded in Phase 7.9 (seedGraphDemoSearch) must have
+  // reached a terminal non-failed status, discovered >= 4 nodes, and include
+  // both the graph-demo's router and CEX counterparties as non-expanded
+  // nodes (both are AddressRegistry rows with doNotExpand=true — see
+  // bootstrapAddressRegistry above — so they must appear in the node set
+  // without ever being expanded further), plus at least one extracted
+  // TransactionPath.
+  // ---------------------------------------------------------------------
+  const graphSearch = await prisma.walletGraphSearch.findUnique({
+    where: { id: graphDemoSearchId },
+    include: { nodes: true, edges: true }
+  });
+  const graphStatusOk = graphSearch?.status === 'done' || graphSearch?.status === 'truncated';
+  rows.push({
+    check: 'graph-demo WalletGraphSearch status is done|truncated',
+    expected: 'done|truncated',
+    actual: graphSearch?.status ?? 'not found',
+    pass: graphStatusOk
+  });
+
+  const graphNodeCount = graphSearch?.nodes.length ?? 0;
+  rows.push({
+    check: 'graph-demo search nodeCount >= 4',
+    expected: '>= 4',
+    actual: String(graphNodeCount),
+    pass: graphNodeCount >= 4
+  });
+
+  const graphNodeAddresses = new Set((graphSearch?.nodes ?? []).map((n) => n.address));
+  const routerAddress = world.meta.scenarios.graphDemo.routerCounterparty;
+  const cexAddress = world.meta.scenarios.graphDemo.cexCounterparty;
+  const includesRouterAndCex = graphNodeAddresses.has(routerAddress) && graphNodeAddresses.has(cexAddress);
+  rows.push({
+    check: 'graph-demo search includes router + CEX counterparty nodes',
+    expected: 'both present',
+    actual: `router present=${graphNodeAddresses.has(routerAddress)}, cex present=${graphNodeAddresses.has(cexAddress)}`,
+    pass: includesRouterAndCex
+  });
+
+  const graphPathCount = Array.isArray((graphSearch?.resultSummary as { paths?: unknown[] } | null)?.paths)
+    ? ((graphSearch!.resultSummary as { paths: unknown[] }).paths.length)
+    : 0;
+  rows.push({
+    check: 'graph-demo search found >= 1 TransactionPath',
+    expected: '>= 1',
+    actual: String(graphPathCount),
+    pass: graphPathCount >= 1
+  });
+
   // Hard-fail checks (brief: "exit code 1 if any fails") exclude only the
   // NOVA 60-70 flowScore band (the brief's own explicit "still pass but
   // flag" carve-out, handled separately above via `concerns.push` while
@@ -657,6 +740,38 @@ function printSignalSummaryTable(signalsByToken: SignalsByToken): void {
     const ruleDesc = entry.fired.map((f) => `${f.rule}(${f.severity})`).join(', ');
     console.log(`  ${entry.symbol.padEnd(symbolWidth)}  ${ruleDesc}`);
   }
+  console.log('');
+}
+
+/** Prints the demo WalletGraphSearch's own summary: status, node/edge/path counts, node-type breakdown. */
+async function printGraphSummary(searchId: string): Promise<void> {
+  const search = await prisma.walletGraphSearch.findUnique({
+    where: { id: searchId },
+    include: { nodes: true, edges: true }
+  });
+  if (!search) {
+    console.log('Graph-demo search summary: (not found)');
+    console.log('');
+    return;
+  }
+
+  const pathCount = Array.isArray((search.resultSummary as { paths?: unknown[] } | null)?.paths)
+    ? (search.resultSummary as { paths: unknown[] }).paths.length
+    : 0;
+
+  const nodeTypeCounts = new Map<string, number>();
+  for (const n of search.nodes) {
+    nodeTypeCounts.set(n.nodeType, (nodeTypeCounts.get(n.nodeType) ?? 0) + 1);
+  }
+  const nodeTypeDesc = [...nodeTypeCounts.entries()].map(([t, c]) => `${t}=${c}`).join(', ');
+
+  console.log('Graph-demo search summary:');
+  console.log(`  searchId:    ${search.id}`);
+  console.log(`  rootAddress: ${search.rootAddress}`);
+  console.log(`  status:      ${search.status}`);
+  console.log(`  nodes:       ${search.nodes.length} (${nodeTypeDesc})`);
+  console.log(`  edges:       ${search.edges.length}`);
+  console.log(`  paths:       ${pathCount}`);
   console.log('');
 }
 
@@ -795,10 +910,16 @@ async function main(): Promise<void> {
   });
   log('alert dispatch pass complete.', { ...alertResult });
 
+  // Phase 7.9: demo WalletGraphSearch (Task 20 binding decision 7) — must run
+  // after Phase 6 (ingestAllWallets), which is what populates the
+  // MoneyFlowEdge rows the graph search reads.
+  const graphDemoResult = await seedGraphDemoSearch();
+
   // Phase 8: self-check.
-  const { rows: selfCheckRows, hardFail, concerns } = await runSelfCheck(world, signalsByToken);
+  const { rows: selfCheckRows, hardFail, concerns } = await runSelfCheck(world, signalsByToken, graphDemoResult.searchId);
   printSelfCheckTable(selfCheckRows);
   printSignalSummaryTable(signalsByToken);
+  await printGraphSummary(graphDemoResult.searchId);
 
   // Phase 9: summary table.
   await printSummaryTable();
