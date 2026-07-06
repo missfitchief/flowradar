@@ -22,14 +22,15 @@
 //   5. createRunner() (InlineRunner in LITE/no-REDIS_URL, BullMqRunner in
 //      FULL), register the scheduled jobs (walletActivity, marketDataHot,
 //      marketDataNormal, flowScoring, entityClustering, moneyFlow,
-//      bridgeFlow, profitRotation, signalDetection, alertDispatch —
+//      bridgeFlow, profitRotation, signalDetection, alertDispatch, backtest —
 //      entityClustering added Task 22; moneyFlow/bridgeFlow/profitRotation
-//      added Task 23) on schedule() with settings.intervals.*Sec converted
-//      to ms, plus walletImport/walletGraph registered on-demand via
-//      process() (see below) — WORKER_FAST=1 overrides every scheduled
-//      interval to 3s so a manual verification run doesn't need to wait
-//      minutes for a full cycle of the slowest job (marketDataNormalSec,
-//      default 300s).
+//      added Task 23; backtest added Task 40 (its own intervals.backtestHours
+//      converted to seconds before sharing the same ms pipeline every other
+//      job uses)) on schedule() with settings.intervals.* converted to ms,
+//      plus walletImport/walletGraph registered on-demand via process() (see
+//      below) — WORKER_FAST=1 overrides every scheduled interval to 3s so a
+//      manual verification run doesn't need to wait minutes for a full cycle
+//      of the slowest job (marketDataNormalSec, default 300s).
 //   6. runner.start(). SIGINT/SIGTERM => runner.stop() => prisma.$disconnect()
 //      => process.exit(0).
 
@@ -55,6 +56,7 @@ import * as bridgeFlow from './jobs/bridgeFlow';
 import * as profitRotation from './jobs/profitRotation';
 import * as signalDetection from './jobs/signalDetection';
 import * as alertDispatch from './jobs/alertDispatch';
+import * as backtest from './jobs/backtest';
 import * as walletImport from './jobs/walletImport';
 import * as walletGraph from './jobs/walletGraph';
 
@@ -169,7 +171,12 @@ async function main(): Promise<void> {
     { name: 'bridgeFlow', run: bridgeFlow.run, intervalSec: settings.intervals.bridgeFlowSec },
     { name: 'profitRotation', run: profitRotation.run, intervalSec: settings.intervals.profitRotationSec },
     { name: 'signalDetection', run: signalDetection.run, intervalSec: settings.intervals.signalDetectionSec },
-    { name: 'alertDispatch', run: alertDispatch.run, intervalSec: settings.intervals.alertDispatchSec }
+    { name: 'alertDispatch', run: alertDispatch.run, intervalSec: settings.intervals.alertDispatchSec },
+    // backtestHours is expressed in HOURS (not seconds, like every other
+    // intervals.* field above) — converted to seconds here so it can share
+    // the same `intervalSec` -> intervalMsFor() pipeline (and therefore the
+    // same WORKER_FAST=1 -> 3s override) as every other scheduled job.
+    { name: 'backtest', run: backtest.run, intervalSec: settings.intervals.backtestHours * 3600 }
   ];
 
   for (const job of jobs) {

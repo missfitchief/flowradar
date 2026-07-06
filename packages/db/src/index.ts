@@ -8,6 +8,7 @@ export * from './moneyFlow';
 export * from './bridgeFlow';
 export * from './rotation';
 export * from './signals';
+export * from './backtest';
 export * from './alerts';
 export * from './csv/importWalletsCsv';
 export * from './graph/edgeFetcher';

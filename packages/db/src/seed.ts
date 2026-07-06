@@ -30,6 +30,7 @@ import { runFlowScoringPass } from './scoring-pass';
 import { runEntityClustering } from './clustering';
 import { runSignalDetectionPass } from './signals';
 import { dispatchPendingAlerts } from './alerts';
+import { runBacktestPass } from './backtest';
 import { importWalletsCsv } from './csv/importWalletsCsv';
 import { runGraphSearch } from './graph/runSearch';
 
@@ -226,6 +227,200 @@ async function seedMarketSnapshots(world: MockWorld, tokenIdByAddress: Map<strin
   }
   log('seeded market snapshots for all tokens.', { tokens: world.tokens.length, snapshots: written });
   return written;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7.94: post-signal price continuation (Task 40 — backtest evaluator
+// needs REAL post-triggeredAt market data to evaluate against; see this
+// file's own "seedBacktestContinuation" doc comment below for the full root
+// cause this phase works around).
+// ---------------------------------------------------------------------------
+
+/** Simple deterministic PRNG seeded from a string — same shape as this file's own seededRandomFor (kept as a separate local copy so this phase's determinism is self-contained and doesn't depend on that function's own call-site ordering elsewhere in the script). */
+function seededRng(seedStr: string): () => number {
+  let h = 0;
+  for (let i = 0; i < seedStr.length; i++) {
+    h = Math.imul(h ^ seedStr.charCodeAt(i), 2654435761);
+    h ^= h >>> 13;
+  }
+  let state = (h >>> 0) || 1;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    state >>>= 0;
+    return state / 0xffffffff;
+  };
+}
+
+/**
+ * Every Signal.triggeredAt is stamped `now` at signal-detection time (see
+ * packages/db/src/signals.ts's runSignalDetectionPass), which — in this
+ * one-shot seed script — lands within seconds of world.meta.horizon, i.e.
+ * the very LAST hourly TokenMarketSnapshot point Phase 4 wrote for any
+ * token. There is therefore ZERO seeded market data with ts >= triggeredAt
+ * for ANY signal: evaluateSignalOutcome's "ignore everything before
+ * triggeredAt" rule (by design — see evaluate.ts's header) would legitimately
+ * see an empty post-trigger series for every single seeded signal and return
+ * neutral_pending across the board, which is not a bug in the evaluator or
+ * in runBacktestPass — it is a genuine "no post-signal data exists yet"
+ * situation. A real, running FlowRadar deployment doesn't have this problem
+ * (its worker keeps ingesting live market snapshots long after a signal
+ * fires), but a one-shot seed script that builds its entire world up to "now"
+ * and immediately evaluates has no such luxury.
+ *
+ * This phase closes that gap by writing a further ~7 days (7*24 hourly
+ * points) of DELIBERATELY SYNTHETIC continuation snapshots per token that
+ * fired >=1 signal, starting 1 hour after that token's OWN signal(s')
+ * triggeredAt (using the EARLIEST triggeredAt when a token fired >1 signal,
+ * so every signal on that token has a fully-continuous post-trigger series).
+ * Each token's continuation path is a deterministic BOUNDED ramp — a
+ * straight-line interpolation from 1.0x (entry) to a fixed targetMultiple
+ * over the first RAMP_HOURS hours, then held flat (plus small noise) for the
+ * remainder of the week — anchored at that token's OWN mcapAtTrigger (from
+ * its Signal row — a more representative entry point than the noisy final
+ * baseline-series point). Deliberately NOT a compounding %/hour random walk:
+ * an early draft of this function multiplied mcap by (1 + drift + noise)
+ * every hour, which even at a modest-looking 9%/hour compounds to ~880,000x
+ * over 168 hours (1.09^168) — wildly unrealistic. The bounded-ramp model
+ * avoids that blowup by construction (the multiple can never exceed
+ * targetMultiple + noise, no matter how many hours elapse). targetMultiple is
+ * chosen PER SCENARIO so the resulting label distribution is a realistic,
+ * non-uniform mix rather than "every seeded signal wins" or "every seeded
+ * signal is neutral":
+ *   NOVA (flagship "hot" signal)  -> strong sustained pump (targets major_win)
+ *   QUIET (accumulation signal)   -> steady moderate growth (targets good_win)
+ *   SEED (fresh-wallet-funded)    -> modest growth then partial pullback (small_win/neutral)
+ *   ALPHA (rotation source)       -> mixed/declining (targets failure)
+ *   BETA (rotation dest)          -> modest growth (targets small_win/good_win)
+ *   DUMP (exit-warning signal)    -> continued liquidity/price collapse (targets hard_failure)
+ *   every NOISE* (rule G noise)   -> flat/mildly random (targets neutral_pending — these
+ *                                    are noise-cohort tokens, not meant to demonstrate a
+ *                                    strong outcome either way)
+ * This is explicitly a SEED-SCRIPT-ONLY device to give the backtest
+ * self-check real series coverage to prove evaluateSignalOutcome's code path
+ * runs correctly end-to-end — per this repo's hard-framing rule (see
+ * evaluate.ts/backtest.ts headers), it does NOT claim FlowRadar's rules have
+ * real trading edge; these synthetic continuations are labeled as such in
+ * this comment for exactly that reason.
+ */
+async function seedBacktestContinuation(tokenIdByAddress: Map<string, string>, world: MockWorld): Promise<{ tokensExtended: number; snapshotsWritten: number }> {
+  const CONTINUATION_HOURS = 7 * 24; // 7 days, matching BacktestHorizon's longest window (D7)
+  const HOUR = 60 * 60 * 1000;
+  const RAMP_HOURS = 30; // hours to reach targetMultiple, then hold with noise for the remainder
+
+  // Bounded "ramp to a target multiple-of-entry over RAMP_HOURS, then hold
+  // with mild noise" model (NOT compounding %/hour — compounding even a
+  // modest hourly drift over 168 hours explodes exponentially, e.g. 1.09^168
+  // is in the hundreds of thousands — wildly unrealistic for a 7-day window).
+  // targetMultiple is the intended multiple-of-entry-mcap this scenario's
+  // continuation should reach by the end of its ramp.
+  type Trajectory = { targetMultiple: number; volatility: number };
+  const TRAJECTORY_BY_SYMBOL: Record<string, Trajectory> = {
+    NOVA: { targetMultiple: 6.5, volatility: 0.04 }, // strong sustained pump -> major_win (5x+)
+    QUIET: { targetMultiple: 2.3, volatility: 0.03 }, // steady moderate growth -> good_win (2x+)
+    SEED: { targetMultiple: 1.4, volatility: 0.06 }, // modest growth, choppier -> small_win/neutral
+    ALPHA: { targetMultiple: 0.15, volatility: 0.05 }, // sustained decline, never reaches 2x -> failure
+    BETA: { targetMultiple: 1.7, volatility: 0.04 }, // modest growth -> small_win
+    DUMP: { targetMultiple: 0.05, volatility: 0.03 } // continued collapse -> hard_failure (paired with liquidity decay below)
+  };
+  const DEFAULT_TRAJECTORY: Trajectory = { targetMultiple: 1.05, volatility: 0.02 }; // NOISE*/anything else -> flat/mild -> neutral_pending
+
+  // Group signals by tokenId, taking the EARLIEST triggeredAt per token (a
+  // token with multiple fired rules, e.g. NOVA's A/C/D, gets ONE continuation
+  // series covering every one of its signals).
+  const signalRows = await prisma.signal.findMany({ select: { tokenId: true, triggeredAt: true } });
+  const earliestTriggerByToken = new Map<string, Date>();
+  for (const s of signalRows) {
+    const existing = earliestTriggerByToken.get(s.tokenId);
+    if (!existing || s.triggeredAt.getTime() < existing.getTime()) {
+      earliestTriggerByToken.set(s.tokenId, s.triggeredAt);
+    }
+  }
+
+  const tokenIdToAddress = new Map([...tokenIdByAddress.entries()].map(([addr, id]) => [id, addr]));
+  const tokenIdToSymbol = new Map(world.tokens.map((t) => [t.address, t.symbol] as const));
+
+  let tokensExtended = 0;
+  let snapshotsWritten = 0;
+
+  for (const [tokenId, earliestTriggeredAt] of earliestTriggerByToken) {
+    const address = tokenIdToAddress.get(tokenId);
+    const symbol = address ? tokenIdToSymbol.get(address) : undefined;
+    if (!symbol) continue;
+
+    const signal = await prisma.signal.findFirst({
+      where: { tokenId, triggeredAt: earliestTriggeredAt },
+      select: { mcapAtTrigger: true }
+    });
+    const entryMcap = signal ? Number(signal.mcapAtTrigger) : null;
+    if (entryMcap === null || entryMcap <= 0) continue; // nothing sensible to anchor a continuation to
+
+    const latestSnapshot = await prisma.tokenMarketSnapshot.findFirst({
+      where: { tokenId },
+      orderBy: { ts: 'desc' },
+      select: { priceUsd: true, marketCapUsd: true, liquidityUsd: true }
+    });
+    const entryPrice = latestSnapshot ? Number(latestSnapshot.priceUsd) : null;
+    const entryLiquidity = latestSnapshot && latestSnapshot.liquidityUsd !== null ? Number(latestSnapshot.liquidityUsd) : 25_000;
+    // Scale factor from mcap -> price (mcap and price move together at a
+    // fixed ratio for a fixed-supply mock token — same assumption
+    // scenarios.ts's own generateBaselineMarketSeries makes).
+    const priceToMcapRatio = entryPrice !== null && entryPrice > 0 ? entryMcap / entryPrice : 1;
+
+    const trajectory = TRAJECTORY_BY_SYMBOL[symbol] ?? DEFAULT_TRAJECTORY;
+    const rng = seededRng(`backtest-continuation-${symbol}`);
+    const isDumpScenario = symbol === 'DUMP';
+
+    let liquidity = entryLiquidity;
+
+    for (let h = 1; h <= CONTINUATION_HOURS; h++) {
+      const ts = new Date(earliestTriggeredAt.getTime() + h * HOUR);
+
+      // Ramp fraction: 0 at h=0, 1 at h=RAMP_HOURS, held at 1 afterwards —
+      // a straight-line interpolation from 1.0x (entry) to targetMultiple,
+      // so the trajectory is bounded by construction (no compounding).
+      const rampFrac = Math.min(1, h / RAMP_HOURS);
+      const baseMultiple = 1 + (trajectory.targetMultiple - 1) * rampFrac;
+      const noise = (rng() * 2 - 1) * trajectory.volatility;
+      const multiple = Math.max(0.001, baseMultiple + noise);
+      const mcap = entryMcap * multiple;
+
+      // DUMP's own signal is an exit-warning (rule G) — its continuation
+      // ALSO decays liquidity sharply within the first few hours so the
+      // hard_failure liquidity-collapse gate (>=90% drop, or <$1k) is hit
+      // deterministically well before any 2x could occur, on top of its
+      // already-negative price trajectory.
+      if (isDumpScenario) {
+        liquidity = h <= 5 ? liquidity * 0.55 : Math.max(200, liquidity * 0.97);
+      } else {
+        liquidity = Math.max(1000, liquidity * (1 + (rng() * 2 - 1) * 0.02));
+      }
+
+      const price = priceToMcapRatio > 0 ? mcap / priceToMcapRatio : mcap;
+
+      await snapshotMarket(
+        prisma,
+        tokenId,
+        {
+          priceUsd: price,
+          marketCapUsd: mcap,
+          fdvUsd: mcap,
+          liquidityUsd: liquidity,
+          vol5m: 0,
+          vol1h: 0,
+          vol6h: 0,
+          vol24h: 0,
+          holderCount: null
+        },
+        ts
+      );
+      snapshotsWritten += 1;
+    }
+    tokensExtended += 1;
+  }
+
+  return { tokensExtended, snapshotsWritten };
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +622,8 @@ type SignalsByToken = Map<string, { symbol: string; fired: { rule: string; sever
 async function runSelfCheck(
   world: MockWorld,
   signalsByToken: SignalsByToken,
-  graphDemoSearchId: string
+  graphDemoSearchId: string,
+  backtestResult: { signalsEvaluated: number; rowsUpserted: number; labelCounts: Record<string, number> }
 ): Promise<{ rows: SelfCheckRow[]; hardFail: boolean; concerns: string[] }> {
   const rows: SelfCheckRow[] = [];
   const concerns: string[] = [];
@@ -795,6 +991,51 @@ async function runSelfCheck(
     pass: graphPathCount >= 1
   });
 
+  // ---------------------------------------------------------------------
+  // Backtest self-checks (Task 40 binding decision 3): "BacktestResult rows
+  // exist for seeded signals (count > 0), every row has outcomeLabel, at
+  // least one signal labeled non-neutral ... if ALL neutral_pending,
+  // investigate series coverage before accepting." runBacktestPass has
+  // already run by the time this self-check executes (see main(), Phase
+  // 7.95) — these checks read the persisted BacktestResult rows directly
+  // rather than re-deriving from backtestResult's own in-memory summary, so
+  // a bug in the upsert path itself (not just the evaluator) would surface
+  // here too.
+  // ---------------------------------------------------------------------
+  const backtestRowCount = await prisma.backtestResult.count();
+  rows.push({
+    check: 'BacktestResult rows exist for seeded signals (count > 0)',
+    expected: '> 0',
+    actual: String(backtestRowCount),
+    pass: backtestRowCount > 0
+  });
+
+  const backtestRowsMissingLabel = await prisma.backtestResult.count({ where: { outcomeLabel: null } });
+  rows.push({
+    check: 'every BacktestResult row has a non-null outcomeLabel',
+    expected: '0 rows missing outcomeLabel',
+    actual: `${backtestRowsMissingLabel} row(s) missing outcomeLabel`,
+    pass: backtestRowsMissingLabel === 0
+  });
+
+  const nonNeutralLabelCount = Object.entries(backtestResult.labelCounts)
+    .filter(([label]) => label !== 'neutral_pending')
+    .reduce((sum, [, count]) => sum + count, 0);
+  const labelDistributionDesc = Object.entries(backtestResult.labelCounts)
+    .map(([label, count]) => `${label}=${count}`)
+    .join(', ') || '(no signals evaluated)';
+  rows.push({
+    check: 'at least one evaluated signal labeled non-neutral (label distribution: see below)',
+    expected: '>= 1 non-neutral_pending signal',
+    actual: `${nonNeutralLabelCount} non-neutral of ${backtestResult.signalsEvaluated} evaluated; distribution: ${labelDistributionDesc}`,
+    pass: nonNeutralLabelCount >= 1
+  });
+  if (nonNeutralLabelCount === 0 && backtestResult.signalsEvaluated > 0) {
+    concerns.push(
+      `Backtest label distribution is 100% neutral_pending across ${backtestResult.signalsEvaluated} evaluated signal(s) — investigate TokenMarketSnapshot series coverage for seeded signals before accepting (the mock world's NOVA/QUIET trajectories should produce measurable post-trigger movement).`
+    );
+  }
+
   // Hard-fail checks (brief: "exit code 1 if any fails") exclude only the
   // NOVA 60-70 flowScore band (the brief's own explicit "still pass but
   // flag" carve-out, handled separately above via `concerns.push` while
@@ -910,6 +1151,29 @@ async function printClusterSummary(novaAddress: string): Promise<void> {
   console.log(
     `  NOVA raw vs unique:     smartWalletCount(raw)=${novaFlowSnapshot?.smartWalletCount ?? 'n/a'}, uniqueEntityCount(unique)=${novaFlowSnapshot?.uniqueEntityCount ?? 'n/a'}`
   );
+  console.log('');
+}
+
+/** Prints the backtest pass's own summary: signals evaluated, rows upserted, and the label distribution across this pass (Task 40). */
+function printBacktestSummary(result: { signalsConsidered: number; signalsEvaluated: number; rowsUpserted: number; labelCounts: Record<string, number> }): void {
+  console.log('Backtest summary:');
+  console.log(`  signals considered:  ${result.signalsConsidered}`);
+  console.log(`  signals evaluated:   ${result.signalsEvaluated}`);
+  console.log(`  BacktestResult rows: ${result.rowsUpserted}`);
+  console.log('  label distribution:');
+  const labels = ['major_win', 'good_win', 'small_win', 'neutral_pending', 'failure', 'hard_failure'];
+  for (const label of labels) {
+    const count = result.labelCounts[label] ?? 0;
+    if (count > 0) {
+      console.log(`    ${label.padEnd(16)} ${count}`);
+    }
+  }
+  const knownLabels = new Set(labels);
+  for (const [label, count] of Object.entries(result.labelCounts)) {
+    if (!knownLabels.has(label)) {
+      console.log(`    ${label.padEnd(16)} ${count}`);
+    }
+  }
   console.log('');
 }
 
@@ -1104,12 +1368,43 @@ async function main(): Promise<void> {
   // MoneyFlowEdge rows the graph search reads.
   const graphDemoResult = await seedGraphDemoSearch();
 
+  // Phase 7.94: post-signal price continuation (Task 40) — see
+  // seedBacktestContinuation's own doc comment above for the full "why":
+  // every Signal.triggeredAt lands within seconds of world.meta.horizon (the
+  // last hourly point Phase 4 wrote), so without this phase there is
+  // ZERO seeded market data after any signal fires and the backtest pass
+  // below would legitimately see an empty post-trigger series for every
+  // signal. Must run AFTER the signal-detection passes above (it reads
+  // Signal.triggeredAt/mcapAtTrigger).
+  const continuationResult = await seedBacktestContinuation(tokenIdByAddress, world);
+  log('seeded post-signal price continuation for backtest evaluation.', continuationResult);
+
+  // Phase 7.95: backtest pass (Task 40 binding decision 3) — shared body with
+  // apps/worker/src/jobs/backtest.ts. Must run AFTER the continuation phase
+  // above (needs real market data past triggeredAt) and after the
+  // signal-detection passes (evaluates existing Signal rows). `now` is
+  // pinned past the END of every continuation series (triggeredAt + 7 days +
+  // a margin) so every horizon's window (up to D7) is treated as fully
+  // elapsed for THIS seed run — a real worker tick instead always passes
+  // real wall-clock `now` (see apps/worker/src/jobs/backtest.ts), so most
+  // horizons stay legitimately `notes: 'window_incomplete'` until enough
+  // real time has passed.
+  const latestSignal = await prisma.signal.findFirst({ orderBy: { triggeredAt: 'desc' }, select: { triggeredAt: true } });
+  const latestSignalTrigger = latestSignal?.triggeredAt ?? new Date();
+  const backtestNow = new Date(latestSignalTrigger.getTime() + (7 * 24 + 1) * 60 * 60 * 1000);
+  const backtestResult = await runBacktestPass(prisma, settings, backtestNow, {
+    info: (msg, meta) => log(msg, meta),
+    error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+  });
+  log('backtest pass complete.', { ...backtestResult, labelCounts: JSON.stringify(backtestResult.labelCounts) });
+
   // Phase 8: self-check.
-  const { rows: selfCheckRows, hardFail, concerns } = await runSelfCheck(world, signalsByToken, graphDemoResult.searchId);
+  const { rows: selfCheckRows, hardFail, concerns } = await runSelfCheck(world, signalsByToken, graphDemoResult.searchId, backtestResult);
   printSelfCheckTable(selfCheckRows);
   printSignalSummaryTable(signalsByToken);
   await printGraphSummary(graphDemoResult.searchId);
   await printClusterSummary(world.meta.scenarios.nova.tokenAddress);
+  printBacktestSummary(backtestResult);
 
   // Phase 9: summary table.
   await printSummaryTable();

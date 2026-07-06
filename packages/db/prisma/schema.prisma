@@ -696,6 +696,20 @@ model BacktestResult {
   timeTo10xMin          Float?
   smartExitedBeforeDump Boolean?
   notes                 String?
+  /// Task 40 (backtest_labels migration) additions below — series-level label
+  /// taxonomy fields, repeated identically on every horizon row for the same
+  /// signal (see packages/db/src/backtest.ts's file header for why the label
+  /// itself is NOT per-horizon: evaluateSignalOutcome's label automaton walks
+  /// the FULL available series, not a horizon-clipped slice).
+  outcomeLabel          String?
+  hitPlus50             Boolean?
+  hit2x                 Boolean?
+  hit5x                 Boolean?
+  hit10x                Boolean?
+  timeToPeakMin         Int?
+  evaluatedAt           DateTime?
+  /// 'price' | 'mcap' — which basis evaluateSignalOutcome used for this row.
+  basis                 String?
 
   signal                Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
 
