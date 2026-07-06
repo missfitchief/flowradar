@@ -206,6 +206,7 @@ export function createHeliusRiskProvider(env: HeliusRiskEnv): RiskProvider | nul
   const limiter = createRateLimiter({ rps: HELIUS_RPS });
 
   return {
+    providerName: 'Helius',
     async getTokenRisk(_chain: Chain, address: string): Promise<RiskReport> {
       const [largestAccounts, supply] = await Promise.all([
         callRpc<RpcTokenLargestAccountsResult>(apiKey, limiter, 'getTokenLargestAccounts', [address]),

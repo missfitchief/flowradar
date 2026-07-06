@@ -98,6 +98,47 @@ function getSharedMockProvider(): MockProvider {
   return sharedMockProvider;
 }
 
+// ---------------------------------------------------------------------------
+// Live-provider cache (Important finding #1, Task 27 review)
+//
+// createHeliusActivityProvider/createHeliusRiskProvider each build their own
+// createRateLimiter({rps:9}) internally (see solana/{helius,risk}.ts) — the
+// limiter is a closure variable inside the returned provider object, not
+// something registry.ts constructs directly. That means the ONLY way to get
+// one limiter shared across every getProvider('SOLANA', <cap>) call is to
+// make sure the factory itself is only invoked ONCE per live capability, and
+// every subsequent getProvider call reuses that same returned instance.
+//
+// Mechanism chosen: a module-scope Map<capabilityCacheKey, LiveProvider>,
+// populated the first time a live (key-present) provider is successfully
+// constructed for a capability, and reused after that. This is the minimal
+// fix — it doesn't require touching helius.ts/risk.ts's internals or
+// threading a limiter through an extra layer of indirection; it just ensures
+// registry.ts never calls createHelius*Provider more than once per live
+// capability while a cache entry exists.
+//
+// The mock fallback (HELIUS_API_KEY absent) is deliberately NOT cached as
+// "live" — it's cheap (returns the already-shared MockProvider singleton) and
+// re-checking env on every call means a key added mid-process (e.g. tests
+// flipping env between assertions, or a future hot-reload of config) is
+// picked up on the next getProvider call instead of being stuck on a stale
+// mock decision from before the key existed.
+// ---------------------------------------------------------------------------
+
+type LiveCacheKey = 'solana:walletActivity' | 'solana:risk';
+
+const liveProviderCache = new Map<LiveCacheKey, unknown>();
+
+/**
+ * Clears the module-scope live-provider cache. Tests must call this between
+ * process.env mutations (e.g. toggling HELIUS_API_KEY or MOCK_MODE) so a
+ * provider instance built under a previous env doesn't leak into a
+ * subsequent assertion under a different env.
+ */
+export function resetProviderCache(): void {
+  liveProviderCache.clear();
+}
+
 /**
  * Solana walletActivity/risk in live mode (Task 27): tries the real Helius
  * adapter first; when HELIUS_API_KEY is absent, createHelius*Provider
@@ -108,19 +149,43 @@ function getSharedMockProvider(): MockProvider {
  * getProviderStatuses() independently reports 'missing_key' for this case so
  * the gap is still visible in ops/Settings, even though getProvider() itself
  * doesn't throw.
+ *
+ * Review fix (Important #1): the constructed LIVE provider instance is
+ * cached at module scope (liveProviderCache) so repeated getProvider calls —
+ * e.g. once per wallet per poll tick — reuse the SAME provider object (and
+ * therefore its single internal rate limiter) instead of constructing a
+ * fresh limiter every call. The mock fallback is never cached here (it's
+ * already the shared MockProvider singleton via getSharedMockProvider).
  */
 function getSolanaHeliusOrMockFallback<C extends ProviderCapability>(capability: C): ProviderCapabilityMap[C] | null {
   const env = { HELIUS_API_KEY: process.env.HELIUS_API_KEY };
+
   if (capability === 'walletActivity') {
+    const cacheKey: LiveCacheKey = 'solana:walletActivity';
+    const cached = liveProviderCache.get(cacheKey);
+    if (cached) return cached as ProviderCapabilityMap[C];
+
     const live = createHeliusActivityProvider(env);
-    if (live) return live as unknown as ProviderCapabilityMap[C];
+    if (live) {
+      liveProviderCache.set(cacheKey, live);
+      return live as unknown as ProviderCapabilityMap[C];
+    }
     return getSharedMockProvider() as unknown as ProviderCapabilityMap[C];
   }
+
   if (capability === 'risk') {
+    const cacheKey: LiveCacheKey = 'solana:risk';
+    const cached = liveProviderCache.get(cacheKey);
+    if (cached) return cached as ProviderCapabilityMap[C];
+
     const live = createHeliusRiskProvider(env);
-    if (live) return live as unknown as ProviderCapabilityMap[C];
+    if (live) {
+      liveProviderCache.set(cacheKey, live);
+      return live as unknown as ProviderCapabilityMap[C];
+    }
     return getSharedMockProvider() as unknown as ProviderCapabilityMap[C];
   }
+
   return null;
 }
 

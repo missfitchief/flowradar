@@ -117,6 +117,7 @@ export function createHeliusActivityProvider(env: HeliusActivityEnv): WalletActi
   const limiter = createRateLimiter({ rps: HELIUS_RPS });
 
   return {
+    providerName: 'Helius',
     async getWalletTransactions(
       _chain: Chain,
       address: string,

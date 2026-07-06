@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getProvider, getProviderStatuses } from '../src/registry';
+import { getProvider, getProviderStatuses, resetProviderCache } from '../src/registry';
 
 const ORIGINAL_MOCK_MODE = process.env.MOCK_MODE;
+const ORIGINAL_HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 
 describe('getProvider / getProviderStatuses (registry)', () => {
   afterEach(() => {
@@ -84,5 +85,103 @@ describe('MOCK_MODE="false" (live mode — Wave 4 adapters not yet implemented)'
     for (const status of statuses) {
       expect(status.mode).not.toBe('mock');
     }
+  });
+});
+
+describe('MOCK_MODE="false" live wiring (Task 27 review — Important #1/#2)', () => {
+  beforeEach(() => {
+    resetProviderCache();
+  });
+
+  afterEach(() => {
+    resetProviderCache();
+    if (ORIGINAL_MOCK_MODE === undefined) {
+      delete process.env.MOCK_MODE;
+    } else {
+      process.env.MOCK_MODE = ORIGINAL_MOCK_MODE;
+    }
+    if (ORIGINAL_HELIUS_API_KEY === undefined) {
+      delete process.env.HELIUS_API_KEY;
+    } else {
+      process.env.HELIUS_API_KEY = ORIGINAL_HELIUS_API_KEY;
+    }
+  });
+
+  it('with HELIUS_API_KEY set: walletActivity/risk resolve to a Helius-branded provider, not MockProvider, and do not throw', () => {
+    process.env.MOCK_MODE = 'false';
+    process.env.HELIUS_API_KEY = 'test-key-123';
+
+    let walletActivity: ReturnType<typeof getProvider>;
+    let risk: ReturnType<typeof getProvider>;
+    expect(() => {
+      walletActivity = getProvider('SOLANA', 'walletActivity');
+    }).not.toThrow();
+    expect(() => {
+      risk = getProvider('SOLANA', 'risk');
+    }).not.toThrow();
+
+    expect((walletActivity! as { providerName?: string }).providerName).toBe('Helius');
+    expect((risk! as { providerName?: string }).providerName).toBe('Helius');
+    expect((walletActivity! as { providerName?: string }).providerName).not.toBe('MockProvider');
+    expect((risk! as { providerName?: string }).providerName).not.toBe('MockProvider');
+  });
+
+  it('with HELIUS_API_KEY absent: getProvider does not throw and returns a working mock-fallback provider; statuses report missing_key', () => {
+    process.env.MOCK_MODE = 'false';
+    delete process.env.HELIUS_API_KEY;
+
+    let walletActivity: ReturnType<typeof getProvider>;
+    expect(() => {
+      walletActivity = getProvider('SOLANA', 'walletActivity');
+    }).not.toThrow();
+    expect((walletActivity! as { providerName?: string }).providerName).toBe('MockProvider');
+
+    const statuses = getProviderStatuses();
+    const walletActivityRow = statuses.find((s) => s.chain === 'SOLANA' && s.capability === 'walletActivity');
+    expect(walletActivityRow, 'expected a SOLANA walletActivity status row').toBeDefined();
+    expect(walletActivityRow!.mode).toBe('missing_key');
+
+    // Risk's stubbed mint/freeze-authority sub-surface (see solana/risk.ts's
+    // getMintAuthorityFlags) doesn't have its own row in getProviderStatuses —
+    // the top-level SOLANA/risk row itself is what flips missing_key/live;
+    // asserting that here documents the current single-row-per-capability
+    // shape rather than assuming a separate "stub" row exists for it.
+    const riskRow = statuses.find((s) => s.chain === 'SOLANA' && s.capability === 'risk');
+    expect(riskRow, 'expected a SOLANA risk status row').toBeDefined();
+    expect(riskRow!.mode).toBe('missing_key');
+  });
+
+  it('MOCK_MODE="true" resolves MockProvider regardless of HELIUS_API_KEY', () => {
+    process.env.MOCK_MODE = 'true';
+    process.env.HELIUS_API_KEY = 'test-key-123';
+
+    const walletActivity = getProvider('SOLANA', 'walletActivity');
+    const risk = getProvider('SOLANA', 'risk');
+    expect((walletActivity as { providerName?: string }).providerName).toBe('MockProvider');
+    expect((risk as { providerName?: string }).providerName).toBe('MockProvider');
+  });
+
+  it('getProviderStatuses reports mode "live" for SOLANA walletActivity/risk when HELIUS_API_KEY is present', () => {
+    process.env.MOCK_MODE = 'false';
+    process.env.HELIUS_API_KEY = 'test-key-123';
+
+    const statuses = getProviderStatuses();
+    const walletActivityRow = statuses.find((s) => s.chain === 'SOLANA' && s.capability === 'walletActivity');
+    const riskRow = statuses.find((s) => s.chain === 'SOLANA' && s.capability === 'risk');
+    expect(walletActivityRow!.mode).toBe('live');
+    expect(riskRow!.mode).toBe('live');
+  });
+
+  it('shares the same cached provider instance (and therefore its rate limiter) across repeated getProvider calls', () => {
+    process.env.MOCK_MODE = 'false';
+    process.env.HELIUS_API_KEY = 'test-key-123';
+
+    const first = getProvider('SOLANA', 'walletActivity');
+    const second = getProvider('SOLANA', 'walletActivity');
+    expect(second).toBe(first);
+
+    const firstRisk = getProvider('SOLANA', 'risk');
+    const secondRisk = getProvider('SOLANA', 'risk');
+    expect(secondRisk).toBe(firstRisk);
   });
 });

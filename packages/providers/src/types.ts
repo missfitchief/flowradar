@@ -33,6 +33,15 @@ export interface GetWalletTransactionsResult {
 }
 
 export interface WalletActivityProvider {
+  /**
+   * Stable, human-readable identity of the concrete implementation (e.g.
+   * "MockProvider", "Helius") — lets callers (and tests) distinguish which
+   * backend a resolved provider instance is actually wired to without relying
+   * on `instanceof` across capability interfaces. Optional so existing
+   * implementers aren't broken; providers registered via getProvider should
+   * set it.
+   */
+  providerName?: string;
   getWalletTransactions(
     chain: Chain,
     address: string,
@@ -84,6 +93,8 @@ export interface TokenMetadataProvider {
 // ---------------------------------------------------------------------------
 
 export interface RiskProvider {
+  /** See WalletActivityProvider.providerName. */
+  providerName?: string;
   getTokenRisk(chain: Chain, address: string): Promise<RiskReport>;
 }
 

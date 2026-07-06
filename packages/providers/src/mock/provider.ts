@@ -38,6 +38,8 @@ const SMART_LABELS: WalletLabel[] = ['smart_money', 'whale', 'human_like'];
 export class MockProvider
   implements WalletActivityProvider, MarketDataProvider, TokenMetadataProvider, RiskProvider, WalletDiscoveryProvider
 {
+  /** Distinguishes this backend from live adapters (e.g. Helius) — see WalletActivityProvider.providerName. */
+  readonly providerName = 'MockProvider';
   private readonly world: MockWorld;
   private readonly now: Date;
 
