@@ -127,6 +127,24 @@ const IntervalsSchema = z.object({
   backtestHours: z.number()
 });
 
+// Task 34 (Wave 4.5, Spec §5b) — external smart-wallet source connectors.
+// sourcesEnabled is a Record<string, boolean> (not a fixed z.object of the 6
+// literal source names) so a future source can be added to DEFAULT_SETTINGS
+// without a SettingsSchema change; DEFAULT_SETTINGS below is the source of
+// truth for which 6 keys actually exist today.
+const TopTraderBackfillSchema = z.object({
+  mcapExpansionMin: z.number(),
+  lookbackHours: z.number(),
+  topN: z.number()
+});
+
+const ConnectorsSchema = z.object({
+  sourcesEnabled: z.record(z.string(), z.boolean()),
+  syncHours: z.number(),
+  validationBatchSize: z.number(),
+  topTraderBackfill: TopTraderBackfillSchema
+});
+
 export const SettingsSchema = z
   .object({
     chainsEnabled: ChainsEnabledSchema,
@@ -135,7 +153,8 @@ export const SettingsSchema = z
     graph: GraphSchema,
     entityConfidenceThreshold: z.number(),
     alerts: AlertsSchema,
-    intervals: IntervalsSchema
+    intervals: IntervalsSchema,
+    connectors: ConnectorsSchema
   })
   .refine((settings) => settings.rules.A.mcapMin < settings.rules.A.mcapMax, {
     message: 'rules.A.mcapMin must be less than rules.A.mcapMax',
@@ -241,6 +260,24 @@ export const DEFAULT_SETTINGS: Settings = {
     walletStatsRefreshHours: 6,
     walletDiscoveryHours: 24,
     backtestHours: 6
+  },
+  connectors: {
+    // Spec §5b's 6 external candidate-wallet feeders, priority order.
+    sourcesEnabled: {
+      solana_tracker_pnl: true,
+      birdeye_wallet_pnl: true,
+      birdeye_top_traders: true,
+      kolscan: true,
+      gmgn_smart_money: true,
+      cielo: true
+    },
+    syncHours: 6,
+    validationBatchSize: 100,
+    topTraderBackfill: {
+      mcapExpansionMin: 2,
+      lookbackHours: 24,
+      topN: 20
+    }
   }
 };
 

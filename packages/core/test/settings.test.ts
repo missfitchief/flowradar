@@ -51,3 +51,57 @@ describe('SettingsSchema / DEFAULT_SETTINGS / parseSettings', () => {
     expect(DEFAULT_SETTINGS.rules.A.watchMinWallets).toBe(10);
   });
 });
+
+describe('SettingsSchema.connectors (Task 34 — Wave 4.5 external wallet-source connectors)', () => {
+  const EXPECTED_SOURCE_NAMES = [
+    'solana_tracker_pnl',
+    'birdeye_wallet_pnl',
+    'birdeye_top_traders',
+    'kolscan',
+    'gmgn_smart_money',
+    'cielo'
+  ];
+
+  it('DEFAULT_SETTINGS.connectors carries all 6 sources enabled=true, plus syncHours/validationBatchSize/topTraderBackfill defaults', () => {
+    expect(Object.keys(DEFAULT_SETTINGS.connectors.sourcesEnabled).sort()).toEqual([...EXPECTED_SOURCE_NAMES].sort());
+    for (const name of EXPECTED_SOURCE_NAMES) {
+      expect(DEFAULT_SETTINGS.connectors.sourcesEnabled[name]).toBe(true);
+    }
+    expect(DEFAULT_SETTINGS.connectors.syncHours).toBe(6);
+    expect(DEFAULT_SETTINGS.connectors.validationBatchSize).toBe(100);
+    expect(DEFAULT_SETTINGS.connectors.topTraderBackfill).toEqual({
+      mcapExpansionMin: 2,
+      lookbackHours: 24,
+      topN: 20
+    });
+  });
+
+  it('DEFAULT_SETTINGS.connectors parses through SettingsSchema', () => {
+    const parsed = SettingsSchema.parse(DEFAULT_SETTINGS);
+    expect(parsed.connectors).toEqual(DEFAULT_SETTINGS.connectors);
+  });
+
+  it('parseSettings with a partial connectors override deep-merges and keeps every other default/source', () => {
+    const result = parseSettings({ connectors: { sourcesEnabled: { kolscan: false }, syncHours: 12 } });
+
+    expect(result.connectors.sourcesEnabled.kolscan).toBe(false);
+    // every other source retained from defaults
+    expect(result.connectors.sourcesEnabled.solana_tracker_pnl).toBe(true);
+    expect(result.connectors.sourcesEnabled.birdeye_wallet_pnl).toBe(true);
+    expect(result.connectors.sourcesEnabled.birdeye_top_traders).toBe(true);
+    expect(result.connectors.sourcesEnabled.gmgn_smart_money).toBe(true);
+    expect(result.connectors.sourcesEnabled.cielo).toBe(true);
+
+    expect(result.connectors.syncHours).toBe(12);
+    expect(result.connectors.validationBatchSize).toBe(DEFAULT_SETTINGS.connectors.validationBatchSize);
+    expect(result.connectors.topTraderBackfill).toEqual(DEFAULT_SETTINGS.connectors.topTraderBackfill);
+
+    // every other top-level section untouched
+    expect(result.rules).toEqual(DEFAULT_SETTINGS.rules);
+    expect(result.intervals).toEqual(DEFAULT_SETTINGS.intervals);
+  });
+
+  it('parseSettings throws on an invalid connectors type', () => {
+    expect(() => parseSettings({ connectors: { syncHours: 'x' } })).toThrow();
+  });
+});

@@ -23,3 +23,4 @@ export * from './bsc/bscscan';
 export * from './bsc/bscscanMapper';
 export * from './bsc/goplus';
 export * from './bsc/stubs';
+export * from './candidates';

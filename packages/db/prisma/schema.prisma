@@ -190,6 +190,14 @@ enum AddressCategory {
   TOKEN_CONTRACT
 }
 
+/// CandidateWallet.validationStatus — Wave 4.5 connector framework (Task 34/35).
+enum CandidateValidationStatus {
+  pending
+  validating
+  promoted
+  rejected
+}
+
 // ---------------------------------------------------------------------------
 // 1. Chain
 // ---------------------------------------------------------------------------
@@ -225,6 +233,8 @@ model Wallet {
   clusterLinks    EntityClusterWallet[]
   rotationsAsSource ProfitRotationSignal[] @relation("ProfitRotationSource")
   rotationsAsDest   ProfitRotationSignal[] @relation("ProfitRotationDest")
+  /// Reverse side of CandidateWallet.promotedWalletId (Task 34/35 — Wave 4.5).
+  promotedFromCandidates CandidateWallet[]
 
   @@unique([address, chain])
   @@map("wallets")
@@ -749,6 +759,69 @@ model AddressRegistry {
 
   @@unique([chain, address])
   @@map("address_registry")
+}
+
+// ---------------------------------------------------------------------------
+// 24. ExternalWalletSource (Task 34 — Wave 4.5, Spec §5b)
+// ---------------------------------------------------------------------------
+
+/// One row per external candidate-wallet feeder (Solana Tracker, Birdeye,
+/// KOLScan, GMGN, Cielo, CSV). Seeded once (packages/db/src/seed.ts) with the
+/// 6 non-CSV sources from Spec §5b; `csv_import`/`dune_token_overlap` are
+/// CandidateWallet.source vocabulary values that do NOT require a row here
+/// (csv_import predates this table; dune_token_overlap is Wave 4.6).
+model ExternalWalletSource {
+  id             String    @id @default(cuid())
+  name           String    @unique
+  type           String
+  enabled        Boolean   @default(true)
+  chainSupport   String[]
+  apiKeyEnvName  String
+  rateLimitPerMinute Int
+  status         String    @default("idle")
+  lastSyncAt     DateTime?
+  lastError      String?
+  failCount      Int       @default(0)
+  metadataJson   Json?
+
+  @@map("external_wallet_sources")
+}
+
+// ---------------------------------------------------------------------------
+// 25. CandidateWallet (Task 34 — Wave 4.5, Spec §5b)
+// ---------------------------------------------------------------------------
+
+/// A wallet address surfaced by an external source/feeder, NOT YET a tracked
+/// Wallet. Never counted by the signal engine (smartWalletCount/
+/// uniqueEntityCount/etc.) until validationStatus='promoted' and a real
+/// Wallet row exists (promotedWalletId) — Spec §5b's "critical trust rule".
+model CandidateWallet {
+  id                  String                    @id @default(cuid())
+  walletAddress       String
+  chain               ChainId
+  /// Vocabulary (Spec §5b + §5d): solana_tracker_pnl | birdeye_wallet_pnl |
+  /// birdeye_top_traders | kolscan | gmgn_smart_money | cielo | csv_import |
+  /// dune_token_overlap. Plain String (not an enum) so Wave 4.6 can add
+  /// dune_token_overlap without a further migration touching this column.
+  source              String
+  sourceRank          Int?
+  claimedPnlUsd       Decimal?                  @db.Decimal(20, 4)
+  claimedWinRate      Float?
+  claimedTradeCount   Int?
+  claimedRoi          Float?
+  firstSeenAt         DateTime
+  lastSeenAt          DateTime
+  validationStatus    CandidateValidationStatus @default(pending)
+  validationConfidence Int?
+  promotedWalletId    String?
+  rejectionReason     String?
+  metadataJson        Json?
+
+  promotedWallet      Wallet?                   @relation(fields: [promotedWalletId], references: [id])
+
+  @@unique([walletAddress, chain, source])
+  @@index([validationStatus])
+  @@map("candidate_wallets")
 }
 
 // ---------------------------------------------------------------------------

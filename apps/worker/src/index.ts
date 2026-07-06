@@ -28,7 +28,9 @@
 //      Task 40; walletStatsRefresh/walletDiscovery added Task 30 (all three
 //      of backtestHours/walletStatsRefreshHours/walletDiscoveryHours convert
 //      hours to seconds before sharing the same ms pipeline every other job
-//      uses)) on schedule() with settings.intervals.* converted to ms,
+//      uses); externalWalletSource added Task 34 (Wave 4.5 — registered on
+//      settings.connectors.syncHours, same hours->seconds conversion)) on
+//      schedule() with settings.intervals.* converted to ms,
 //      plus walletImport/walletGraph registered on-demand via process() (see
 //      below) — WORKER_FAST=1 overrides every scheduled interval to 3s so a
 //      manual verification run doesn't need to wait minutes for a full cycle
@@ -63,6 +65,7 @@ import * as walletImport from './jobs/walletImport';
 import * as walletGraph from './jobs/walletGraph';
 import * as walletStatsRefresh from './jobs/walletStatsRefresh';
 import * as walletDiscovery from './jobs/walletDiscovery';
+import * as externalWalletSource from './jobs/externalWalletSource';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const HOUR_MS = 60 * 60 * 1000;
@@ -192,6 +195,16 @@ async function main(): Promise<void> {
       name: 'walletDiscovery',
       run: walletDiscovery.run,
       intervalSec: settings.intervals.walletDiscoveryHours * 3600
+    },
+    // externalWalletSource (Task 34, Wave 4.5): also expressed in HOURS —
+    // same *3600 conversion as backtestHours/walletStatsRefreshHours/
+    // walletDiscoveryHours above. Registered on settings.connectors.syncHours
+    // (Task 34 binding decision 4), not settings.intervals — a distinct
+    // settings section this task owns.
+    {
+      name: 'externalWalletSource',
+      run: externalWalletSource.run,
+      intervalSec: settings.connectors.syncHours * 3600
     }
   ];
 

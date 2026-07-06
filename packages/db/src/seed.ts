@@ -21,7 +21,7 @@ import path from 'node:path';
 import { DEFAULT_SETTINGS } from '@flowradar/core';
 import type { Chain, Settings } from '@flowradar/core';
 import { computeWalletScore } from '@flowradar/core';
-import { createMockWorld, GRAPH_DEMO_ROOT_ADDRESS, MockProvider, STATIC_REGISTRY_ENTRIES } from '@flowradar/providers';
+import { createMockWorld, GRAPH_DEMO_ROOT_ADDRESS, MockCandidateSource, MockProvider, STATIC_REGISTRY_ENTRIES, getPoisonedAddresses } from '@flowradar/providers';
 import type { MockWorld } from '@flowradar/providers';
 import type { Prisma } from '@prisma/client';
 import { prisma } from './client';
@@ -35,6 +35,7 @@ import { runBacktestPass } from './backtest';
 import { runHistoricalReplay } from './replayRunner';
 import { importWalletsCsv } from './csv/importWalletsCsv';
 import { runGraphSearch } from './graph/runSearch';
+import { runExternalWalletSourceSync } from './externalWalletSource';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
@@ -84,6 +85,10 @@ async function wipeAllTables(): Promise<void> {
   await prisma.walletClassification.deleteMany();
   await prisma.walletStats.deleteMany();
   await prisma.moneyFlowEdge.deleteMany();
+  // CandidateWallet carries an FK to Wallet (promotedWalletId) — wiped
+  // before wallet.deleteMany() (Task 34, Wave 4.5).
+  await prisma.candidateWallet.deleteMany();
+  await prisma.externalWalletSource.deleteMany();
   await prisma.wallet.deleteMany();
   await prisma.token.deleteMany();
   await prisma.importJob.deleteMany();
@@ -248,6 +253,69 @@ async function bootstrapAddressRegistry(world: MockWorld): Promise<{ mockCount: 
 
   log('bootstrapped AddressRegistry rows (static curated lists).', { count: staticCount });
   return { mockCount: deduped.length, staticCount };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3.5: ExternalWalletSource seed rows (Task 34, Wave 4.5, Spec §5b) —
+// the 6 external candidate-wallet feeders, seeded once per fresh run (this
+// script always wipes-first, so this is always a clean createMany). enabled
+// is read from settings.connectors.sourcesEnabled so a caller who overrides
+// that map before running the seed (not the common case — DEFAULT_SETTINGS
+// has all 6 true) gets sources seeded in the state they configured, rather
+// than a hardcoded always-true.
+// ---------------------------------------------------------------------------
+
+interface ExternalWalletSourceSeedRow {
+  name: string;
+  type: string;
+  apiKeyEnvName: string;
+  chainSupport: Chain[];
+  rateLimitPerMinute: number;
+}
+
+const EXTERNAL_WALLET_SOURCE_SEED_ROWS: ExternalWalletSourceSeedRow[] = [
+  { name: 'solana_tracker_pnl', type: 'pnl_leaderboard', apiKeyEnvName: 'SOLANA_TRACKER_API_KEY', chainSupport: ['SOLANA'], rateLimitPerMinute: 60 },
+  { name: 'birdeye_wallet_pnl', type: 'pnl_validator', apiKeyEnvName: 'BIRDEYE_API_KEY', chainSupport: ['SOLANA', 'BSC'], rateLimitPerMinute: 60 },
+  { name: 'birdeye_top_traders', type: 'token_top_traders', apiKeyEnvName: 'BIRDEYE_API_KEY', chainSupport: ['SOLANA', 'BSC'], rateLimitPerMinute: 60 },
+  { name: 'kolscan', type: 'leaderboard', apiKeyEnvName: 'KOLSCAN_API_KEY', chainSupport: ['SOLANA'], rateLimitPerMinute: 30 },
+  { name: 'gmgn_smart_money', type: 'smart_money', apiKeyEnvName: 'GMGN_API_KEY', chainSupport: ['SOLANA', 'BSC'], rateLimitPerMinute: 30 },
+  { name: 'cielo', type: 'pnl_tracker', apiKeyEnvName: 'CIELO_API_KEY', chainSupport: ['SOLANA', 'BSC'], rateLimitPerMinute: 30 }
+];
+
+async function bootstrapExternalWalletSources(settings: Settings): Promise<number> {
+  await prisma.externalWalletSource.createMany({
+    data: EXTERNAL_WALLET_SOURCE_SEED_ROWS.map((row) => ({
+      name: row.name,
+      type: row.type,
+      enabled: settings.connectors.sourcesEnabled[row.name] ?? true,
+      chainSupport: row.chainSupport,
+      apiKeyEnvName: row.apiKeyEnvName,
+      rateLimitPerMinute: row.rateLimitPerMinute
+    }))
+  });
+  log('bootstrapped ExternalWalletSource rows.', { count: EXTERNAL_WALLET_SOURCE_SEED_ROWS.length });
+  return EXTERNAL_WALLET_SOURCE_SEED_ROWS.length;
+}
+
+/**
+ * Runs ONE runExternalWalletSourceSync pass (Task 34 binding decision 5) —
+ * every enabled ExternalWalletSource row resolves to the SAME shared
+ * MockCandidateSource built from this seed run's own `world` (deterministic,
+ * same convention as every other mock-mode pass in this script).
+ */
+async function seedExternalWalletSourceSync(world: MockWorld, settings: Settings) {
+  const candidateSource = new MockCandidateSource(world);
+  const result = await runExternalWalletSourceSync(
+    prisma,
+    settings,
+    () => candidateSource,
+    {
+      info: (msg, meta) => log(msg, meta),
+      error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+    }
+  );
+  log('external wallet source sync pass complete.', { ...result });
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -712,10 +780,62 @@ async function runSelfCheck(
   graphDemoSearchId: string,
   backtestResult: { signalsEvaluated: number; rowsUpserted: number; labelCounts: Record<string, number> },
   replayRunResult: Awaited<ReturnType<typeof runHistoricalReplay>>,
-  csvOkRows: number
+  csvOkRows: number,
+  externalWalletSourceSyncResult: { sourcesConsidered: number; candidatesUpserted: number; errors: number }
 ): Promise<{ rows: SelfCheckRow[]; hardFail: boolean; concerns: string[] }> {
   const rows: SelfCheckRow[] = [];
   const concerns: string[] = [];
+
+  // -----------------------------------------------------------------------
+  // External wallet-source connector self-checks (Task 34, Wave 4.5, Spec
+  // §5b binding decision 5): "CandidateWallet count > 0, all
+  // validationStatus 'pending', the poisoned addresses present as pending,
+  // source rows have lastSyncAt set."
+  // -----------------------------------------------------------------------
+  const sourceRows = await prisma.externalWalletSource.findMany();
+  rows.push({
+    check: 'ExternalWalletSource: 6 seeded rows, all with lastSyncAt set',
+    expected: '6 rows, all lastSyncAt != null',
+    actual: `${sourceRows.length} rows, ${sourceRows.filter((r) => r.lastSyncAt !== null).length} with lastSyncAt set`,
+    pass: sourceRows.length === 6 && sourceRows.every((r) => r.lastSyncAt !== null)
+  });
+
+  const candidateCount = await prisma.candidateWallet.count();
+  rows.push({
+    check: 'CandidateWallet count > 0 (external wallet-source sync produced candidates)',
+    expected: '> 0',
+    actual: String(candidateCount),
+    pass: candidateCount > 0
+  });
+
+  const nonPendingCandidateCount = await prisma.candidateWallet.count({ where: { validationStatus: { not: 'pending' } } });
+  rows.push({
+    check: 'every CandidateWallet row is validationStatus=pending (Task 35 validation has not run yet)',
+    expected: '0 non-pending rows',
+    actual: `${nonPendingCandidateCount} non-pending row(s)`,
+    pass: nonPendingCandidateCount === 0
+  });
+
+  const poisonedSolana = getPoisonedAddresses(world, 'SOLANA');
+  const allPoisonedAddresses = [...poisonedSolana.routerOrCex, ...poisonedSolana.possibleBot, ...poisonedSolana.belowThreshold];
+  const poisonedRows = await prisma.candidateWallet.findMany({
+    where: { walletAddress: { in: allPoisonedAddresses }, chain: 'SOLANA' }
+  });
+  const allPoisonedPresentAsPending =
+    poisonedRows.length >= allPoisonedAddresses.length && poisonedRows.every((r) => r.validationStatus === 'pending');
+  rows.push({
+    check: 'all 5 poisoned SOLANA addresses present as CandidateWallet rows with validationStatus=pending (Task 35 will reject them)',
+    expected: `${allPoisonedAddresses.length} rows, all pending`,
+    actual: `${poisonedRows.length} row(s) found, ${poisonedRows.filter((r) => r.validationStatus === 'pending').length} pending`,
+    pass: allPoisonedPresentAsPending
+  });
+
+  rows.push({
+    check: 'external wallet source sync: zero errors across all 6 enabled sources',
+    expected: '0 errors',
+    actual: `${externalWalletSourceSyncResult.errors} error(s), ${externalWalletSourceSyncResult.candidatesUpserted} candidates upserted across ${externalWalletSourceSyncResult.sourcesConsidered} sources`,
+    pass: externalWalletSourceSyncResult.errors === 0
+  });
 
   // Bars recalibrated 2026-07-05 (controller): matched to the Task-4 mock world's real scale
   // (~160 wallets, ~920 swap txs, 28 tokens + incidental quote-asset stubs from ingest).
@@ -1393,6 +1513,39 @@ function printReplayRunSummary(result: Awaited<ReturnType<typeof runHistoricalRe
   console.log('');
 }
 
+/** Prints the external wallet-source connector summary (Task 34, Wave 4.5): source rows, candidate counts by source/status, and the poisoned-address list for Task 35's cross-reference. */
+async function printCandidateSummary(world: MockWorld): Promise<void> {
+  const sourceRows = await prisma.externalWalletSource.findMany({ orderBy: { name: 'asc' } });
+  const candidatesBySource = await prisma.candidateWallet.groupBy({
+    by: ['source'],
+    _count: { _all: true }
+  });
+  const countsBySource = new Map(candidatesBySource.map((r) => [r.source, r._count._all]));
+
+  const totalCandidates = await prisma.candidateWallet.count();
+  const pendingCount = await prisma.candidateWallet.count({ where: { validationStatus: 'pending' } });
+
+  const poisonedSolana = getPoisonedAddresses(world, 'SOLANA');
+  const poisonedTotal = poisonedSolana.routerOrCex.length + poisonedSolana.possibleBot.length + poisonedSolana.belowThreshold.length;
+  const goodTotal = totalCandidates - poisonedTotal;
+
+  console.log('External wallet-source connector summary (Task 34, Wave 4.5):');
+  console.log('  ExternalWalletSource rows:');
+  for (const row of sourceRows) {
+    console.log(
+      `    ${row.name.padEnd(24)} enabled=${String(row.enabled).padEnd(5)} status=${row.status.padEnd(6)} lastSyncAt=${row.lastSyncAt?.toISOString() ?? 'null'} candidates=${countsBySource.get(row.name) ?? 0}`
+    );
+  }
+  console.log(`  total CandidateWallet rows:  ${totalCandidates} (pending=${pendingCount})`);
+  console.log(`  good candidates (approx):   ${goodTotal}`);
+  console.log(`  poisoned candidates:        ${poisonedTotal} (routerOrCex=${poisonedSolana.routerOrCex.length}, possibleBot=${poisonedSolana.possibleBot.length}, belowThreshold=${poisonedSolana.belowThreshold.length})`);
+  console.log('  poisoned SOLANA addresses (for Task 35 cross-reference):');
+  console.log(`    routerOrCex:     ${JSON.stringify(poisonedSolana.routerOrCex)}`);
+  console.log(`    possibleBot:     ${JSON.stringify(poisonedSolana.possibleBot)}`);
+  console.log(`    belowThreshold:  ${JSON.stringify(poisonedSolana.belowThreshold)}`);
+  console.log('');
+}
+
 async function printSummaryTable(): Promise<void> {
   const [wallets, tokens, trades, snapshots, flowSnapshots, addressRegistry, csvImportJob, signals, alerts] = await Promise.all([
     prisma.wallet.count(),
@@ -1458,6 +1611,14 @@ async function main(): Promise<void> {
     static: addressRegistryCounts.staticCount,
     mock: addressRegistryCounts.mockCount
   });
+
+  // Phase 3.5 (Task 34, Wave 4.5): seed the 6 ExternalWalletSource rows, then
+  // run ONE runExternalWalletSourceSync pass against the mock world so
+  // `npm run db:seed` populates CandidateWallet rows out of the box (no live
+  // connector required — MOCK_MODE-equivalent MockCandidateSource, same
+  // pattern as every other mock-mode seed pass in this script).
+  await bootstrapExternalWalletSources(settings);
+  const externalWalletSourceSyncResult = await seedExternalWalletSourceSync(world, settings);
 
   // Token rows must exist before market snapshots / trades can reference
   // them (Token.chain_address is the FK target) — upsert every mock-world
@@ -1656,7 +1817,8 @@ async function main(): Promise<void> {
     graphDemoResult.searchId,
     backtestResult,
     replayRunResult,
-    csvResult.okRows
+    csvResult.okRows,
+    externalWalletSourceSyncResult
   );
   printSelfCheckTable(selfCheckRows);
   printSignalSummaryTable(signalsByToken);
@@ -1664,6 +1826,7 @@ async function main(): Promise<void> {
   await printClusterSummary(world.meta.scenarios.nova.tokenAddress);
   printBacktestSummary(backtestResult);
   printReplayRunSummary(replayRunResult);
+  await printCandidateSummary(world);
 
   // Phase 9: summary table.
   await printSummaryTable();
