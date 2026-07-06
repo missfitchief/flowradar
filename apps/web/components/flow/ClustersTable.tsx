@@ -1,5 +1,5 @@
 // FlowRadar — Money Flow "Entity Clusters" table (Task 24 binding decision 3
-// / Spec §8.4 table B).
+// / product brief Module 9 (Money Flow page) / plan Task 24, table B).
 //
 // Presentational leaf, EntityCluster + EntityClusterWallet joined server-side
 // in page.tsx. Sorted walletCount desc (largest cluster first — NOVA's

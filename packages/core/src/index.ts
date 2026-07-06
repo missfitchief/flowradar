@@ -25,6 +25,7 @@ export * from './cluster/linkConfidence';
 export * from './cluster/unionFind';
 export * from './cluster/clusterer';
 export * from './rotation/matcher';
+export * from './flow/sankeyBuilder';
 
 // Graph module: the unused sketch GraphNode/GraphEdge/RawGraphEdge that used
 // to live in ./types (never implemented or consumed — confirmed by repo-wide

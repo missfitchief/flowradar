@@ -8,15 +8,14 @@ import { ClustersTable } from '@/components/flow/ClustersTable';
 import type { ClusterRow } from '@/components/flow/ClustersTable';
 import { BridgeFlowsTable } from '@/components/flow/BridgeFlowsTable';
 import type { BridgeFlowRow } from '@/components/flow/BridgeFlowsTable';
+import { buildRotationSankey } from '@flowradar/core';
+import { pairBridgeLegRows, CONFIRMED_CONFIDENCE, LOW_CONFIDENCE } from '@flowradar/db';
+import type { BridgeLeg } from '@flowradar/db';
 
 // DB-backed dashboard — must render per-request, never freeze at build time
 // (same invariant every other DB page in this app follows: /, /tokens,
 // /tokens/[id], /wallets, /alerts, /graph).
 export const dynamic = 'force-dynamic';
-
-const BRIDGE_MATCH_WINDOW_MS = 60 * 60_000; // 60 minutes — mirrors packages/db/src/bridgeFlow.ts's own window
-const MIN_AMOUNT_MATCH_PCT = 95;
-const MAX_AMOUNT_MATCH_PCT = 105;
 
 function fillUrlTemplate(template: string | null | undefined, address: string): string | null {
   if (!template) return null;
@@ -24,11 +23,12 @@ function fillUrlTemplate(template: string | null | undefined, address: string): 
 }
 
 /**
- * Money Flow page (Task 24). Server component — replaces the Task-7 shell.
- * Surfaces Wave-3 signals: cross-token profit rotations (ProfitRotationSignal),
- * entity clusters (EntityCluster/EntityClusterWallet), and bridge flows
- * (MoneyFlowEdge bridge_deposit/bridge_withdrawal pairs), plus a Sankey built
- * from the seeded $ALPHA -> $BETA rotation chain.
+ * Money Flow page (product brief Module 9 (Money Flow page) / plan Task 24).
+ * Server component — replaces the Task-7 shell. Surfaces Wave-3 signals:
+ * cross-token profit rotations (ProfitRotationSignal), entity clusters
+ * (EntityCluster/EntityClusterWallet), and bridge flows (MoneyFlowEdge
+ * bridge_deposit/bridge_withdrawal pairs), plus a Sankey built from the
+ * top rotation's chain via @flowradar/core's buildRotationSankey.
  *
  * Query shape: independent fetches in one Promise.all —
  *   1. Chain rows (2: SOLANA/BSC) -> explorer URL templates, keyed by ChainId.
@@ -36,12 +36,17 @@ function fillUrlTemplate(template: string | null | undefined, address: string): 
  *      sourceToken/destToken -> table A + summary cards + Sankey source.
  *   3. EntityCluster.findMany, include wallets (+ nested wallet) and trades
  *      (WalletTokenTrade rows stamped with this cluster's id, include token
- *      for symbol) -> table B, derived tokensTraded/recentBuys/recentExits.
+ *      for symbol) -> table B, derived tokensTraded/recentBuys/recentExits,
+ *      AND the Sankey's Cluster-node lookup (which cluster, if any, a given
+ *      wallet address belongs to).
  *   4. MoneyFlowEdge.findMany where actionType in bridge_deposit/withdrawal
- *      -> table C, paired read-only in-memory (mirrors bridgeFlow.ts's
- *      tolerance: same asset+protocol, amount ratio 95-105%, time gap <60min,
- *      closest-ratio-first greedy) WITHOUT writing back to the DB (this page
- *      only reads).
+ *      -> table C, paired via @flowradar/db's pairBridgeLegRows (the SAME
+ *      pure helper packages/db/src/bridgeFlow.ts's runBridgeFlow job wraps
+ *      for its DB-writing pass — no reimplemented pairing logic here anymore)
+ *      WITHOUT writing back to the DB (this page only reads); displayed
+ *      confidence uses the canonical CONFIRMED_CONFIDENCE(95)/LOW_CONFIDENCE(35)
+ *      constants, not each leg's raw per-ingest confidence (always 100 and
+ *      meaningless for "was this leg matched").
  * Plus one follow-up fetch for the top-funder summary card (MoneyFlowEdge
  * `transfer` rows, small table, aggregated in-memory).
  *
@@ -124,47 +129,33 @@ export default async function MoneyFlowPage() {
   });
 
   // -----------------------------------------------------------------------
-  // Table C: Bridge Flows — read-only pairing (deposit <-> withdrawal),
-  // mirrors packages/db/src/bridgeFlow.ts's tolerance without writing back.
+  // Table C: Bridge Flows — read-only pairing via @flowradar/db's
+  // pairBridgeLegRows, the SAME pure helper packages/db/src/bridgeFlow.ts's
+  // runBridgeFlow job wraps for its DB-writing pass (no reimplemented
+  // pairing logic here). Displayed confidence uses the canonical
+  // CONFIRMED_CONFIDENCE/LOW_CONFIDENCE constants rather than each leg's raw
+  // per-ingest confidence (always 100, meaningless for match status).
   // -----------------------------------------------------------------------
-  const deposits = bridgeEdges.filter((e) => e.actionType === 'bridge_deposit');
-  const withdrawals = bridgeEdges.filter((e) => e.actionType === 'bridge_withdrawal');
+  const edgeById = new Map(bridgeEdges.map((e) => [e.id, e]));
+  const toBridgeLeg = (e: (typeof bridgeEdges)[number]): BridgeLeg => ({
+    id: e.id,
+    sourceAddress: e.sourceAddress,
+    destinationAddress: e.destinationAddress,
+    asset: e.asset,
+    amountUsd: Number(e.amountUsd),
+    ts: e.ts,
+    bridgeProtocol: e.bridgeProtocol,
+  });
+  const depositLegs = bridgeEdges.filter((e) => e.actionType === 'bridge_deposit').map(toBridgeLeg);
+  const withdrawalLegs = bridgeEdges.filter((e) => e.actionType === 'bridge_withdrawal').map(toBridgeLeg);
 
-  interface Candidate {
-    depositIdx: number;
-    withdrawalIdx: number;
-    ratio: number;
-  }
-  const candidates: Candidate[] = [];
-  for (let di = 0; di < deposits.length; di++) {
-    const dep = deposits[di]!;
-    const depUsd = Number(dep.amountUsd);
-    if (depUsd <= 0) continue;
-    for (let wi = 0; wi < withdrawals.length; wi++) {
-      const wd = withdrawals[wi]!;
-      const wdUsd = Number(wd.amountUsd);
-      if (wdUsd <= 0) continue;
-      if (dep.asset !== wd.asset) continue;
-      if ((dep.bridgeProtocol ?? null) !== (wd.bridgeProtocol ?? null)) continue;
-      const timeDiff = Math.abs(wd.ts.getTime() - dep.ts.getTime());
-      if (timeDiff > BRIDGE_MATCH_WINDOW_MS) continue;
-      const matchPct = (Math.min(depUsd, wdUsd) / Math.max(depUsd, wdUsd)) * 100;
-      if (matchPct < MIN_AMOUNT_MATCH_PCT || matchPct > MAX_AMOUNT_MATCH_PCT) continue;
-      candidates.push({ depositIdx: di, withdrawalIdx: wi, ratio: matchPct });
-    }
-  }
-  candidates.sort((a, b) => b.ratio - a.ratio);
+  const { matched, unmatched } = pairBridgeLegRows(depositLegs, withdrawalLegs);
 
-  const usedDeposits = new Set<number>();
-  const usedWithdrawals = new Set<number>();
   const bridgeRows: BridgeFlowRow[] = [];
 
-  for (const c of candidates) {
-    if (usedDeposits.has(c.depositIdx) || usedWithdrawals.has(c.withdrawalIdx)) continue;
-    usedDeposits.add(c.depositIdx);
-    usedWithdrawals.add(c.withdrawalIdx);
-    const dep = deposits[c.depositIdx]!;
-    const wd = withdrawals[c.withdrawalIdx]!;
+  for (const { deposit, withdrawal } of matched) {
+    const dep = edgeById.get(deposit.id)!;
+    const wd = edgeById.get(withdrawal.id)!;
     bridgeRows.push({
       id: `${dep.id}:${wd.id}`,
       sourceChain: dep.sourceChain,
@@ -175,78 +166,64 @@ export default async function MoneyFlowPage() {
       amountUsd: Number(dep.amountUsd),
       bridgeProtocol: dep.bridgeProtocol ?? 'unknown',
       ts: dep.ts.toISOString(),
-      confidence: Math.max(dep.confidence, wd.confidence),
+      confidence: CONFIRMED_CONFIDENCE,
       matched: true,
     });
   }
-  for (let di = 0; di < deposits.length; di++) {
-    if (usedDeposits.has(di)) continue;
-    const dep = deposits[di]!;
+  // `direction` (deposit/withdrawal) only affects the persisted `reason`
+  // string runBridgeFlow writes to metadata; this read-only table doesn't
+  // surface it, so it's intentionally unused here.
+  for (const { leg } of unmatched) {
+    const e = edgeById.get(leg.id)!;
     bridgeRows.push({
-      id: dep.id,
-      sourceChain: dep.sourceChain,
-      destChain: dep.destinationChain,
-      sourceAddress: dep.sourceAddress,
-      destAddress: dep.destinationAddress,
-      asset: dep.asset,
-      amountUsd: Number(dep.amountUsd),
-      bridgeProtocol: dep.bridgeProtocol ?? 'unknown',
-      ts: dep.ts.toISOString(),
-      confidence: dep.confidence,
-      matched: false,
-    });
-  }
-  for (let wi = 0; wi < withdrawals.length; wi++) {
-    if (usedWithdrawals.has(wi)) continue;
-    const wd = withdrawals[wi]!;
-    bridgeRows.push({
-      id: wd.id,
-      sourceChain: wd.sourceChain,
-      destChain: wd.destinationChain,
-      sourceAddress: wd.sourceAddress,
-      destAddress: wd.destinationAddress,
-      asset: wd.asset,
-      amountUsd: Number(wd.amountUsd),
-      bridgeProtocol: wd.bridgeProtocol ?? 'unknown',
-      ts: wd.ts.toISOString(),
-      confidence: wd.confidence,
+      id: e.id,
+      sourceChain: e.sourceChain,
+      destChain: e.destinationChain,
+      sourceAddress: e.sourceAddress,
+      destAddress: e.destinationAddress,
+      asset: e.asset,
+      amountUsd: Number(e.amountUsd),
+      bridgeProtocol: e.bridgeProtocol ?? 'unknown',
+      ts: e.ts.toISOString(),
+      confidence: LOW_CONFIDENCE,
       matched: false,
     });
   }
 
   // -----------------------------------------------------------------------
-  // Sankey: Token(source) -> source wallet -> Bridge -> dest wallet ->
-  // Token(dest), built from the top rotation by transferredValueUsd (the
-  // seeded $ALPHA -> $BETA scenario). Guarded empty if no rotations exist.
+  // Sankey: Token(source) -> Cluster|Wallet(source) -> Bridge -> Wallet(dest)
+  // -> Token(dest), built from the top rotation by transferredValueUsd via
+  // @flowradar/core's buildRotationSankey (the seeded $ALPHA -> $BETA
+  // scenario's source wallet is unclustered, so it hits the Wallet fallback
+  // branch — see buildRotationSankey's own header/tests for the Cluster
+  // branch proof). Guarded empty if no rotations exist.
   // -----------------------------------------------------------------------
-  const sankeyNodes: FlowSankeyNode[] = [];
-  const sankeyLinks: FlowSankeyLink[] = [];
+  // Cluster-membership lookup (walletId -> {id, walletCount}), used to decide
+  // whether the Sankey's source-side second hop is a Cluster or Wallet node.
+  const clusterByWalletId = new Map<string, { id: string; walletCount: number }>();
+  for (const c of clusters) {
+    for (const ecw of c.wallets) {
+      clusterByWalletId.set(ecw.walletId, { id: c.id, walletCount: c.walletCount });
+    }
+  }
+
+  let sankeyNodes: FlowSankeyNode[] = [];
+  let sankeyLinks: FlowSankeyLink[] = [];
   const topRotation = [...rotations].sort((a, b) => Number(b.transferredValueUsd) - Number(a.transferredValueUsd))[0];
 
   if (topRotation) {
-    const sourceTokenName = `$${topRotation.sourceToken.symbol}`;
-    const sourceWalletName = `Wallet ${topRotation.sourceWallet.address.slice(0, 6)}`;
-    const bridgeName = 'Bridge (Wormhole)';
-    const destWalletName = `Wallet ${topRotation.destWallet.address.slice(0, 6)}`;
-    const destTokenName = `$${topRotation.destToken.symbol}`;
-
-    sankeyNodes.push(
-      { name: sourceTokenName, category: 'token' },
-      { name: sourceWalletName, category: 'wallet' },
-      { name: bridgeName, category: 'bridge' },
-      { name: destWalletName, category: 'wallet' },
-      { name: destTokenName, category: 'token' },
-    );
-
-    const realizedProfit = Number(topRotation.realizedProfitUsd);
-    const transferredValue = Number(topRotation.transferredValueUsd);
-
-    sankeyLinks.push(
-      { source: sourceTokenName, target: sourceWalletName, value: realizedProfit },
-      { source: sourceWalletName, target: bridgeName, value: transferredValue },
-      { source: bridgeName, target: destWalletName, value: transferredValue },
-      { source: destWalletName, target: destTokenName, value: transferredValue },
-    );
+    const sankeyData = buildRotationSankey({
+      sourceTokenSymbol: topRotation.sourceToken.symbol,
+      sourceWalletAddress: topRotation.sourceWallet.address,
+      sourceWalletCluster: clusterByWalletId.get(topRotation.sourceWallet.id) ?? null,
+      destWalletAddress: topRotation.destWallet.address,
+      destTokenSymbol: topRotation.destToken.symbol,
+      bridgeName: 'Bridge (Wormhole)',
+      realizedProfitUsd: Number(topRotation.realizedProfitUsd),
+      transferredValueUsd: Number(topRotation.transferredValueUsd),
+    });
+    sankeyNodes = sankeyData.nodes;
+    sankeyLinks = sankeyData.links;
   }
 
   // -----------------------------------------------------------------------

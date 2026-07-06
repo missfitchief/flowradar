@@ -38,8 +38,12 @@ import type { PrismaClient } from '@prisma/client';
 const BRIDGE_MATCH_WINDOW_MS = 60 * 60_000; // 60 minutes, per Task 23 binding decision 4
 const MIN_AMOUNT_MATCH_PCT = 95;
 const MAX_AMOUNT_MATCH_PCT = 105;
-const CONFIRMED_CONFIDENCE = 95;
-const LOW_CONFIDENCE = 35;
+// Exported so callers displaying paired/unmatched rows (e.g. apps/web/app/flow/page.tsx)
+// use the same canonical confidence values this pass persists to the DB, instead of
+// re-deriving their own (raw per-leg ingest confidence is always 100 and says nothing
+// about cross-leg match status — see this file's header).
+export const CONFIRMED_CONFIDENCE = 95;
+export const LOW_CONFIDENCE = 35;
 
 export interface BridgeFlowLogger {
   info(message: string, meta?: Record<string, unknown>): void;
@@ -53,7 +57,7 @@ export interface BridgeFlowResult {
   legsLowConfidence: number;
 }
 
-interface BridgeLeg {
+export interface BridgeLeg {
   id: string;
   sourceAddress: string;
   destinationAddress: string;
@@ -63,16 +67,88 @@ interface BridgeLeg {
   bridgeProtocol: string | null;
 }
 
+export interface PairedBridgeFlow {
+  deposit: BridgeLeg;
+  withdrawal: BridgeLeg;
+}
+
+export interface UnmatchedLeg {
+  leg: BridgeLeg;
+  direction: 'deposit' | 'withdrawal';
+}
+
+export interface PairBridgeLegRowsResult {
+  matched: PairedBridgeFlow[];
+  unmatched: UnmatchedLeg[];
+}
+
+/**
+ * PURE pairing core shared by runBridgeFlow (DB-mutating job pass) and the
+ * Money Flow page's read-only bridge table (apps/web/app/flow/page.tsx) —
+ * no prisma/I-O here, just the one-to-one greedy bipartite match: asset+
+ * protocol match, amount ratio in [95%,105%], time gap <60min,
+ * closest-amount-ratio-first. Callers that need CONFIRMED/LOW confidence
+ * values or CEX/MIXER-interruption reasons apply those on top of this
+ * function's matched/unmatched split (see CONFIRMED_CONFIDENCE/LOW_CONFIDENCE
+ * below and runBridgeFlow's registry lookup).
+ */
+export function pairBridgeLegRows(deposits: BridgeLeg[], withdrawals: BridgeLeg[]): PairBridgeLegRowsResult {
+  interface Candidate {
+    depositIdx: number;
+    withdrawalIdx: number;
+    ratio: number;
+  }
+  const candidates: Candidate[] = [];
+  for (let di = 0; di < deposits.length; di++) {
+    const dep = deposits[di]!;
+    if (dep.amountUsd <= 0) continue;
+    for (let wi = 0; wi < withdrawals.length; wi++) {
+      const wd = withdrawals[wi]!;
+      if (wd.amountUsd <= 0) continue;
+      if (dep.asset !== wd.asset) continue;
+      if ((dep.bridgeProtocol ?? null) !== (wd.bridgeProtocol ?? null)) continue;
+      const timeDiff = Math.abs(wd.ts.getTime() - dep.ts.getTime());
+      if (timeDiff > BRIDGE_MATCH_WINDOW_MS) continue;
+      const matchPct = (Math.min(dep.amountUsd, wd.amountUsd) / Math.max(dep.amountUsd, wd.amountUsd)) * 100;
+      if (matchPct < MIN_AMOUNT_MATCH_PCT || matchPct > MAX_AMOUNT_MATCH_PCT) continue;
+      candidates.push({ depositIdx: di, withdrawalIdx: wi, ratio: matchPct });
+    }
+  }
+  candidates.sort((a, b) => b.ratio - a.ratio);
+
+  const usedDeposits = new Set<number>();
+  const usedWithdrawals = new Set<number>();
+  const matched: PairedBridgeFlow[] = [];
+  for (const c of candidates) {
+    if (usedDeposits.has(c.depositIdx) || usedWithdrawals.has(c.withdrawalIdx)) continue;
+    usedDeposits.add(c.depositIdx);
+    usedWithdrawals.add(c.withdrawalIdx);
+    matched.push({ deposit: deposits[c.depositIdx]!, withdrawal: withdrawals[c.withdrawalIdx]! });
+  }
+
+  const unmatched: UnmatchedLeg[] = [];
+  for (let di = 0; di < deposits.length; di++) {
+    if (usedDeposits.has(di)) continue;
+    unmatched.push({ leg: deposits[di]!, direction: 'deposit' });
+  }
+  for (let wi = 0; wi < withdrawals.length; wi++) {
+    if (usedWithdrawals.has(wi)) continue;
+    unmatched.push({ leg: withdrawals[wi]!, direction: 'withdrawal' });
+  }
+
+  return { matched, unmatched };
+}
+
 /**
  * Runs one full bridge-flow matching pass over the trailing `lookbackHours`
  * window (default 24h): fetches every bridge_deposit/bridge_withdrawal
- * MoneyFlowEdge row in-window, pairs them one-to-one (asset+protocol match,
- * amount ratio in [95%,105%], time gap <60min, closest-ratio-first greedy),
- * and updates confidence/metadata on every leg touched (confirmed pairs get
- * high confidence; any leg with no qualifying counterpart in-window gets low
- * confidence and a `reason`, further downgraded to a CEX/MIXER-interruption
- * reason when either side of the unmatched leg is a registry-known CEX/MIXER
- * address).
+ * MoneyFlowEdge row in-window, pairs them one-to-one via pairBridgeLegRows
+ * (asset+protocol match, amount ratio in [95%,105%], time gap <60min,
+ * closest-ratio-first greedy), and updates confidence/metadata on every leg
+ * touched (confirmed pairs get high confidence; any leg with no qualifying
+ * counterpart in-window gets low confidence and a `reason`, further
+ * downgraded to a CEX/MIXER-interruption reason when either side of the
+ * unmatched leg is a registry-known CEX/MIXER address).
  */
 export async function runBridgeFlow(
   prisma: PrismaClient,
@@ -128,41 +204,7 @@ export async function runBridgeFlow(
     )
   );
 
-  // One-to-one greedy bipartite matching (closest amount-ratio first),
-  // identical shape to rotation.ts's pairBridgeLegs but with this pass's own
-  // stricter window/tolerance.
-  interface Candidate {
-    depositIdx: number;
-    withdrawalIdx: number;
-    ratio: number;
-  }
-  const candidates: Candidate[] = [];
-  for (let di = 0; di < deposits.length; di++) {
-    const dep = deposits[di]!;
-    if (dep.amountUsd <= 0) continue;
-    for (let wi = 0; wi < withdrawals.length; wi++) {
-      const wd = withdrawals[wi]!;
-      if (wd.amountUsd <= 0) continue;
-      if (dep.asset !== wd.asset) continue;
-      if ((dep.bridgeProtocol ?? null) !== (wd.bridgeProtocol ?? null)) continue;
-      const timeDiff = Math.abs(wd.ts.getTime() - dep.ts.getTime());
-      if (timeDiff > BRIDGE_MATCH_WINDOW_MS) continue;
-      const matchPct = (Math.min(dep.amountUsd, wd.amountUsd) / Math.max(dep.amountUsd, wd.amountUsd)) * 100;
-      if (matchPct < MIN_AMOUNT_MATCH_PCT || matchPct > MAX_AMOUNT_MATCH_PCT) continue;
-      candidates.push({ depositIdx: di, withdrawalIdx: wi, ratio: matchPct });
-    }
-  }
-  candidates.sort((a, b) => b.ratio - a.ratio);
-
-  const usedDeposits = new Set<number>();
-  const usedWithdrawals = new Set<number>();
-  const confirmedPairs: { deposit: BridgeLeg; withdrawal: BridgeLeg }[] = [];
-  for (const c of candidates) {
-    if (usedDeposits.has(c.depositIdx) || usedWithdrawals.has(c.withdrawalIdx)) continue;
-    usedDeposits.add(c.depositIdx);
-    usedWithdrawals.add(c.withdrawalIdx);
-    confirmedPairs.push({ deposit: deposits[c.depositIdx]!, withdrawal: withdrawals[c.withdrawalIdx]! });
-  }
+  const { matched: confirmedPairs, unmatched: unmatchedLegs } = pairBridgeLegRows(deposits, withdrawals);
 
   let pairsConfirmed = 0;
   let legsLowConfidence = 0;
@@ -185,36 +227,17 @@ export async function runBridgeFlow(
     pairsConfirmed += 1;
   }
 
-  for (let di = 0; di < deposits.length; di++) {
-    if (usedDeposits.has(di)) continue;
-    const dep = deposits[di]!;
-    const interrupted = registryAddresses.has(dep.sourceAddress) || registryAddresses.has(dep.destinationAddress);
+  for (const { leg, direction } of unmatchedLegs) {
+    const interrupted = registryAddresses.has(leg.sourceAddress) || registryAddresses.has(leg.destinationAddress);
+    const reasonNoMatch = direction === 'deposit' ? 'no_matching_withdrawal_in_window' : 'no_matching_deposit_in_window';
     await prisma.moneyFlowEdge.update({
-      where: { id: dep.id },
+      where: { id: leg.id },
       data: {
         confidence: LOW_CONFIDENCE,
         metadata: {
           bridgeMatch: {
             confirmed: false,
-            reason: interrupted ? 'cex_or_mixer_interruption' : 'no_matching_withdrawal_in_window'
-          }
-        }
-      }
-    });
-    legsLowConfidence += 1;
-  }
-  for (let wi = 0; wi < withdrawals.length; wi++) {
-    if (usedWithdrawals.has(wi)) continue;
-    const wd = withdrawals[wi]!;
-    const interrupted = registryAddresses.has(wd.sourceAddress) || registryAddresses.has(wd.destinationAddress);
-    await prisma.moneyFlowEdge.update({
-      where: { id: wd.id },
-      data: {
-        confidence: LOW_CONFIDENCE,
-        metadata: {
-          bridgeMatch: {
-            confirmed: false,
-            reason: interrupted ? 'cex_or_mixer_interruption' : 'no_matching_deposit_in_window'
+            reason: interrupted ? 'cex_or_mixer_interruption' : reasonNoMatch
           }
         }
       }

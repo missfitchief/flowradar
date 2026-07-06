@@ -1,10 +1,16 @@
 'use client';
 
-// FlowRadar — Money Flow Sankey (Task 24 binding decision 5 / Spec §8.4).
+// FlowRadar — Money Flow Sankey (Task 24 binding decision 5 / product brief
+// Module 9 (Money Flow page) / plan Task 24).
 //
-// Built server-side (page.tsx) from the $ALPHA -> $BETA rotation chain:
-//   Token ALPHA -> source wallet -> Bridge (Wormhole) -> dest wallet -> Token BETA
-// weighted by USD value at each hop (sell proceeds -> bridge deposit ->
+// Built server-side (page.tsx, via @flowradar/core's buildRotationSankey)
+// from the top rotation's chain:
+//   Token(source) -> Cluster|Wallet(source) -> Bridge -> Wallet(dest) -> Token(dest)
+// The second hop is a Cluster node when the rotation's source wallet belongs
+// to an EntityCluster (EntityCluster/EntityClusterWallet), else it falls back
+// to a plain Wallet node (documented fallback — see buildRotationSankey's own
+// header for which branch the seeded $ALPHA -> $BETA scenario actually hits).
+// Weighted by USD value at each hop (sell proceeds -> bridge deposit ->
 // bridge withdrawal -> dest buy). Recharts' Sankey (v3) needs `data.nodes`
 // (each just `{ name }`, though extra fields like `category` pass through to
 // the payload for custom coloring) and `data.links` with NUMERIC
@@ -17,7 +23,7 @@ import type { TooltipContentProps } from 'recharts';
 import type { ValueType, NameType } from 'recharts/types/component/DefaultTooltipContent';
 import { fmtUsd } from '@/lib/format';
 
-export type FlowSankeyNodeCategory = 'token' | 'wallet' | 'bridge';
+export type FlowSankeyNodeCategory = 'token' | 'wallet' | 'bridge' | 'cluster';
 
 export interface FlowSankeyNode {
   name: string;
@@ -39,6 +45,7 @@ const CATEGORY_COLOR: Record<FlowSankeyNodeCategory, string> = {
   token: '#818cf8', // indigo-400
   wallet: '#34d399', // emerald-400
   bridge: '#fbbf24', // amber-400
+  cluster: '#f472b6', // pink-400 — distinct from wallet so a clustered source hop is visually obvious
 };
 
 interface NodePayload {
@@ -77,8 +84,9 @@ function SankeyTooltip({ active, payload }: TooltipContentProps<ValueType, NameT
 
 /**
  * Custom node renderer — colors each node rectangle by category
- * (token/wallet/bridge) rather than Recharts' default palette, and prints the
- * node name as a label (dark-friendly: light text on the dark card background).
+ * (token/wallet/bridge/cluster) rather than Recharts' default palette, and
+ * prints the node name as a label (dark-friendly: light text on the dark
+ * card background).
  */
 function CustomNode(props: {
   x: number;

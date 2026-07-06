@@ -1,5 +1,5 @@
 // FlowRadar — Money Flow "Bridge Flows" table (Task 24 binding decision 4 /
-// Spec §8.4 table C).
+// product brief Module 9 (Money Flow page) / plan Task 24, table C).
 //
 // Presentational leaf. A bridge hop is ingested as TWO same-chain
 // MoneyFlowEdge rows (a bridge_deposit on the source chain, a
@@ -7,9 +7,12 @@
 // header) joined only by asset+amount+time+protocol proximity, never a
 // single cross-chain row (packages/db/src/bridgeFlow.ts documents the same
 // shape for its own DB-mutating confidence pass). This table receives
-// already-paired rows (pairing done server-side in page.tsx, read-only,
-// mirroring bridgeFlow.ts's tolerance without writing back to the DB) plus
-// any leftover unmatched singles, sorted amount desc.
+// already-paired rows (pairing done server-side in page.tsx via
+// @flowradar/db's pairBridgeLegRows — the SAME pure helper bridgeFlow.ts's
+// runBridgeFlow job wraps, read-only here, no write-back to the DB) plus any
+// leftover unmatched singles, sorted amount desc. Displayed confidence is the
+// canonical CONFIRMED_CONFIDENCE(95)/LOW_CONFIDENCE(35) from bridgeFlow.ts,
+// not each leg's raw per-ingest confidence.
 
 import { confidenceBand } from '@flowradar/core';
 import { Badge } from '@/components/ui/badge';

@@ -1,5 +1,5 @@
-// FlowRadar — Money Flow summary cards (Task 24 binding decision 6 / Spec
-// §8.4 top).
+// FlowRadar — Money Flow summary cards (Task 24 binding decision 6 /
+// product brief Module 9 (Money Flow page) / plan Task 24).
 //
 // 4 small stat cards, each a top-1 readout (biggest value driving the card).
 // Two cards use a documented proxy metric rather than a purpose-built query,

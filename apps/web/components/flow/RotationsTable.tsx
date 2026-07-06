@@ -1,5 +1,5 @@
 // FlowRadar — Money Flow "Suspicious Rotations" table (Task 24 binding
-// decision 2 / Spec §8.4 table A).
+// decision 2 / product brief Module 9 (Money Flow page) / plan Task 24, table A).
 //
 // Presentational leaf (no Prisma coupling), same pattern as
 // ConnectedWalletsTable/WalletBuyersTable: plain JSON-serializable rows in,
