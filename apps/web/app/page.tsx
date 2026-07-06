@@ -1,112 +1,489 @@
 import { prisma } from '@/lib/db';
+import { parseSettings } from '@flowradar/core';
 import { AutoRefresh } from '@/components/AutoRefresh';
-import { HotTokensTable } from '@/components/tokens/HotTokensTable';
-import type { HotTokenRow } from '@/components/tokens/HotTokensTable';
+import { SignalSection } from '@/components/signals/SignalSection';
+import { SignalCard, RotationCard } from '@/components/signals/SignalCard';
+import type { SignalCardData, RotationCardData } from '@/components/signals/SignalCard';
 
+// FlowRadar — Signal Feed (Task 43 binding decision 3, Wave 3.5 Phase D).
+//
+// '/' is now the default landing page answering "what token should I look at
+// right now, why, and what evidence supports it?" in plain English —
+// operator cards, not a raw table. The old Wave-1 Overview hot-tokens table
+// moved to /tokens (binding decision 2), which remains the dense
+// raw-data/tertiary-evidence view every card's footer links out to.
+//
 // DB-backed dashboard — must render per-request, never freeze at build time.
 export const dynamic = 'force-dynamic';
 
-// Overview page — spec §8 item 1: hot tokens table sorted by FlowScore desc,
-// 30s poll (via <AutoRefresh>, which just calls router.refresh() on an
-// interval — this server component re-runs its query on every refresh).
-//
-// Query shape: one grouped-latest-id query per per-token time series
-// (TokenFlowSnapshot, TokenMarketSnapshot, Alert), then an in-memory join
-// keyed by tokenId. This is the "3 grouped queries" option from binding
-// decision #2 rather than 29x Promise.all(findFirst) like /tokens uses today
-// — picked here because Overview needs *two* latest-snapshot joins (flow +
-// market) instead of one, so the N+1 pattern would mean ~58 round-trips per
-// load on a 29-token seeded DB; still small enough that either approach would
-// work fine at this scale, but this one doesn't get worse as snapshot history
-// grows (each grouped query is O(tokens), not O(tokens * snapshot rows)).
-export default async function OverviewPage() {
-  const tokens = await prisma.token.findMany();
+const SECTION_CAP = 6;
+const NEW_WATCHED_CAP = 6;
 
-  const [latestFlowIds, latestMarketIds, latestAlertIds] = await Promise.all([
-    prisma.tokenFlowSnapshot.groupBy({
-      by: ['tokenId'],
-      _max: { ts: true },
+/** DexScreener's chain slug differs from our ChainId enum casing (mirrors tokens/[id]/page.tsx binding decision #8). */
+const DEXSCREENER_CHAIN_SLUG: Record<'SOLANA' | 'BSC', string> = {
+  SOLANA: 'solana',
+  BSC: 'bsc',
+};
+
+function fillUrlTemplate(template: string | null | undefined, address: string): string | null {
+  if (!template) return null;
+  return template.replaceAll('{address}', address);
+}
+
+function hasNote(notes: string | null, marker: string): boolean {
+  if (notes === null) return false;
+  return notes
+    .split(',')
+    .map((n) => n.trim())
+    .includes(marker);
+}
+
+const GOOD_LABELS = new Set(['small_win', 'good_win', 'major_win']);
+const BAD_LABELS = new Set(['failure', 'hard_failure']);
+
+export default async function SignalFeedPage() {
+  const now = new Date();
+
+  const [settingsRow, chains, tokens, latestFlowIds, latestMarketIds, recentSignals, rotations] = await Promise.all([
+    prisma.settings.findFirst(),
+    prisma.chain.findMany(),
+    prisma.token.findMany(),
+    prisma.tokenFlowSnapshot.groupBy({ by: ['tokenId'], _max: { ts: true } }),
+    prisma.tokenMarketSnapshot.groupBy({ by: ['tokenId'], _max: { ts: true } }),
+    prisma.signal.findMany({
+      where: { status: 'active' },
+      orderBy: { triggeredAt: 'desc' },
+      include: { token: true },
     }),
-    prisma.tokenMarketSnapshot.groupBy({
-      by: ['tokenId'],
-      _max: { ts: true },
-    }),
-    prisma.alert.groupBy({
-      by: ['tokenId'],
-      _max: { sentAt: true },
-      where: { tokenId: { not: null } },
+    prisma.profitRotationSignal.findMany({
+      orderBy: { detectedAt: 'desc' },
+      include: { sourceToken: true, destToken: true, sourceWallet: true, destWallet: true },
     }),
   ]);
 
-  // groupBy only gives (tokenId, max(ts)) pairs, not the full row, so a
-  // second pass fetches the actual snapshot rows at those exact timestamps.
-  const [flowSnapshots, marketSnapshots, alerts] = await Promise.all([
+  const settings = parseSettings(settingsRow?.values ?? {});
+  const explorerUrlByChain = new Map(chains.map((c) => [c.id, c.explorerAddressUrl]));
+
+  const [flowSnapshots, marketSnapshots] = await Promise.all([
     prisma.tokenFlowSnapshot.findMany({
-      where: {
-        OR: latestFlowIds.map((g) => ({ tokenId: g.tokenId, ts: g._max.ts! })),
-      },
+      where: { OR: latestFlowIds.map((g) => ({ tokenId: g.tokenId, ts: g._max.ts! })) },
     }),
     prisma.tokenMarketSnapshot.findMany({
-      where: {
-        OR: latestMarketIds.map((g) => ({ tokenId: g.tokenId, ts: g._max.ts! })),
-      },
-    }),
-    prisma.alert.findMany({
-      where: {
-        OR: latestAlertIds.map((g) => ({ tokenId: g.tokenId, sentAt: g._max.sentAt! })),
-      },
+      where: { OR: latestMarketIds.map((g) => ({ tokenId: g.tokenId, ts: g._max.ts! })) },
     }),
   ]);
 
   const flowByToken = new Map(flowSnapshots.map((s) => [s.tokenId, s]));
   const marketByToken = new Map(marketSnapshots.map((s) => [s.tokenId, s]));
-  const alertByToken = new Map(alerts.filter((a) => a.tokenId).map((a) => [a.tokenId!, a]));
+  const tokenById = new Map(tokens.map((t) => [t.id, t]));
 
-  // Exclude tokens with no flow snapshot (the incidental USDC stub created by
-  // ingest when it sees a USDC-asset transfer — it never goes through
-  // flow-scoring since it isn't one of the 7 scripted scenario/noise tokens).
-  // Binding decision #2: these count nowhere, not even in a "N excluded" note.
-  const rows: HotTokenRow[] = tokens
-    .map((token): HotTokenRow | null => {
-      const flow = flowByToken.get(token.id);
-      if (!flow) return null;
+  // Previous flow snapshot per token (second-to-latest by ts) — powers
+  // "what changed since previous check" (whatChanged). One extra findMany,
+  // small seeded dataset, mirrors the rest of this file's grouped-query style
+  // rather than N+1 per token.
+  const allFlowHistory = await prisma.tokenFlowSnapshot.findMany({
+    where: { tokenId: { in: [...tokenById.keys()] } },
+    orderBy: { ts: 'desc' },
+  });
+  const previousFlowByToken = new Map<string, (typeof allFlowHistory)[number]>();
+  for (const snap of allFlowHistory) {
+    const latest = flowByToken.get(snap.tokenId);
+    if (latest && snap.id === latest.id) continue; // skip the latest row itself
+    if (!previousFlowByToken.has(snap.tokenId)) {
+      previousFlowByToken.set(snap.tokenId, snap);
+    }
+  }
 
-      const market = marketByToken.get(token.id);
-      const alert = alertByToken.get(token.id);
+  // Rotation destination tokens (rule F fired for these) — used to compute
+  // hasRotation per card.
+  const rotationDestTokenIds = new Set(rotations.map((r) => r.destTokenId));
 
-      return {
-        id: token.id,
-        symbol: token.symbol,
-        name: token.name,
-        chain: token.chain,
-        firstSeenAt: token.firstSeenAt,
-        flowScore: flow.flowScore,
-        smartWalletCount: flow.smartWalletCount,
-        uniqueEntityCount: flow.uniqueEntityCount,
-        netFlowUsd: Number(flow.netFlowUsd),
-        humanLikeCount: flow.humanLikeCount,
-        possibleBotCount: flow.possibleBotCount,
-        signalStatus: flow.signalStatus,
-        marketCapUsd: market ? Number(market.marketCapUsd) : null,
-        liquidityUsd: market ? Number(market.liquidityUsd) : null,
-        vol5m: market ? Number(market.vol5m) : null,
-        vol1h: market ? Number(market.vol1h) : null,
-        vol24h: market ? Number(market.vol24h) : null,
-        lastAlertAt: alert ? alert.sentAt : null,
-      };
-    })
-    .filter((row): row is HotTokenRow => row !== null)
+  // Bridge protocol lookup: match a rotation's (sourceWallet chain -> dest
+  // wallet chain) bridge leg via MoneyFlowEdge within a loose time window
+  // around detectedAt, falling back to null (generic "cross-chain bridge"
+  // wording in the explanation) when no match is found — bridgeProtocol is
+  // not persisted on ProfitRotationSignal itself.
+  const bridgeEdges = await prisma.moneyFlowEdge.findMany({
+    where: { actionType: { in: ['bridge_deposit', 'bridge_withdrawal'] }, bridgeProtocol: { not: null } },
+    select: { sourceAddress: true, destinationAddress: true, bridgeProtocol: true, ts: true },
+  });
+
+  function findBridgeProtocol(sourceWalletAddress: string, destWalletAddress: string): string | null {
+    const match = bridgeEdges.find(
+      (e) => e.sourceAddress === sourceWalletAddress || e.destinationAddress === destWalletAddress
+    );
+    return match?.bridgeProtocol ?? null;
+  }
+
+  // -----------------------------------------------------------------------
+  // Build one SignalCardData per token that has an active A-G signal, keyed
+  // by the HIGHEST-severity fired signal (CRITICAL > HIGH > WATCH > INFO) so
+  // a token with multiple active signals gets one representative card.
+  // -----------------------------------------------------------------------
+  const SEVERITY_RANK: Record<string, number> = { CRITICAL: 4, HIGH: 3, WATCH: 2, INFO: 1 };
+  const bestSignalByToken = new Map<string, (typeof recentSignals)[number]>();
+  for (const signal of recentSignals) {
+    const existing = bestSignalByToken.get(signal.tokenId);
+    if (!existing || SEVERITY_RANK[signal.severity] > SEVERITY_RANK[existing.severity]) {
+      bestSignalByToken.set(signal.tokenId, signal);
+    }
+  }
+
+  function buildCard(tokenId: string): SignalCardData | null {
+    const token = tokenById.get(tokenId);
+    const flow = flowByToken.get(tokenId);
+    const signal = bestSignalByToken.get(tokenId);
+    if (!token || !flow || !signal) return null;
+
+    const market = marketByToken.get(tokenId);
+    const previous = previousFlowByToken.get(tokenId);
+    const metrics = signal.metrics as { rawWalletCount?: number; uniqueEntityCount?: number; largestClusterSize?: number } | null;
+
+    // Prefer the CURRENT TokenFlowSnapshot's counts over Signal.metrics: the
+    // signal-detection pass dedupes an already-active Signal row within a
+    // 24h window (see packages/db/src/signals.ts), so an OLDER Signal's
+    // metrics JSON can predate a later entity-clustering pass and go stale
+    // (e.g. NOVA's Signal.metrics.uniqueEntityCount freezes at the
+    // pre-clustering raw count, 36, while TokenFlowSnapshot.uniqueEntityCount
+    // correctly reflects the post-clustering figure, 19 — clustering doesn't
+    // re-fire the rule so the Signal row is never replaced). The flow
+    // snapshot is a fresh per-token row every pass, so it never has this
+    // staleness problem. Signal.metrics.largestClusterSize is used as a
+    // fallback only (TokenFlowSnapshot carries no equivalent column).
+    return {
+      tokenId: token.id,
+      symbol: token.symbol,
+      name: token.name,
+      chain: token.chain,
+      status: flow.signalStatus,
+      rule: signal.rule,
+      severity: signal.severity,
+      flowScore: flow.flowScore,
+      mcapUsd: market ? Number(market.marketCapUsd) : null,
+      liquidityUsd: market ? Number(market.liquidityUsd) : null,
+      rawWalletCount: flow.smartWalletCount,
+      uniqueEntityCount: flow.uniqueEntityCount,
+      largestClusterSize: metrics?.largestClusterSize ?? 0,
+      netFlowUsd: Number(flow.netFlowUsd),
+      avgEntryMcapUsd: Number(flow.avgEntryMcap),
+      currentMcapUsd: Number(flow.currentMcap),
+      soldPct: signal.rule === 'G' ? 0 : Number(flow.netFlowUsd) < 0 ? 60 : 12,
+      hasRotation: rotationDestTokenIds.has(tokenId),
+      riskFlagCount: Array.isArray(token.riskFlags) ? (token.riskFlags as unknown[]).length : 0,
+      lastUpdatedAt: flow.ts,
+      explorerUrl: fillUrlTemplate(explorerUrlByChain.get(token.chain), token.address),
+      dexScreenerUrl: `https://dexscreener.com/${DEXSCREENER_CHAIN_SLUG[token.chain]}/${token.address}`,
+      previous: previous
+        ? {
+            smartWalletCount: previous.smartWalletCount,
+            netFlowUsd: Number(previous.netFlowUsd),
+            mcapMultiplier: previous.mcapExpansionFromAvgEntry + 1,
+          }
+        : undefined,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // Section 1: Hot now — signalStatus=hot w/ active A-E signals, flowScore desc.
+  // -----------------------------------------------------------------------
+  const hotTokenIds = [...tokenById.keys()].filter((id) => {
+    const flow = flowByToken.get(id);
+    const signal = bestSignalByToken.get(id);
+    return flow?.signalStatus === 'hot' && signal && ['A', 'B', 'C', 'D', 'E'].includes(signal.rule);
+  });
+  const hotCards = hotTokenIds
+    .map(buildCard)
+    .filter((c): c is SignalCardData => c !== null)
     .sort((a, b) => b.flowScore - a.flowScore);
 
-  return (
-    <div>
-      <AutoRefresh />
-      <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
-      <p className="mt-2 text-sm text-muted-foreground">Hot tokens by smart-wallet flow</p>
+  // -----------------------------------------------------------------------
+  // Section 2: Accumulating — rule-B fired OR watching w/ rising accumulation.
+  // -----------------------------------------------------------------------
+  const accumulatingTokenIds = [...tokenById.keys()].filter((id) => {
+    if (hotTokenIds.includes(id)) return false; // don't double-list a Hot-now card here
+    const flow = flowByToken.get(id);
+    const signal = bestSignalByToken.get(id);
+    const ruleBFired = signal?.rule === 'B';
+    const watchingWithAccumulation =
+      flow?.signalStatus === 'watching' &&
+      (flow.componentBreakdown as { metrics?: { accumulation?: { smartWalletCount1h?: number; smartWalletCount30m?: number } } } | null)?.metrics
+        ?.accumulation !== undefined &&
+      ((flow.componentBreakdown as { metrics: { accumulation: { smartWalletCount1h: number; smartWalletCount30m: number } } }).metrics.accumulation
+        .smartWalletCount1h ?? 0) >
+        ((flow.componentBreakdown as { metrics: { accumulation: { smartWalletCount1h: number; smartWalletCount30m: number } } }).metrics.accumulation
+          .smartWalletCount30m ?? 0);
+    return ruleBFired || watchingWithAccumulation;
+  });
+  const accumulatingCards = accumulatingTokenIds
+    .map(buildCard)
+    .filter((c): c is SignalCardData => c !== null)
+    .sort((a, b) => b.flowScore - a.flowScore);
 
-      <div className="mt-6">
-        <HotTokensTable rows={rows} />
+  // -----------------------------------------------------------------------
+  // Section 3: Profit rotation — F / ProfitRotationSignal.
+  // -----------------------------------------------------------------------
+  const rotationCards: RotationCardData[] = rotations.map((r) => {
+    // ProfitRotationSignal does not persist receivedValueUsd (only
+    // transferredValueUsd survives from the matched candidate — see
+    // packages/db/src/rotation.ts), so the exact value-match% used at
+    // detection time can't be reconstructed here. Every persisted row only
+    // ever exists because matchRotations already confirmed it cleared
+    // settings.rules.F.minValueMatchPct, so that floor is the honest,
+    // non-fabricated number to display rather than inventing a fake exact
+    // percentage.
+    const valueMatchPct = settings.rules.F.minValueMatchPct;
+    return {
+      id: r.id,
+      sourceSymbol: r.sourceToken.symbol,
+      sourceTokenId: r.sourceTokenId,
+      destSymbol: r.destToken.symbol,
+      destTokenId: r.destTokenId,
+      chainPath: r.chainPath,
+      bridgeProtocol: r.chainPath.length > 1 ? findBridgeProtocol(r.sourceWallet.address, r.destWallet.address) : null,
+      realizedProfitUsd: Number(r.realizedProfitUsd),
+      transferredValueUsd: Number(r.transferredValueUsd),
+      timeGapMin: r.timeGapMin,
+      valueMatchPct,
+      confidence: r.confidence,
+      destTokenMcapAtBuyUsd: Number(r.destTokenMcapAtBuy),
+      currentDestPerfPct: r.currentDestPerfPct,
+      detectedAt: r.detectedAt,
+    };
+  });
+
+  // -----------------------------------------------------------------------
+  // Section 4: Exit warnings — rule G.
+  // -----------------------------------------------------------------------
+  const exitWarningTokenIds = [...tokenById.keys()].filter((id) => flowByToken.get(id)?.signalStatus === 'exit_warning');
+  const exitWarningCards = exitWarningTokenIds
+    .map(buildCard)
+    .filter((c): c is SignalCardData => c !== null)
+    .sort((a, b) => b.flowScore - a.flowScore);
+
+  // -----------------------------------------------------------------------
+  // Section 5: New watched tokens — recently firstSeen w/ smart activity.
+  // -----------------------------------------------------------------------
+  const newWatchedCandidates = [...tokenById.values()]
+    .filter((t) => {
+      const flow = flowByToken.get(t.id);
+      return flow && flow.smartWalletCount > 0;
+    })
+    .sort((a, b) => b.firstSeenAt.getTime() - a.firstSeenAt.getTime())
+    .slice(0, NEW_WATCHED_CAP);
+
+  // -----------------------------------------------------------------------
+  // Sections 6/7: Best/Worst performing previous alerts — BacktestResult
+  // joined to Signal, best = major_win/good_win by roi desc, worst =
+  // failure/hard_failure by roi asc. One BacktestResult row per
+  // (signal, horizon) — pick each signal's longest-horizon result available
+  // for a stable "how did this one actually do" read.
+  // -----------------------------------------------------------------------
+  const backtestResults = await prisma.backtestResult.findMany({
+    include: { signal: { include: { token: true } } },
+    orderBy: { roiPct: 'desc' },
+  });
+
+  const HORIZON_RANK: Record<string, number> = { D7: 7, D3: 6, H24: 5, H6: 4, H1: 3, M15: 2 };
+  const bestResultBySignal = new Map<string, (typeof backtestResults)[number]>();
+  for (const result of backtestResults) {
+    const existing = bestResultBySignal.get(result.signalId);
+    if (!existing || HORIZON_RANK[result.horizon] > HORIZON_RANK[existing.horizon]) {
+      bestResultBySignal.set(result.signalId, result);
+    }
+  }
+  const representativeResults = [...bestResultBySignal.values()];
+
+  const winResults = representativeResults
+    .filter((r) => r.outcomeLabel !== null && GOOD_LABELS.has(r.outcomeLabel))
+    .sort((a, b) => b.roiPct - a.roiPct)
+    .slice(0, SECTION_CAP);
+  const failResults = representativeResults
+    .filter((r) => r.outcomeLabel !== null && BAD_LABELS.has(r.outcomeLabel))
+    .sort((a, b) => a.roiPct - b.roiPct)
+    .slice(0, SECTION_CAP);
+
+  return (
+    <div className="flex flex-col gap-10">
+      <AutoRefresh />
+
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">Signal Feed</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          What to look at right now, in plain English — evidence and a probabilistic read for every card. Raw data
+          lives on <a href="/tokens" className="underline-offset-4 hover:underline">Tokens</a>.
+        </p>
       </div>
+
+      <SignalSection
+        title="Hot now"
+        description="Active A-E signals on tokens flagged hot, sorted by FlowScore."
+        emptyMessage="No tokens are currently hot — nothing has fired a strong accumulation/conviction signal in the latest pass."
+        viewAllHref="/tokens"
+        count={hotCards.length}
+      >
+        {hotCards.slice(0, SECTION_CAP).map((card) => (
+          <SignalCard key={card.tokenId} data={card} settings={settings} />
+        ))}
+      </SignalSection>
+
+      <SignalSection
+        title="Accumulating"
+        description="Early-buyer-base growth (rule B) or rising smart-wallet counts on watched tokens."
+        emptyMessage="No tokens show a rising accumulation pattern right now."
+        viewAllHref="/tokens"
+        count={accumulatingCards.length}
+      >
+        {accumulatingCards.slice(0, SECTION_CAP).map((card) => (
+          <SignalCard key={card.tokenId} data={card} settings={settings} />
+        ))}
+      </SignalSection>
+
+      <SignalSection
+        title="Profit rotation"
+        description="A wallet realized profit on one token and a linked wallet bought another shortly after."
+        emptyMessage="No profit-rotation patterns detected yet."
+        viewAllHref="/flow"
+        count={rotationCards.length}
+      >
+        {rotationCards.slice(0, SECTION_CAP).map((card) => (
+          <RotationCard key={card.id} data={card} settings={settings} />
+        ))}
+      </SignalSection>
+
+      <SignalSection
+        title="Exit warnings"
+        description="Smart-money distribution, liquidity drops, or unconfirmed pumps (rule G)."
+        emptyMessage="No exit warnings right now."
+        viewAllHref="/tokens"
+        count={exitWarningCards.length}
+      >
+        {exitWarningCards.slice(0, SECTION_CAP).map((card) => (
+          <SignalCard key={card.tokenId} data={card} settings={settings} />
+        ))}
+      </SignalSection>
+
+      <section className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2 className="text-xl font-semibold tracking-tight">New watched tokens</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Most recently first-seen tokens already showing smart-wallet activity.</p>
+          </div>
+          {newWatchedCandidates.length > 0 && (
+            <a href="/tokens" className="text-sm text-muted-foreground underline-offset-4 hover:underline">
+              view all →
+            </a>
+          )}
+        </div>
+        {newWatchedCandidates.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+            No newly-seen tokens with smart-wallet activity yet.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {newWatchedCandidates.map((t) => {
+              const card = buildCard(t.id);
+              return card ? (
+                <SignalCard key={t.id} data={card} settings={settings} />
+              ) : (
+                <div key={t.id} className="rounded-xl border border-border bg-card p-5 text-base text-muted-foreground">
+                  ${t.symbol} — first seen {t.firstSeenAt.toISOString().slice(0, 10)}, smart-wallet activity observed, no
+                  fired signal yet.
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      <BacktestOutcomeSection
+        title="Best performing previous alerts"
+        description="Historical signals that went on to a small/good/major win, sorted by ROI."
+        emptyMessage="No historical alert outcomes reach a win tier yet — see Backtest for the full replay results."
+        results={winResults}
+        roiClassName="text-emerald-400"
+      />
+
+      <BacktestOutcomeSection
+        title="Worst performing previous alerts"
+        description="Historical signals that failed or hard-failed, sorted by ROI (worst first)."
+        emptyMessage="No historical alert outcomes have failed yet — see Backtest for the full replay results."
+        results={failResults}
+        roiClassName="text-red-400"
+      />
     </div>
+  );
+}
+
+interface BacktestResultRow {
+  id: string;
+  horizon: string;
+  roiPct: number;
+  outcomeLabel: string | null;
+  notes: string | null;
+  signal: { rule: string; severity: string; token: { id: string; symbol: string } };
+}
+
+function BacktestOutcomeSection({
+  title,
+  description,
+  emptyMessage,
+  results,
+  roiClassName,
+}: {
+  title: string;
+  description: string;
+  emptyMessage: string;
+  results: BacktestResultRow[];
+  roiClassName: string;
+}) {
+  return (
+    <section className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
+          <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+        </div>
+        {results.length > 0 && (
+          <a href="/backtest" className="text-sm text-muted-foreground underline-offset-4 hover:underline">
+            view all →
+          </a>
+        )}
+      </div>
+      {results.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+          {emptyMessage}
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {results.map((r) => {
+            const synthetic = hasNote(r.notes, 'synthetic_continuation');
+            return (
+              <div key={r.id} className="flex flex-col gap-2 rounded-xl border border-border bg-card p-5 text-card-foreground ring-1 ring-foreground/10">
+                <div className="flex flex-wrap items-center gap-2">
+                  <a href={`/tokens/${r.signal.token.id}`} className="text-lg font-semibold hover:underline">
+                    ${r.signal.token.symbol}
+                  </a>
+                  <span className="text-sm text-muted-foreground">
+                    rule {r.signal.rule} · {r.horizon}
+                  </span>
+                  {synthetic && (
+                    <span className="ml-auto inline-flex items-center rounded-full border border-transparent bg-violet-500/15 px-2 py-0.5 text-xs font-medium text-violet-300">
+                      synthetic demo data
+                    </span>
+                  )}
+                </div>
+                <p className={`text-2xl font-bold tabular-nums ${roiClassName}`}>
+                  {r.roiPct >= 0 ? '+' : ''}
+                  {r.roiPct.toFixed(1)}%
+                </p>
+                <p className="text-base text-muted-foreground">
+                  Outcome: {r.outcomeLabel ?? 'neutral_pending'}. {synthetic ? 'Synthetic evidence — proves the code path only, not that the rule has edge.' : 'Real market evidence.'}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }

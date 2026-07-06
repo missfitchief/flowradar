@@ -34,6 +34,7 @@ export * from './backtest/thresholdTuning';
 export * from './backtest/walkForward';
 export * from './backtest/shadow';
 export * from './backtest/replayRequest';
+export * from './feed/explain';
 
 // Graph module: the unused sketch GraphNode/GraphEdge/RawGraphEdge that used
 // to live in ./types (never implemented or consumed — confirmed by repo-wide

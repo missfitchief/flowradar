@@ -9,16 +9,16 @@ interface NavItem {
   href: string;
 }
 
-// Order matches binding decision #5 (Task 17) plus Task 42's own nav
-// binding decision 5: Backtest + Shadow inserted after Alerts, before
-// Settings — full nav reorder (Signal Feed as default landing page etc.) is
-// Task 43's job, not this one.
+// Order per Task 43 binding decision 2 (Wave 3.5 Phase D): Signal Feed
+// becomes the default landing page ('/'), the old Overview hot-table code is
+// merged into /tokens (now the single dense raw-table layer). Backtest +
+// Shadow (Task 42) remain reachable, placed after Alerts, before Settings.
 const NAV_ITEMS: NavItem[] = [
-  { label: 'Overview', href: '/' },
+  { label: 'Signal Feed', href: '/' },
   { label: 'Tokens', href: '/tokens' },
-  { label: 'Wallets', href: '/wallets' },
   { label: 'Money Flow', href: '/flow' },
   { label: 'Wallet Graph', href: '/graph' },
+  { label: 'Wallets', href: '/wallets' },
   { label: 'Alerts', href: '/alerts' },
   { label: 'Backtest', href: '/backtest' },
   { label: 'Shadow', href: '/shadow' },
