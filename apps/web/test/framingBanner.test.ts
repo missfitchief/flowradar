@@ -34,7 +34,16 @@ const EXPECTED_TEXT =
 
 describe('FramingBanner — hard-framing copy (Spec §5c binding requirement)', () => {
   it('FramingBanner.tsx exports the exact binding copy verbatim', () => {
-    const source = readFileSync(path.join(APP_ROOT, 'components', 'backtest', 'FramingBanner.tsx'), 'utf-8');
+    // Normalize CRLF -> LF before the byte-exact check: the committed blob is
+    // LF (CI/Linux checkouts pass as-is), but on a Windows autocrlf=true clone
+    // the working tree is smudged to CRLF, which would break the embedded `\n`
+    // in the expected substring. The assertion below is unchanged in meaning —
+    // the exact prefix + verbatim copy must still be present — just made
+    // independent of the checkout's line-ending policy.
+    const source = readFileSync(
+      path.join(APP_ROOT, 'components', 'backtest', 'FramingBanner.tsx'),
+      'utf-8',
+    ).replace(/\r\n/g, '\n');
     expect(source).toContain(`export const FRAMING_BANNER_TEXT =\n  '${EXPECTED_TEXT}';`);
   });
 
