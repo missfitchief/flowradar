@@ -215,6 +215,7 @@ function rotationInput(overrides: Partial<ExplainInput> = {}): ExplainInput {
       bridgeProtocol: 'Wormhole',
       timeGapMin: 65,
       valueMatchPct: 80,
+      valueMatchFloorPct: 70,
       confidence: 78
     },
     settings: DEFAULT_SETTINGS
@@ -271,6 +272,33 @@ describe('buildSignalExplanation — ALPHA -> BETA rotation (rule F)', () => {
     for (const banned of ['moon', 'pump it', 'guaranteed', 'buy now']) {
       expect(all).not.toContain(banned);
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // Real match-% vs settings-floor fallback (Task 43 review fix: rotation
+  // match-% must be the REAL measured receivedValueUsd/transferredValueUsd
+  // figure when available, e.g. ~97% for the ALPHA->BETA scenario's 0.97
+  // ratio — never silently substitute the settings floor as if it were the
+  // measured value).
+  // -------------------------------------------------------------------------
+
+  it('renders the REAL measured value-match% when valueMatchPct is present (e.g. 97%)', () => {
+    const result = buildSignalExplanation(
+      rotationInput({ rotation: { ...rotationInput().rotation!, valueMatchPct: 97 } })
+    );
+    const joined = result.whyFired.join(' ');
+    expect(joined).toContain('Amount match: 97%');
+    expect(joined).not.toContain('exact figure unavailable');
+  });
+
+  it('falls back to "≥{floor}% (exact figure unavailable)" wording when valueMatchPct is null (legacy row)', () => {
+    const result = buildSignalExplanation(
+      rotationInput({ rotation: { ...rotationInput().rotation!, valueMatchPct: null, valueMatchFloorPct: 70 } })
+    );
+    const joined = result.whyFired.join(' ');
+    expect(joined).toContain('Amount match: ≥70%');
+    expect(joined).toContain('exact figure unavailable');
+    expect(joined).not.toMatch(/Amount match: \d+%\./); // must not look like an exact figure
   });
 });
 

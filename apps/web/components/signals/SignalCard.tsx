@@ -282,7 +282,10 @@ export interface RotationCardData {
   realizedProfitUsd: number;
   transferredValueUsd: number;
   timeGapMin: number;
-  valueMatchPct: number;
+  /** Real receivedValueUsd/transferredValueUsd*100 when available; null for legacy rows persisted before ProfitRotationSignal.receivedValueUsd existed. */
+  valueMatchPct: number | null;
+  /** settings.rules.F.minValueMatchPct — the floor to display when valueMatchPct is null. */
+  valueMatchFloorPct: number;
   confidence: number;
   destTokenMcapAtBuyUsd: number | null;
   currentDestPerfPct: number;
@@ -316,6 +319,7 @@ export function RotationCard({ data, settings }: { data: RotationCardData; setti
       bridgeProtocol: data.bridgeProtocol ?? undefined,
       timeGapMin: data.timeGapMin,
       valueMatchPct: data.valueMatchPct,
+      valueMatchFloorPct: data.valueMatchFloorPct,
       confidence: data.confidence,
     },
     settings,
@@ -367,7 +371,10 @@ export function RotationCard({ data, settings }: { data: RotationCardData; setti
       <div className="grid grid-cols-2 gap-x-4 gap-y-2 border-t border-border/60 pt-4 text-sm sm:grid-cols-3">
         <EvidenceChip label="Realized profit" value={fmtUsd(data.realizedProfitUsd)} valueClassName="text-emerald-400" />
         <EvidenceChip label="Transferred value" value={fmtUsd(data.transferredValueUsd)} />
-        <EvidenceChip label="Value match" value={`${data.valueMatchPct.toFixed(0)}%`} />
+        <EvidenceChip
+          label="Value match"
+          value={data.valueMatchPct !== null ? `${data.valueMatchPct.toFixed(0)}%` : `≥${data.valueMatchFloorPct}% (exact unavailable)`}
+        />
         <EvidenceChip label="Time gap" value={`${data.timeGapMin.toFixed(0)} min`} />
         <EvidenceChip label="Confidence" value={`${data.confidence.toFixed(0)} (${band})`} />
         <EvidenceChip

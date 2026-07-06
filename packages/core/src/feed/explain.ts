@@ -82,7 +82,17 @@ export interface ExplainRotation {
   bridged: boolean;
   bridgeProtocol?: string;
   timeGapMin: number;
-  valueMatchPct: number;
+  /**
+   * The REAL measured receivedValueUsd/transferredValueUsd*100 figure, when
+   * available (ProfitRotationSignal.receivedValueUsd is non-null — every row
+   * persisted going forward, see packages/db/src/rotation.ts). null for
+   * legacy rows persisted before that column existed, where only the
+   * settings floor (valueMatchFloorPct) is known — the sentence must render
+   * "at least X%" wording in that case, never fabricate an exact number.
+   */
+  valueMatchPct: number | null;
+  /** settings.rules.F.minValueMatchPct — always available (comes straight from settings, not the DB row). Used verbatim when valueMatchPct is null. */
+  valueMatchFloorPct: number;
   /** 0-100 raw confidence score — banded via confidenceBand (weak/possible/probable/strong). */
   confidence: number;
 }
@@ -151,7 +161,17 @@ function buildRotationWhyFired(input: ExplainInput): string[] {
     : ',';
 
   const sentence1 = `Wallet group realized profit on $${rotation.sourceSymbol}${bridgeClause} and a linked wallet bought $${rotation.destSymbol} ${rotation.timeGapMin.toFixed(0)} minutes later.`;
-  const sentence2 = `Amount match: ${rotation.valueMatchPct.toFixed(0)}%. Confidence: ${band}.`;
+  // valueMatchPct is the REAL measured receivedValueUsd/transferredValueUsd
+  // figure when available; for legacy rows persisted before
+  // ProfitRotationSignal.receivedValueUsd existed, it's null and only the
+  // settings floor is known — render "≥X%" with explicit "exact figure
+  // unavailable" wording rather than presenting the floor as if it were the
+  // measured match (the pre-fix bug this replaces).
+  const amountMatchClause =
+    rotation.valueMatchPct !== null
+      ? `Amount match: ${rotation.valueMatchPct.toFixed(0)}%.`
+      : `Amount match: ≥${rotation.valueMatchFloorPct}% (exact figure unavailable).`;
+  const sentence2 = `${amountMatchClause} Confidence: ${band}.`;
 
   return [sentence1, sentence2];
 }
@@ -164,6 +184,15 @@ function buildRotationWhyFired(input: ExplainInput): string[] {
 
 function buildAccumulationWouldInvalidate(settings: Settings): string[] {
   const { A } = settings.rules;
+  // Latent coupling: this sentence is shared verbatim across the WHOLE
+  // accumulation family (rules A-E all route through here — see
+  // buildSignalExplanation's dispatch below), but it reads its two
+  // thresholds from ONLY rule A (maxSoldPct) and rule B (maxMcapExpansion).
+  // That's harmless today because every accumulation-family rule in
+  // settings.ts happens to reuse those same two threshold values — if a
+  // future change makes per-rule thresholds diverge (e.g. rule D gets its
+  // own maxSoldPct distinct from A's), this function must be revisited to
+  // read the CALLING rule's own thresholds instead of hardcoding A/B.
   return [
     `Sell pressure rising above ${A.maxSoldPct}% of buyers`,
     `Market cap expanding beyond ${settings.rules.B.maxMcapExpansion}× average smart entry`,

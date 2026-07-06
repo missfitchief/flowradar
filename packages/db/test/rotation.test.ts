@@ -248,6 +248,16 @@ describe.skipIf(!(await probePort('localhost', 5439)))('buildRotationInputs / ru
     expect(signalRow!.chainPath).toEqual(['SOLANA', 'BSC']);
     expect(Number(signalRow!.realizedProfitUsd)).toBeCloseTo(3000, 0);
 
+    // receivedValueUsd (Task 43 review fix: real match-%, not the settings
+    // floor) must be persisted verbatim from the matched candidate — the
+    // withdrawal leg was built as 97% of the deposit amount above, so the
+    // real value-match% (receivedValueUsd/transferredValueUsd*100) is ~97%,
+    // not the settings floor.
+    expect(signalRow!.receivedValueUsd).not.toBeNull();
+    expect(Number(signalRow!.receivedValueUsd)).toBeCloseTo(withdrawUsd, 2);
+    const realValueMatchPct = (Number(signalRow!.receivedValueUsd) / Number(signalRow!.transferredValueUsd)) * 100;
+    expect(realValueMatchPct).toBeCloseTo(97, 0);
+
     // -- Second run dedupes: no additional row for the same wallet pair + dest token. --
     const countBefore = await prisma.profitRotationSignal.count({
       where: { sourceWalletId: sourceWallet.id, destWalletId: destWallet.id, destTokenId: betaToken.id }

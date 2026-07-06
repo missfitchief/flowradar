@@ -389,6 +389,7 @@ export async function runProfitRotation(
         destTokenId: candidate.destTokenId,
         realizedProfitUsd: candidate.realizedProfitUsd,
         transferredValueUsd: candidate.transferredValueUsd,
+        receivedValueUsd: candidate.receivedValueUsd,
         chainPath: candidate.chainPath as ('SOLANA' | 'BSC')[],
         timeGapMin: candidate.timeGapMin,
         confidence,

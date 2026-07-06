@@ -442,8 +442,25 @@ async function buildSignalAlertText(
   ]);
 
   const metrics = signal.metrics;
-  const rawWalletCount = readMetricNumber(metrics, 'rawWalletCount', signal.walletCount);
-  const uniqueEntityCount = readMetricNumber(metrics, 'uniqueEntityCount', signal.uniqueEntityCount);
+  // Prefer the CURRENT TokenFlowSnapshot's counts over Signal.metrics/Signal
+  // columns: the signal-detection pass dedupes an already-active Signal row
+  // within a 24h window (packages/db/src/signals.ts), so an OLDER Signal's
+  // metrics JSON (and its walletCount/uniqueEntityCount columns, frozen at
+  // detection time) can predate a later entity-clustering re-score and go
+  // stale (e.g. a Signal's uniqueEntityCount freezes at the pre-clustering
+  // raw count, 36, while TokenFlowSnapshot.uniqueEntityCount correctly
+  // reflects the post-clustering figure, 19 — clustering doesn't re-fire the
+  // rule so the Signal row is never replaced). This mirrors
+  // apps/web/app/page.tsx's buildCard documented rationale verbatim — the
+  // Telegram alert and the Signal Feed card must read the SAME live source
+  // so the two surfaces never disagree. The flow snapshot is a fresh
+  // per-token row every pass, so it never has this staleness problem;
+  // Signal.metrics/Signal columns are used only as a fallback when no
+  // TokenFlowSnapshot exists yet at all.
+  const rawWalletCount = latestFlow ? latestFlow.smartWalletCount : readMetricNumber(metrics, 'rawWalletCount', signal.walletCount);
+  const uniqueEntityCount = latestFlow ? latestFlow.uniqueEntityCount : readMetricNumber(metrics, 'uniqueEntityCount', signal.uniqueEntityCount);
+  // largestClusterSize has no TokenFlowSnapshot equivalent column, so
+  // Signal.metrics remains its only source (fallback-only in name alone).
   const largestClusterSize = readMetricNumber(metrics, 'largestClusterSize', 0);
   const clusterConcentration = readClusterConcentration(metrics);
 

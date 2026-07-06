@@ -599,6 +599,15 @@ model ProfitRotationSignal {
   detectedAt            DateTime
   destTokenMcapAtBuy    Decimal  @db.Decimal(20, 4)
   currentDestPerfPct    Float
+  /// The matched candidate's ACTUAL received-value (RotationCandidate.receivedValueUsd,
+  /// packages/core/src/rotation/matcher.ts), persisted so the real
+  /// receivedValueUsd/transferredValueUsd match% can be displayed later
+  /// instead of only the settings floor (Task 43 review fix). Nullable/
+  /// additive: legacy rows persisted before this column existed have no way
+  /// to backfill this figure, so null is a valid, permanent state for those
+  /// rows — display code must treat null as "exact figure unavailable", not
+  /// as zero.
+  receivedValueUsd      Decimal? @db.Decimal(20, 4)
 
   sourceWallet          Wallet @relation("ProfitRotationSource", fields: [sourceWalletId], references: [id], onDelete: Cascade)
   destWallet            Wallet @relation("ProfitRotationDest", fields: [destWalletId], references: [id], onDelete: Cascade)

@@ -98,21 +98,42 @@ export default async function SignalFeedPage() {
   // hasRotation per card.
   const rotationDestTokenIds = new Set(rotations.map((r) => r.destTokenId));
 
-  // Bridge protocol lookup: match a rotation's (sourceWallet chain -> dest
-  // wallet chain) bridge leg via MoneyFlowEdge within a loose time window
-  // around detectedAt, falling back to null (generic "cross-chain bridge"
-  // wording in the explanation) when no match is found — bridgeProtocol is
-  // not persisted on ProfitRotationSignal itself.
+  // Bridge protocol lookup: match a rotation's (sourceWallet -> dest wallet)
+  // bridge leg via MoneyFlowEdge, constrained to edges within 24h of the
+  // rotation's detectedAt (a bridge_deposit/bridge_withdrawal row from an
+  // unrelated, much-earlier/later hop that happens to share an address is
+  // not this rotation's leg) and preferring an EXACT source-address match
+  // (the bridge_deposit row, sourceAddress = the rotation's own source
+  // wallet) over a dest-address fallback (the bridge_withdrawal row,
+  // destinationAddress = the rotation's own dest wallet) — a source match is
+  // stronger evidence because it's the wallet that actually INITIATED the
+  // bridge hop this rotation is about, whereas a dest-only match could in
+  // principle be satisfied by some other deposit's withdrawal leg landing on
+  // the same dest wallet. Among multiple qualifying candidates within the
+  // window, picks the one with ts closest to detectedAt (deterministic).
+  // Falls back to null (generic "cross-chain bridge" wording in the
+  // explanation) when nothing qualifies — bridgeProtocol is not persisted on
+  // ProfitRotationSignal itself.
   const bridgeEdges = await prisma.moneyFlowEdge.findMany({
     where: { actionType: { in: ['bridge_deposit', 'bridge_withdrawal'] }, bridgeProtocol: { not: null } },
     select: { sourceAddress: true, destinationAddress: true, bridgeProtocol: true, ts: true },
   });
 
-  function findBridgeProtocol(sourceWalletAddress: string, destWalletAddress: string): string | null {
-    const match = bridgeEdges.find(
-      (e) => e.sourceAddress === sourceWalletAddress || e.destinationAddress === destWalletAddress
+  const BRIDGE_LOOKUP_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+  function findBridgeProtocol(sourceWalletAddress: string, destWalletAddress: string, detectedAt: Date): string | null {
+    const withinWindow = bridgeEdges.filter(
+      (e) => Math.abs(e.ts.getTime() - detectedAt.getTime()) <= BRIDGE_LOOKUP_WINDOW_MS
     );
-    return match?.bridgeProtocol ?? null;
+
+    const sourceMatches = withinWindow.filter((e) => e.sourceAddress === sourceWalletAddress);
+    const candidates = sourceMatches.length > 0 ? sourceMatches : withinWindow.filter((e) => e.destinationAddress === destWalletAddress);
+    if (candidates.length === 0) return null;
+
+    const closest = candidates.reduce((best, e) =>
+      Math.abs(e.ts.getTime() - detectedAt.getTime()) < Math.abs(best.ts.getTime() - detectedAt.getTime()) ? e : best
+    );
+    return closest.bridgeProtocol;
   }
 
   // -----------------------------------------------------------------------
@@ -223,15 +244,22 @@ export default async function SignalFeedPage() {
   // Section 3: Profit rotation — F / ProfitRotationSignal.
   // -----------------------------------------------------------------------
   const rotationCards: RotationCardData[] = rotations.map((r) => {
-    // ProfitRotationSignal does not persist receivedValueUsd (only
-    // transferredValueUsd survives from the matched candidate — see
-    // packages/db/src/rotation.ts), so the exact value-match% used at
-    // detection time can't be reconstructed here. Every persisted row only
-    // ever exists because matchRotations already confirmed it cleared
-    // settings.rules.F.minValueMatchPct, so that floor is the honest,
-    // non-fabricated number to display rather than inventing a fake exact
-    // percentage.
-    const valueMatchPct = settings.rules.F.minValueMatchPct;
+    // ProfitRotationSignal.receivedValueUsd (added by the
+    // rotation_received_value migration) carries the matched candidate's
+    // ACTUAL received value going forward — when present, the real
+    // receivedValueUsd/transferredValueUsd*100 match% is the honest number
+    // to show. Legacy rows persisted before that column existed have
+    // receivedValueUsd = null; for those, matchRotations already confirmed
+    // the (unrecoverable) real figure cleared settings.rules.F.minValueMatchPct,
+    // so the floor is the most honest number available and is rendered with
+    // explicit "exact figure unavailable" wording rather than presented as
+    // if it were the measured match.
+    const transferredValueUsd = Number(r.transferredValueUsd);
+    const valueMatchPct =
+      r.receivedValueUsd !== null && transferredValueUsd > 0
+        ? (Number(r.receivedValueUsd) / transferredValueUsd) * 100
+        : null;
+    const valueMatchFloorPct = settings.rules.F.minValueMatchPct;
     return {
       id: r.id,
       sourceSymbol: r.sourceToken.symbol,
@@ -239,11 +267,12 @@ export default async function SignalFeedPage() {
       destSymbol: r.destToken.symbol,
       destTokenId: r.destTokenId,
       chainPath: r.chainPath,
-      bridgeProtocol: r.chainPath.length > 1 ? findBridgeProtocol(r.sourceWallet.address, r.destWallet.address) : null,
+      bridgeProtocol: r.chainPath.length > 1 ? findBridgeProtocol(r.sourceWallet.address, r.destWallet.address, r.detectedAt) : null,
       realizedProfitUsd: Number(r.realizedProfitUsd),
-      transferredValueUsd: Number(r.transferredValueUsd),
+      transferredValueUsd,
       timeGapMin: r.timeGapMin,
       valueMatchPct,
+      valueMatchFloorPct,
       confidence: r.confidence,
       destTokenMcapAtBuyUsd: Number(r.destTokenMcapAtBuy),
       currentDestPerfPct: r.currentDestPerfPct,

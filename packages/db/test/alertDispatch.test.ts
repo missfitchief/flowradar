@@ -274,6 +274,77 @@ describe.skipIf(!(await probePort('localhost', 5439)))('dispatchPendingAlerts', 
     expect(allAlertsForToken.every((a) => a.deliveryStatus === 'sent')).toBe(true);
   });
 
+  it('SIGNAL: reads live TokenFlowSnapshot counts, not stale Signal.metrics, when they diverge (cross-surface staleness fix)', async () => {
+    // Reproduces the exact staleness scenario apps/web/app/page.tsx's
+    // buildCard already documents and guards against (NOVA:
+    // Signal.metrics.uniqueEntityCount frozen at the pre-clustering raw
+    // count 36, while TokenFlowSnapshot.uniqueEntityCount reflects the
+    // post-clustering figure 19) — the Telegram alert text must agree with
+    // the Signal Feed card, i.e. read the SAME live snapshot source, not the
+    // frozen-at-detection Signal row.
+    const tokenId = await makeToken('staleness', 'T16STALE');
+    const now = new Date();
+
+    // Signal.metrics/columns carry the STALE pre-clustering counts.
+    await prisma.signal.create({
+      data: {
+        tokenId,
+        rule: 'A',
+        severity: 'HIGH',
+        triggeredAt: now,
+        reasons: ['test reason for staleness divergence'],
+        walletCount: 36,
+        uniqueEntityCount: 36,
+        netFlowUsd: 10_000,
+        mcapAtTrigger: 300_000,
+        status: 'active',
+        metrics: { rawWalletCount: 36, uniqueEntityCount: 36, largestClusterSize: 3, entityConcentrationRisk: 'medium' }
+      }
+    });
+
+    // TokenFlowSnapshot carries the FRESH post-clustering counts (19 unique
+    // entities, smartWalletCount also diverges from the stale 36).
+    await prisma.tokenFlowSnapshot.create({
+      data: {
+        tokenId,
+        ts: now,
+        windowMinutes: 60,
+        flowScore: 70,
+        smartWalletCount: 30,
+        humanLikeCount: 20,
+        possibleBotCount: 10,
+        uniqueEntityCount: 19,
+        clusterAdjustedWalletCount: 19,
+        entityConcentrationRisk: 0.5,
+        trackedBuyVolumeUsd: 50_000,
+        trackedSellVolumeUsd: 5_000,
+        netFlowUsd: 45_000,
+        buySellRatio: 10,
+        avgEntryMcap: 250_000,
+        currentMcap: 300_000,
+        mcapExpansionFromAvgEntry: 0.2,
+        holdersGrowth: 0.1,
+        liquidityChange: 0.05,
+        signalStatus: 'hot',
+        componentBreakdown: {}
+      }
+    });
+
+    const sender = makeFakeSender();
+    await dispatchPendingAlerts(prisma, DEFAULT_SETTINGS, sender);
+
+    const alert = await prisma.alert.findFirst({ where: { tokenId } });
+    expect(alert).not.toBeNull();
+    const payload = alert!.payload as { text: string; dataUsed: { rawWalletCount: number; uniqueEntityCount: number } };
+
+    // The rendered text/dataUsed must carry the SNAPSHOT figures (19 unique
+    // entities, 30 smart wallets) — NOT the stale Signal.metrics figures (36).
+    expect(payload.dataUsed.uniqueEntityCount).toBe(19);
+    expect(payload.dataUsed.rawWalletCount).toBe(30);
+    expect(payload.text).toContain('19');
+    expect(payload.text).not.toMatch(/\b36\b/);
+  });
+
   it('ROTATION: a pending ProfitRotationSignal gets exactly one Alert row (type ROTATION), then a second run creates zero more', async () => {
     const sourceTokenId = await makeToken('rot_source', 'T16ROTS');
     const destTokenId = await makeToken('rot_dest', 'T16ROTD');
