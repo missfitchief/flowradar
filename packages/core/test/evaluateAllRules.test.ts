@@ -103,7 +103,8 @@ describe('evaluateAllRules', () => {
         buyUsd: 100,
         sellUsd: 0,
         firstBuyTs: new Date('2026-07-05T00:05:00Z'),
-        blockOrSlot: BigInt(1)
+        blockOrSlot: BigInt(1),
+        isWatched: false
       }
     ];
     const agg24hBuyers = [
@@ -114,7 +115,8 @@ describe('evaluateAllRules', () => {
         buyUsd: 100,
         sellUsd: 0,
         firstBuyTs: new Date('2026-07-05T00:05:00Z'),
-        blockOrSlot: BigInt(2)
+        blockOrSlot: BigInt(2),
+        isWatched: false
       },
       {
         walletId: 'w3',
@@ -123,7 +125,8 @@ describe('evaluateAllRules', () => {
         buyUsd: 100,
         sellUsd: 0,
         firstBuyTs: new Date('2026-07-05T00:05:00Z'),
-        blockOrSlot: BigInt(2)
+        blockOrSlot: BigInt(2),
+        isWatched: false
       }
     ];
     const agg30 = makeAggregate({ windowMinutes: 30, buyers: agg30buyers, humanLikeCount: 1 });
@@ -229,7 +232,8 @@ describe('evaluateAllRules', () => {
           buyUsd: 1200,
           sellUsd: 0,
           firstBuyTs: new Date('2026-07-05T00:05:00Z'),
-          blockOrSlot: BigInt(i)
+          blockOrSlot: BigInt(i),
+          isWatched: false
         }))
       });
       const agg24h = makeAggregate({ windowMinutes: 1440 });

@@ -412,6 +412,11 @@ model Signal {
   netFlowUsd        Decimal        @db.Decimal(20, 4)
   mcapAtTrigger     Decimal        @db.Decimal(20, 4)
   status            String
+  /// Task 15 addition: rawWalletCount/uniqueEntityCount/largestClusterSize/
+  /// entityConcentrationRisk snapshot at trigger time (entityConcentrationRisk
+  /// degrades to 'unknown' until Task 22's clustering lands — see
+  /// packages/db/src/signals.ts).
+  metrics           Json           @default("{}")
 
   token             Token            @relation(fields: [tokenId], references: [id], onDelete: Cascade)
   alerts            Alert[]

@@ -18,3 +18,4 @@ export * from './rules/ruleE';
 export * from './rules/ruleF';
 export * from './rules/ruleG';
 export * from './rules/index';
+export * from './window/aggregate';

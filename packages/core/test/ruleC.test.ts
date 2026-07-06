@@ -23,6 +23,7 @@ function makeBuyer(
     sellUsd: 0,
     firstBuyTs: new Date('2026-07-05T00:05:00Z'),
     blockOrSlot,
+    isWatched: false,
     ...overrides
   };
 }

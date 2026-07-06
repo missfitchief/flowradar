@@ -58,7 +58,8 @@ function makeAllHighConditionsAggregate(smartWalletCount: number): TokenWindowAg
     buyUsd: 1500,
     sellUsd: i < 4 ? 150 : 0, // First 4 have sold; rest have not
     firstBuyTs: new Date('2026-07-05T00:05:00Z'),
-    blockOrSlot: BigInt(i)
+    blockOrSlot: BigInt(i),
+    isWatched: false
   }));
 
   return makeAggregate({

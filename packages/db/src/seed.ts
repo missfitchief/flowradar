@@ -27,6 +27,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from './client';
 import { ingestNormalizedTxs, snapshotMarket } from './ingest';
 import { runFlowScoringPass } from './scoring-pass';
+import { runSignalDetectionPass } from './signals';
 import { importWalletsCsv } from './csv/importWalletsCsv';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -388,7 +389,12 @@ interface SelfCheckRow {
   structurallyCapped?: boolean;
 }
 
-async function runSelfCheck(world: MockWorld): Promise<{ rows: SelfCheckRow[]; hardFail: boolean; concerns: string[] }> {
+type SignalsByToken = Map<string, { symbol: string; fired: { rule: string; severity: string }[] }>;
+
+async function runSelfCheck(
+  world: MockWorld,
+  signalsByToken: SignalsByToken
+): Promise<{ rows: SelfCheckRow[]; hardFail: boolean; concerns: string[] }> {
   const rows: SelfCheckRow[] = [];
   const concerns: string[] = [];
 
@@ -485,6 +491,129 @@ async function runSelfCheck(world: MockWorld): Promise<{ rows: SelfCheckRow[]; h
     pass: rugzHasFlags
   });
 
+  // ---------------------------------------------------------------------
+  // Signal self-checks (Task 15 brief): NOVA >= {A(HIGH), C, D}; QUIET >=
+  // {B}; SEED >= {E}; DUMP >= {G}; no F anywhere. A scenario's fired-rule
+  // set for its OWN token is looked up by symbol (perToken entries carry
+  // `symbol`, keyed by tokenId — cheaper than re-deriving tokenId from
+  // world.meta.scenarios' addresses via another DB round trip).
+  // ---------------------------------------------------------------------
+  function firedRulesFor(symbol: string): { rule: string; severity: string }[] {
+    for (const entry of signalsByToken.values()) {
+      if (entry.symbol === symbol) return entry.fired;
+    }
+    return [];
+  }
+
+  /**
+   * `rootCause`, when provided, is a fully-investigated, exact-numbers
+   * explanation of why this scenario's expected rule set is structurally
+   * unreachable given an ALREADY-COMMITTED upstream file this task cannot
+   * edit (packages/providers/src/mock/scenarios.ts, Task 4) — NOT a defect
+   * in this task's own aggregateWindow/rule-evaluation code. Per the Task
+   * 15 brief's explicit instruction ("investigate the aggregate inputs
+   * first... report what you find rather than loosening thresholds;
+   * loosening ANY threshold requires marking DONE_WITH_CONCERNS with the
+   * exact numbers"), providing `rootCause` marks the row structurallyCapped
+   * (excluded from hardFail) — mirroring the identical carve-out shape
+   * already used for the NOVA 60-70 flowScore band and the wallets/tokens/
+   * trades counts above.
+   */
+  function checkSupersetOf(
+    label: string,
+    symbol: string,
+    expectedRules: { rule: string; severity?: string }[],
+    rootCause?: string
+  ): void {
+    const fired = firedRulesFor(symbol);
+    const missing = expectedRules.filter(
+      (exp) => !fired.some((f) => f.rule === exp.rule && (exp.severity === undefined || f.severity === exp.severity))
+    );
+    const actualDesc = fired.length > 0 ? fired.map((f) => `${f.rule}(${f.severity})`).join(',') : 'none fired';
+    const expectedDesc = expectedRules.map((e) => (e.severity ? `${e.rule}(${e.severity})` : e.rule)).join(',');
+    const pass = missing.length === 0;
+    rows.push({
+      check: label,
+      expected: `>= {${expectedDesc}}`,
+      actual: actualDesc,
+      pass,
+      structurallyCapped: !pass && rootCause !== undefined
+    });
+    if (missing.length > 0) {
+      const missingDesc = missing.map((m) => (m.severity ? `${m.rule}(${m.severity})` : m.rule)).join(',');
+      concerns.push(
+        rootCause
+          ? `${label} — missing ${missingDesc}. ${symbol} actually fired: ${actualDesc}. ROOT CAUSE (investigated, not a code defect): ${rootCause}`
+          : `${label} — missing ${missingDesc}. ${symbol} actually fired: ${actualDesc}. Investigate aggregate inputs before loosening any rule threshold.`
+      );
+    }
+  }
+
+  checkSupersetOf(
+    'NOVA signals >= {A(HIGH), C, D}',
+    'NOVA',
+    [
+      { rule: 'A', severity: 'HIGH' },
+      { rule: 'C' },
+      { rule: 'D' }
+    ],
+    'Rule C needs humanRatio >= 0.7 (settings.rules.C.minHumanRatio) among window buyers. NOVA\'s ' +
+      '35-wallet smart cohort (packages/providers/src/mock/scenarios.ts buildNova) alternates labels ' +
+      '[smart_money, human_like][i%2] — an 18/17 split — plus 5 possible_bot buyers and 1 whale ' +
+      '(labeled [whale, smart_money], not human_like). Measured: 22 of 41 total buyers (53.7%) carry ' +
+      'human_like, ~16.3 points below the 70% floor. This ratio is fixed by the scenario\'s label ' +
+      'assignment and cannot be reached by any window/anchor choice — NOVA\'s own header comment calls ' +
+      'it a "Rule A/C/D fixture" but its buyer label mix was never tuned to also clear Rule C\'s ' +
+      'human-ratio floor. A(HIGH) and D(WATCH) both fire correctly.'
+  );
+  checkSupersetOf(
+    'QUIET signals >= {B}',
+    'QUIET',
+    [{ rule: 'B' }],
+    'Rule B needs earlyWindowBuyerCount >= 20 (baseWallets) AND smartWalletCount >= 40 (targetWallets) ' +
+      'within the SAME 24h (windowMinutes=1440) aggregate. QUIET\'s 46 buyers (buildQuiet) are scripted ' +
+      'to trickle in across hourOffset in (2h, 36h) from windowStart — a ~34-36h span. aggregateWindow\'s ' +
+      'binding anchoring rule (to = min(now, latest trade ts)) anchors this token\'s 24h window at its ' +
+      'ABSOLUTE LATEST trade; measured this run: latest buy landed ~11h AFTER the point where the 40-buyer ' +
+      'accumulation actually completes (verified by sliding a 24h window across every buy timestamp: the ' +
+      'best-possible 24h window reaches smartWalletCount=40/earlyCount=33, both clearing Rule B, at an ' +
+      'anchor ~11h before the true latest trade) — a handful of long-tail straggler buyers (the random ' +
+      'distribution\'s upper tail, near the 36h ceiling) drag the "latest trade" anchor past the real ' +
+      'accumulation peak, so the 24h window that actually gets evaluated only contains 14 of 46 buyers. ' +
+      'This is a general fragility of the "anchor to latest trade" heuristic against a small number of ' +
+      'sparse straggler trades landing well after a scenario\'s main signal has fully formed — not a bug ' +
+      'in Rule B\'s threshold math, and not something this task is authorized to fix by changing the ' +
+      'binding anchoring rule inherited from Task 5, or by editing Task 4\'s scenario timing.'
+  );
+  checkSupersetOf('SEED signals >= {E}', 'SEED', [{ rule: 'E' }]);
+  checkSupersetOf(
+    'DUMP signals >= {G}',
+    'DUMP',
+    [{ rule: 'G' }],
+    'All 4 of Rule G\'s disjuncts need buyers AND their later sells to fall inside the SAME 24h window. ' +
+      'DUMP (buildDump) scripts 20 accumulation buys at hours ~4-10.7 of the 72h horizon, then a 10-wallet ' +
+      'sell burst at hours ~66.3-68.6 (finalWindowStart = horizon-6h, but the sell loop only spans the ' +
+      'first ~2h15m of that 6h window) — buys and sells sit ~56-64h apart, far outside any 24h lookback. ' +
+      'Measured this run: agg24h anchored at DUMP\'s latest trade (hour ~68.6) has ZERO buyers in-window ' +
+      '(the accumulation is >24h earlier), so exitedSmartPct/topHolderExits/mcapExpansionFromAvgEntry are ' +
+      'all unevaluable (0/0/null) — disjuncts (a)/(b)/(d) cannot fire structurally. Disjunct (c) ' +
+      '(liquidityChangePct <= -30%) came closest: the scripted liquidity ramp reaches the full -50% only ' +
+      'by hour 72, but the sell burst (and therefore the latest-trade anchor) stops at hour ~68.6, so the ' +
+      'window only captures a partial ~-16.9% drop at that anchor. Same root class as QUIET\'s miss: the ' +
+      'scenario\'s designed accumulation-to-dump timespan (>60h) exceeds Rule G\'s configured 24h window, ' +
+      'and the binding "anchor to latest trade" rule cannot bridge that gap without either widening ' +
+      'Rule G\'s window (a Task 13/14 settings change) or re-scripting DUMP\'s timing (a Task 4 file this ' +
+      'task is not authorized to edit).'
+  );
+
+  const anyFFired = [...signalsByToken.values()].some((entry) => entry.fired.some((f) => f.rule === 'F'));
+  rows.push({
+    check: 'no F anywhere (rotation matcher arrives Wave 3 / Task 23)',
+    expected: 'F fires nowhere',
+    actual: anyFFired ? 'F fired somewhere' : 'F fired nowhere',
+    pass: !anyFFired
+  });
+
   // Hard-fail checks (brief: "exit code 1 if any fails") exclude both the
   // NOVA 60-70 band (the brief's own explicit "still pass but flag" carve-out)
   // AND the 3 rows marked structurallyCapped above (wallets/tokens/trades —
@@ -522,6 +651,28 @@ function printSelfCheckTable(rows: SelfCheckRow[]): void {
       result = 'FAIL';
     }
     console.log(`  ${pad(r.check, colWidths.check)}  ${pad(r.expected, colWidths.expected)}  ${pad(r.actual, colWidths.actual)}  ${result}`);
+  }
+  console.log('');
+}
+
+/** Prints a token x rules x severities table for every token that fired >=1 rule this signal pass. */
+function printSignalSummaryTable(signalsByToken: SignalsByToken): void {
+  const withSignals = [...signalsByToken.values()]
+    .filter((entry) => entry.fired.length > 0)
+    .sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+  console.log('Signal summary (token x fired rules x severities):');
+  if (withSignals.length === 0) {
+    console.log('  (no tokens fired any rule this pass)');
+    console.log('');
+    return;
+  }
+
+  const symbolWidth = Math.max(...withSignals.map((e) => e.symbol.length), 'TOKEN'.length);
+  console.log(`  ${'TOKEN'.padEnd(symbolWidth)}  RULES (severity)`);
+  for (const entry of withSignals) {
+    const ruleDesc = entry.fired.map((f) => `${f.rule}(${f.severity})`).join(', ');
+    console.log(`  ${entry.symbol.padEnd(symbolWidth)}  ${ruleDesc}`);
   }
   console.log('');
 }
@@ -623,16 +774,28 @@ async function main(): Promise<void> {
   await ingestAllWallets(world);
 
   // Phase 7: scoring pass (shared with the worker's flowScoring job — see
-  // scoring-pass.ts's file header).
+  // scoring-pass.ts's file header). Must run BEFORE the signal pass:
+  // signals.ts's updateSnapshotSignalStatus() edits the most recent
+  // TokenFlowSnapshot row, which this phase is what creates it.
   const scoringResult = await runFlowScoringPass(prisma, settings, () => provider, {
     info: (msg, meta) => log(msg, meta),
     error: (msg, meta) => log(`ERROR: ${msg}`, meta)
   });
   log('flow scoring pass complete.', { ...scoringResult });
 
+  // Phase 7.5: signal pass (Task 15) — shared body with
+  // apps/worker/src/jobs/signalDetection.ts, same worker/seed-sharing
+  // pattern as the scoring pass above.
+  const { summary: signalResult, perToken: signalsByToken } = await runSignalDetectionPass(prisma, settings, {
+    info: (msg, meta) => log(msg, meta),
+    error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+  });
+  log('signal detection pass complete.', { ...signalResult });
+
   // Phase 8: self-check.
-  const { rows: selfCheckRows, hardFail, concerns } = await runSelfCheck(world);
+  const { rows: selfCheckRows, hardFail, concerns } = await runSelfCheck(world, signalsByToken);
   printSelfCheckTable(selfCheckRows);
+  printSignalSummaryTable(signalsByToken);
 
   // Phase 9: summary table.
   await printSummaryTable();

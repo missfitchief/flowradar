@@ -142,6 +142,12 @@ export interface TokenWindowAggregate {
     firstBuyTs: Date;
     blockOrSlot: bigint;
     entityClusterId?: string;
+    /**
+     * True when Wallet.isWatched — carried per Task 15's wallet-driven scope
+     * correction so smartWalletCount can be defined as "watched OR
+     * profitable" without the aggregate consumer re-joining Wallet rows.
+     */
+    isWatched: boolean;
   }[];
   trackedBuyVolumeUsd: number;
   trackedSellVolumeUsd: number;
@@ -161,6 +167,17 @@ export interface TokenWindowAggregate {
   liquidityChangePct: number | null;
   tokenAgeDays: number | null;
   inflowSpike: boolean;
+  /**
+   * Tracked buy volume in the equal-length window immediately BEFORE
+   * `from` (i.e. [from - windowMinutes, from)) — the baseline `inflowSpike`
+   * compares against. Exposed (rather than kept internal to aggregation) so
+   * a settings-driven multiplier can be applied entirely outside
+   * packages/core/src/window/aggregate.ts (which is itself settings-free —
+   * see that file's header).
+   */
+  trailingBuyVolumeUsd: number;
+  /** Alias for trackedBuyVolumeUsd, exposed under the name Rule A's inflow-spike comparison reads most naturally. */
+  windowBuyVolumeUsd: number;
   exitedSmartPct: number;
   topHolderExits: number;
   newSmartBuyers: number;
@@ -172,6 +189,23 @@ export interface TokenWindowAggregate {
    * evaluate growth" and must not fire (see rules/ruleB.ts).
    */
   earlyWindowBuyerCount?: number | null;
+  /**
+   * Multi-window accumulation metrics (Task 15 wallet-driven scope
+   * correction, binding decision 1) — only computed for the 1440-minute
+   * (24h) aggregate; undefined for the 30-minute aggregate. Persisted
+   * verbatim into TokenFlowSnapshot.componentBreakdown.metrics (no schema
+   * change — componentBreakdown is already a Json column).
+   */
+  accumulation?: {
+    /** Distinct buyer count in the trailing 30 minutes ending at `to`. */
+    smartWalletCount30m: number;
+    /** Distinct buyer count in the trailing 1 hour ending at `to`. */
+    smartWalletCount1h: number;
+    /** Distinct buyer count in the trailing 6 hours ending at `to`. */
+    smartWalletCount6h: number;
+    /** Share (0-100) of this window's buyers who sold anything (sellUsd > 0). */
+    percentWalletsSold: number;
+  };
 }
 
 // ---------------------------------------------------------------------------

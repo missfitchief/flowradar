@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { parseSettings } from '@flowradar/core';
+import { isProfitableWallet, parseSettings } from '@flowradar/core';
 import { prisma } from '@/lib/db';
 
 // DB-backed dashboard — must render per-request, never freeze at build time.
@@ -19,31 +19,13 @@ import type {
 // tracked-wallet population, not this display cap.
 const MAX_DISPLAYED_WALLETS = 200;
 
-/**
- * Same 5-condition "profitable wallet" check as packages/db/src/scoring-pass.ts's
- * isProfitableWallet — that function isn't exported from @flowradar/db's
- * public surface (only runFlowScoringPass/buildBasicAggregate are), so it's
- * reimplemented here verbatim against settings.profitableWallet (binding
- * decision #2) rather than reaching into scoring-pass.ts's internals.
- */
-function meetsProfitableThreshold(
-  stats: { pnlUsd: number; realizedPnlUsd: number; winRate: number; tradeCount: number; avgTradeSizeUsd: number },
-  thresholds: {
-    pnl30d: number;
-    minTrades: number;
-    minWinRate: number;
-    minRealized: number;
-    minAvgTradeSizeUsd: number;
-  },
-): boolean {
-  return (
-    stats.pnlUsd >= thresholds.pnl30d &&
-    stats.tradeCount >= thresholds.minTrades &&
-    stats.winRate >= thresholds.minWinRate &&
-    stats.realizedPnlUsd >= thresholds.minRealized &&
-    stats.avgTradeSizeUsd >= thresholds.minAvgTradeSizeUsd
-  );
-}
+// Task 15 consolidation: the local meetsProfitableThreshold duplicate (a
+// verbatim reimplementation of packages/core/src/wallets/profitability.ts's
+// isProfitableWallet, kept here only because @flowradar/db didn't export the
+// canonical function yet) is removed — this page now imports the canonical
+// isProfitableWallet directly from @flowradar/core, the single source of
+// truth every other call site (packages/db/src/fetchAggregateInputs.ts,
+// packages/db/src/scoring-pass.ts) also uses.
 
 /**
  * Wallet Leaderboard page (Task 10). Server component — replaces the Task-7
@@ -120,7 +102,7 @@ export default async function WalletsPage() {
   }
 
   const profitableCount = [...latestStatsByWallet.values()].filter((s) =>
-    meetsProfitableThreshold(s, settings.profitableWallet),
+    isProfitableWallet(s, settings.profitableWallet),
   ).length;
 
   const displayedStats = [...latestStatsByWallet.values()]
@@ -205,7 +187,7 @@ export default async function WalletsPage() {
       labels: (wallet?.classifications.map((c) => c.label) ?? []) as LeaderboardLabel[],
       bestToken: best,
       worstToken: worst,
-      meetsProfitableThreshold: meetsProfitableThreshold(stats, settings.profitableWallet),
+      meetsProfitableThreshold: isProfitableWallet(stats, settings.profitableWallet),
     };
   });
 
