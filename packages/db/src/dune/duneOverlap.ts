@@ -42,6 +42,8 @@ import type { DuneClient, DuneRawRow } from '@flowradar/providers';
 export interface DuneOverlapLogger {
   info(message: string, meta?: Record<string, unknown>): void;
   error(message: string, meta?: Record<string, unknown>): void;
+  /** Optional verbose channel — used for per-batch drop-reason breakdowns; falls back silently when a logger doesn't implement it. */
+  debug?(message: string, meta?: Record<string, unknown>): void;
 }
 
 export interface TokenOverlapSearchInput {
@@ -89,6 +91,13 @@ export interface TokenOverlapSearchResult {
  */
 export type DuneClientResolver = () => DuneClient | null | undefined;
 
+// Ad-hoc token-overlap searches aren't backed by a real saved Dune query id —
+// this placeholder is passed to DuneClient.executeQuery as a stable label. In
+// MOCK_MODE the MockDuneOverlapSource ignores the query id entirely; against a
+// real DuneClient a future task would swap this for an operator's saved
+// query_id. The web CoverageBanner mirrors this literal (see the TODO in
+// apps/web/components/overlap/OverlapFinder.tsx for why it isn't threaded
+// through the API response today).
 const DEFAULT_QUERY_ID_PLACEHOLDER = 'overlap_finder_ad_hoc';
 const DEFAULT_MAX_RESULTS = 500;
 const SOURCE_NAME = 'dune_token_overlap';
@@ -166,7 +175,20 @@ export async function runTokenOverlapSearch(
       limit: maxResults
     });
 
-    const { rows, droppedCount } = parseOverlapRows(resultSet.rows as DuneRawRow[]);
+    // Track WHY rows were dropped (missing wallet_address vs wrong-type field)
+    // so an operator can tell a genuinely-empty query from a schema-mismatched
+    // one — surfaced at debug, aggregated to avoid a line per bad row.
+    const dropReasons = { missing_wallet_address: 0, type_mismatch: 0 };
+    const { rows, droppedCount } = parseOverlapRows(resultSet.rows as DuneRawRow[], (reason) => {
+      dropReasons[reason] += 1;
+    });
+    if (droppedCount > 0) {
+      log?.debug?.('runTokenOverlapSearch: dropped invalid overlap rows', {
+        searchId: search.id,
+        droppedCount,
+        ...dropReasons
+      });
+    }
 
     // Persist wallet results + build overlapGroupId aggregates in the same pass.
     const groupAccumulator = new Map<string, { walletAddresses: Set<string>; sharedTokenCounts: number[] }>();

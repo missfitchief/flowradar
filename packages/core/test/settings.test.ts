@@ -47,6 +47,13 @@ describe('SettingsSchema / DEFAULT_SETTINGS / parseSettings', () => {
     expect(() => parseSettings({ alerts: { cooldownMin: 'x' } })).toThrow();
   });
 
+  it('parseSettings rejects an unknown TOP-LEVEL key (.strict) instead of silently stripping it', () => {
+    // A typo'd or stale top-level field must 400 (surface a ZodError) rather
+    // than being deep-merged away and saved as if accepted.
+    expect(() => parseSettings({ interval: { flowScoringSec: 5 } })).toThrow();
+    expect(() => parseSettings({ totallyUnknownKey: true })).toThrow();
+  });
+
   it('DEFAULT_SETTINGS.rules.A.watchMinWallets is 10 (tiered rule A WATCH floor)', () => {
     expect(DEFAULT_SETTINGS.rules.A.watchMinWallets).toBe(10);
   });

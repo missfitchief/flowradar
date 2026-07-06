@@ -145,6 +145,11 @@ type LiveCacheKey =
   | 'bsc:walletActivity'
   | 'bsc:risk';
 
+// NOTE: this cache is sticky across a HELIUS_API_KEY (or any live key) rotation
+// WITHIN a running process — once a live provider is constructed under one key,
+// that instance is reused until resetProviderCache() clears it. The boot-once
+// worker (one key read at startup, no in-process rotation) makes this moot in
+// practice; tests and any future hot-config-reload must call resetProviderCache().
 const liveProviderCache = new Map<LiveCacheKey, unknown>();
 
 /**
@@ -352,7 +357,7 @@ export function getProviderStatuses(): ProviderStatus[] {
           chain,
           capability,
           mode: 'live',
-          note: 'Live DexScreener adapter active (keyless, ~300 req/min) — holderCount is not provided by this API and is always null.'
+          note: 'Live DexScreener adapter active (keyless, ~300 req/min (default, unconfirmed)) — holderCount is not provided by this API and is always null.'
         });
         continue;
       }

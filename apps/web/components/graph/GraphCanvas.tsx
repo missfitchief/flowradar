@@ -245,7 +245,11 @@ export function GraphCanvas({ nodes, edges, rootAddress, explorerAddressUrlTempl
             },
           },
         ],
-        layout: { name: 'concentric' as const },
+        // No constructor-time `layout` — the custom concentric layout below is
+        // run explicitly right after construction (with the depth-keyed
+        // `concentric` accessor + spacing), so a constructor-time layout pass
+        // would only be immediately discarded. cytoscape leaves nodes
+        // unpositioned until the first .layout().run(), which is fine here.
         wheelSensitivity: 0.2,
       });
 

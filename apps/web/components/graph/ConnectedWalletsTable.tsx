@@ -1,3 +1,5 @@
+'use client';
+
 // FlowRadar — Wallet Graph Finder "Connected Wallets" table (Task 21 binding
 // decision 5 / Spec §8.5 table 2).
 //

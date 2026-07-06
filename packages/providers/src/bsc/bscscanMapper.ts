@@ -1,6 +1,12 @@
 // FlowRadar — BscScan (Etherscan API V2) txlist/tokentx -> NormalizedTx mapper
 // (Task 29, Wave 4 BSC scaffold).
 //
+// Address convention: EIP-55 mixed-case checksum is NOT enforced. Every address
+// this mapper emits is `.toLowerCase()`-normalized to case-insensitive lowercase
+// hex (the repo-wide convention — every Wallet/AddressRegistry key is stored
+// lowercased), so a checksummed input and its all-lowercase form collapse to the
+// same key rather than being treated as two distinct addresses.
+//
 // Pure functions, no I/O. Maps the doc-verified `account` module response rows
 // (see bscscan.ts's file header for the full doc-verification trail: V2
 // endpoint `https://api.etherscan.io/v2/api?chainid=56&...`, confirmed live

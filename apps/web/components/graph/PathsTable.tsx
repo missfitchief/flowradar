@@ -1,3 +1,5 @@
+'use client';
+
 // FlowRadar — Wallet Graph Finder "Transaction Paths" table (Task 21 binding
 // decision 6 / Spec §8.5 table 3).
 //

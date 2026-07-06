@@ -38,6 +38,15 @@ interface SourceStatusSpec {
   keyEnvVar: string;
   /** Docs-verified adapters resolve 'live'/'missing_key' by key presence; stub-only sources always report 'stub'. */
   hasLiveAdapter: boolean;
+  /**
+   * True for adapters whose docs-verified endpoint is a single-address / single-token
+   * lookup rather than a "list of candidate addresses" feed — its fetchCandidates
+   * returns [] by design and it is only consumed as an evidence provider by the
+   * validation / top-trader-backfill jobs (both Birdeye endpoints). The live-mode
+   * status note says "evidence-only" so the Source Health page doesn't imply it
+   * seeds candidates on its own.
+   */
+  evidenceOnly?: boolean;
 }
 
 const SOURCE_SPECS: SourceStatusSpec[] = [
@@ -53,14 +62,16 @@ const SOURCE_SPECS: SourceStatusSpec[] = [
     displayName: 'Birdeye',
     chains: ['SOLANA', 'BSC'],
     keyEnvVar: 'BIRDEYE_API_KEY',
-    hasLiveAdapter: true
+    hasLiveAdapter: true,
+    evidenceOnly: true
   },
   {
     sourceName: 'birdeye_top_traders',
     displayName: 'Birdeye',
     chains: ['SOLANA', 'BSC'],
     keyEnvVar: 'BIRDEYE_API_KEY',
-    hasLiveAdapter: true
+    hasLiveAdapter: true,
+    evidenceOnly: true
   },
   {
     sourceName: 'kolscan',
@@ -140,7 +151,9 @@ export function getCandidateSourceStatuses(): CandidateSourceStatusRow[] {
         capability: 'candidateSource',
         mode: hasKey ? 'live' : 'missing_key',
         note: hasKey
-          ? 'Live adapter active (docs-verified endpoint).'
+          ? spec.evidenceOnly
+            ? 'Live adapter active (docs-verified endpoint) — evidence-only; consumed by validation/backfill, does not seed candidates directly.'
+            : 'Live adapter active (docs-verified endpoint).'
           : `Missing ${spec.keyEnvVar}; fetchCandidates returns [] gracefully.`
       });
     }

@@ -49,6 +49,9 @@ export default async function SourcesPage() {
   ]);
 
   const statuses = getCandidateSourceStatuses();
+  // The `dune` status rows aren't backed by an ExternalWalletSource, so they're
+  // rendered in their own subsection below rather than the main table.
+  const duneStatuses = statuses.filter((s) => s.sourceName === 'dune');
   const statusesByName = new Map<string, typeof statuses>();
   for (const status of statuses) {
     const list = statusesByName.get(status.sourceName) ?? [];
@@ -158,6 +161,57 @@ export default async function SourcesPage() {
       <div className="mt-6">
         <SourceHealthTable rows={rows} />
       </div>
+
+      {/* Dune query sources — getCandidateSourceStatuses() surfaces a `dune`
+          entry that isn't an ExternalWalletSource row (it's the Wave-4.6 Dune
+          overlap connector, not a candidate feeder), so it never appears in the
+          table above. Render it minimally here so its mode is still visible. */}
+      {duneStatuses.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-lg font-semibold tracking-tight">Dune query sources</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Multi-token wallet overlap connector (Overlap Finder). Credit-safe by default (latest-cached results;
+            fresh paid execution gated behind DUNE_EXECUTE_FRESH).
+          </p>
+          <div className="mt-3 overflow-x-auto rounded-lg border border-border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-left text-xs text-muted-foreground">
+                  <th className="px-3 py-2 font-medium">Source</th>
+                  <th className="px-3 py-2 font-medium">Chain</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 font-medium">Note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {duneStatuses.map((s, i) => (
+                  <tr key={`${s.sourceName}-${s.chain}-${i}`} className="border-b border-border/50 last:border-0">
+                    <td className="px-3 py-2 font-mono text-xs">{s.sourceName}</td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground">{s.chain}</td>
+                    <td className="px-3 py-2">
+                      <span
+                        className={
+                          'rounded px-1.5 py-0.5 text-[11px] font-medium ' +
+                          (s.mode === 'live'
+                            ? 'bg-emerald-500/10 text-emerald-400'
+                            : s.mode === 'mock'
+                              ? 'bg-sky-500/10 text-sky-400'
+                              : s.mode === 'missing_key'
+                                ? 'bg-amber-500/10 text-amber-400'
+                                : 'bg-muted text-muted-foreground')
+                        }
+                      >
+                        {s.mode}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground">{s.note}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -86,6 +86,9 @@ const BSC_GOPLUS_CHAIN_ID = '56';
 // conservative default" rule dexscreener.ts already established for its own
 // unverified-rps case. Re-tune upward only after confirming a higher
 // sustained rate against the live endpoint.
+// One-liner: capacity=rps=1 means NO immediate burst headroom — the first call
+// waits one tick; this is intentional given GoPlus's aggressive keyless throttle
+// (see the burst-throttle note above). Do not raise for "burst-first" behavior.
 const GOPLUS_RPS = 1;
 
 const HIGH_TAX_WARN_THRESHOLD = 0.1; // >10% buy/sell tax -> warn

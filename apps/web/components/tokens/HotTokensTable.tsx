@@ -86,6 +86,14 @@ export interface HotTokensTableProps {
 
 /** Presentational — Overview page's data query lives in app/page.tsx; this component only renders already-shaped rows. */
 export function HotTokensTable({ rows }: HotTokensTableProps) {
+  if (rows.length === 0) {
+    return (
+      <div className="rounded-lg border border-border px-4 py-10 text-center text-sm text-muted-foreground">
+        No tracked tokens yet — run <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">npm run db:seed</code> to
+        load the mock world, then start the worker.
+      </div>
+    );
+  }
   return (
     <div className="overflow-hidden rounded-lg border border-border">
       <Table>

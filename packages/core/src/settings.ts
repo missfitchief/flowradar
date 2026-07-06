@@ -167,6 +167,16 @@ export const SettingsSchema = z
     intervals: IntervalsSchema,
     connectors: ConnectorsSchema
   })
+  // .strict() on the TOP-LEVEL object: a PUT /api/settings body carrying an
+  // unknown top-level key (typo like `interval`, or a stale/removed field) now
+  // 400s with a clear "Unrecognized key" issue instead of being silently
+  // stripped by the deep-merge and saved as if accepted. Deep-merge still works
+  // because parseSettings only ever merges KNOWN keys onto DEFAULT_SETTINGS —
+  // an unknown top-level key survives the merge into the parsed object and is
+  // exactly what .strict() rejects. Nested objects are intentionally NOT strict
+  // (partial nested updates deep-merge over defaults; unknown nested keys stay
+  // tolerated) — only the outermost shape is guarded.
+  .strict()
   .refine((settings) => settings.rules.A.mcapMin < settings.rules.A.mcapMax, {
     message: 'rules.A.mcapMin must be less than rules.A.mcapMax',
     path: ['rules', 'A', 'mcapMin']

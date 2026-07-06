@@ -72,8 +72,15 @@ export interface BitqueryEnv {
  * serves marketData live+keyless for both chains per Task 28, so this stub
  * is not currently load-bearing for any worker path).
  */
-export function createBirdeyeStub(_env: BirdeyeEnv = {}): MarketDataProvider & TokenMetadataProvider {
+export function createBirdeyeStub(
+  _env: BirdeyeEnv = {}
+): MarketDataProvider & TokenMetadataProvider & { providerName: string } {
   return {
+    // providerName added for consistency with the Moralis/Bitquery stubs and
+    // WalletActivityProvider.providerName convention — even though
+    // MarketDataProvider/TokenMetadataProvider don't declare it, exposing it on
+    // the concrete stub lets callers/tests identify this backend uniformly.
+    providerName: 'Birdeye (stub)',
     async getTokenMarket(_chain: Chain, _address: string): Promise<TokenMarket | null> {
       return null;
     },

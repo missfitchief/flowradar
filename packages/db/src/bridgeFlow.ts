@@ -109,8 +109,12 @@ export function pairBridgeLegRows(deposits: BridgeLeg[], withdrawals: BridgeLeg[
       if ((dep.bridgeProtocol ?? null) !== (wd.bridgeProtocol ?? null)) continue;
       const timeDiff = Math.abs(wd.ts.getTime() - dep.ts.getTime());
       if (timeDiff > BRIDGE_MATCH_WINDOW_MS) continue;
+      // matchPct = min/max * 100, so it is by construction in (0, 100]; the
+      // former upper-bound check (matchPct > MAX_AMOUNT_MATCH_PCT) was
+      // mathematically unreachable and has been dropped. MAX_AMOUNT_MATCH_PCT
+      // is retained only as documentation of the symmetric tolerance band.
       const matchPct = (Math.min(dep.amountUsd, wd.amountUsd) / Math.max(dep.amountUsd, wd.amountUsd)) * 100;
-      if (matchPct < MIN_AMOUNT_MATCH_PCT || matchPct > MAX_AMOUNT_MATCH_PCT) continue;
+      if (matchPct < MIN_AMOUNT_MATCH_PCT) continue;
       candidates.push({ depositIdx: di, withdrawalIdx: wi, ratio: matchPct });
     }
   }
@@ -172,7 +176,14 @@ export async function runBridgeFlow(
       ts: true,
       actionType: true,
       bridgeProtocol: true
-    }
+    },
+    // Explicit, stable ordering so the greedy one-to-one match is fully
+    // deterministic. pairBridgeLegRows sorts candidates by amount ratio, but
+    // ties in that ratio are broken by array index — which, without this
+    // orderBy, would inherit PostgreSQL's physical row order (unspecified and
+    // free to change across VACUUM/updates). (ts, id) makes the leg ordering
+    // reproducible run-to-run regardless of storage layout.
+    orderBy: [{ ts: 'asc' }, { id: 'asc' }]
   });
 
   const deposits: BridgeLeg[] = edges

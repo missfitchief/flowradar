@@ -1,67 +1,153 @@
 # FlowRadar
 
-FlowRadar is a local-first Solana + BNB Chain wallet-intelligence dashboard and worker bot. It discovers early "insider-like" token activity by tracking profitable wallets, capital rotation, wallet clusters, smart-wallet accumulation, fresh-wallet funding, bridge movement, and token flow, using only public on-chain and market data. It is analytics only — not financial advice, not a trading bot, and it never claims to identify or deanonymize real people.
+FlowRadar is a local-first **Solana + BNB Chain wallet-intelligence dashboard and worker bot**. It surfaces early, "insider-like" token activity by tracking *profitable wallets* — capital rotation, wallet clusters, smart-wallet accumulation, fresh-wallet funding, bridge movement, and money flow — using only public on-chain and market data. It is **analytics only**: not financial advice, not a trading bot, and it never claims to identify or deanonymize real people. Every label it assigns is probabilistic (weak / possible / probable / strong), and nothing it discovers ever executes a transaction.
 
-## Quick Start
+Token discovery is **wallet-driven by design**: FlowRadar watches wallets you track (imported, or promoted from candidate feeders) and lets *their* behavior surface tokens — it does not scan or rank every newly created token on chain.
 
-FlowRadar ships two infra modes with identical application code. **LITE** is the default and needs no Docker; **FULL** uses Docker Compose for Postgres + Redis + BullMQ.
+---
 
-### LITE mode (default, no Docker required)
+## Quick start (exact commands — Module 16)
 
-```bash
-npm install
-npm run db:migrate
-npm run db:seed
-npm run dev               # web on http://localhost:5188
-npm run worker
-```
+FlowRadar ships two infra modes with **identical application code**. **LITE** is the default and needs no Docker; **FULL** uses Docker Compose for Postgres + Redis + BullMQ.
 
-### FULL mode (Docker Compose: Postgres + Redis)
+### LITE mode (default — embedded Postgres, no Docker)
 
 ```bash
 npm install
-docker compose up -d
+npm run db:migrate          # applies existing migrations (idempotent)
+npm run db:seed             # loads the deterministic mock world
+npm run dev                 # web on http://localhost:5188
+npm run worker              # background jobs (separate terminal)
+```
+
+`db:migrate` starts an embedded PostgreSQL 16 cluster (from the `embedded-postgres` package's bundled binaries, data in `./.pgdata`, port 5439) on first run — no external Postgres needed. The first run downloads ~50 MB of PG binaries.
+
+### FULL mode (Docker Compose — Postgres + Redis)
+
+```bash
+npm install
+docker compose up -d        # postgres:16 (5432) + redis:7
+# set REDIS_URL and a :5432 DATABASE_URL in .env (see .env.example)
 npm run db:migrate
 npm run db:seed
-npm run dev               # web on http://localhost:5188
+npm run dev                 # web on http://localhost:5188
 npm run worker
 ```
 
-Run `npm run verify` (typecheck + tests + build) to validate the whole workspace at once.
+FULL mode is auto-detected when `REDIS_URL` is set **or** `DATABASE_URL` points at port 5432; otherwise LITE mode is used. BullMQ (Redis-backed queues) runs the worker jobs in FULL mode; LITE mode runs the same jobs via an in-process inline runner.
 
-## What works
+### Verify everything
 
-_To be filled in Task 32 (final polish + Done Bar verification)._
+```bash
+npm run verify              # typecheck (all workspaces) + vitest + next build
+```
+
+### Authoring a new DB migration
+
+`npm run db:migrate` applies **existing** migrations idempotently (`prisma migrate deploy`) — safe to run repeatedly, no name needed. To author a NEW migration after changing `packages/db/prisma/schema.prisma`:
+
+```bash
+npm run db:migrate:new -- --name your_change_name    # prisma migrate dev --name ...
+```
+
+---
+
+## Nav / page map
+
+The sidebar order, top to bottom:
+
+| Page | Route | What it answers |
+|---|---|---|
+| **Signal Feed** *(default landing)* | `/` | "What token should I look at right now, why, and what evidence?" — plain-English operator cards, not a table. |
+| Tokens | `/tokens` | Dense raw table of tracked tokens, sorted by FlowScore. Detail at `/tokens/[id]`. |
+| Money Flow | `/flow` | MoneyFlowEdges, bridge matching, profit-rotation, Sankey view. |
+| Wallet Graph | `/graph` | BFS wallet-graph finder from a root address; interactive cytoscape viz + CSV/JSON exports. |
+| Overlap | `/overlap` | Multi-token wallet overlap finder (which wallets bought N of the same tokens early). |
+| Wallets | `/wallets` | Tracked-wallet leaderboard; CSV import at `/wallets/import`. |
+| Sources | `/sources` | Source Health — candidate feeders + Dune connector status (live/mock/stub). |
+| Alerts | `/alerts` | Fired alerts feed + Telegram test button. |
+| Backtest | `/backtest` | Historical replay of signals vs real outcomes; rule/threshold performance. |
+| Shadow | `/shadow` | Live signals evaluated against real market data at 15m–7d, observation-only. |
+| Settings | `/settings` | Editable thresholds (rules A–G, intervals, connectors) + provider key status. |
+
+---
+
+## What works (mock-first — demoable with zero API keys)
+
+With `MOCK_MODE=true` (the default) and a seeded DB, **everything below runs against the deterministic mock world** — no keys, no network:
+
+- **All pages** render with real data (see the page map above).
+- **Signal rules A–G**: A (multi-wallet accumulation), B (sustained accumulation), C (human-vs-bot composition), D (whale conviction), E (fresh-wallet funding→buy), F (profit rotation across a bridge), G (smart-money exit / rug warning).
+- **FlowScore** — per-token composite score with a component breakdown.
+- **Entity clustering** — union-find over wallet-link evidence; `uniqueEntityCount` vs `smartWalletCount` deflates sybil clusters.
+- **Wallet graph finder** — BFS with depth/node/edge caps, do-not-expand on CEX/bridge hubs, interactive viz, CSV + JSON exports.
+- **Money flow + Sankey**, bridge deposit↔withdrawal matching, profit-rotation detection.
+- **Telegram alert test** — the `/alerts` test button and `POST /api/alerts/test` return `skipped_no_token` gracefully when no bot token is configured.
+- **Backtest / Shadow** — historical replay + live shadow evaluation, both render seeded results.
+- **Connectors + candidate validation** — external feeders seed `CandidateWallet` rows; the validation pipeline promotes qualifying ones to tracked `Wallet`s.
+- **Dune overlap finder** — multi-token overlap search (mock Dune source in `MOCK_MODE`).
+
+### Mock world scenarios (seeded, deterministic)
+
+Seed `20260705`; each scenario is a scripted fixture that fires a specific rule:
+
+| Token | Fires | Scenario |
+|---|---|---|
+| `NOVA` | Rules A / C / D | Multi-wallet accumulation with a single-funder cluster. |
+| `QUIET` | Rule B | Slow, sustained accumulation ramp. |
+| `SEED` | Rule E | Fresh wallets funded, then buying. |
+| `ALPHA → BETA` | Rule F | Profit rotation across a bridge (deposit↔withdrawal + re-buy). |
+| `DUMP` | Rule G | Smart-money exit / distribution. |
+| `RUGZ` | risk flags | Honeypot / high-tax / concentration risk fixture. |
+
+---
 
 ## What is mocked
 
-_To be filled in Task 32._
+`MOCK_MODE=true` is the single switch. When set (the default), **every** provider capability — Solana/BSC wallet activity, market data, token risk, wallet discovery, and all candidate feeders + the Dune overlap source — resolves to the shared `MockProvider` / `MockDuneOverlapSource`, backed by one consistent `MockWorld` (the scenarios above plus ~150 background "noise" wallets). No network calls are made. Set `MOCK_MODE=false` to resolve live adapters where keys are present (see below); capabilities without a live adapter still fall back to the mock world or report their status honestly rather than crashing.
+
+---
 
 ## What needs API keys
 
-**Solana (Helius)** — set `HELIUS_API_KEY` (see `.env.example`) to enable the live Solana wallet-activity and token-risk adapters (`packages/providers/src/solana/{helius,risk}.ts`). Once set, `MOCK_MODE=false` resolves real Helius calls for SOLANA's `walletActivity` (Enhanced Transactions API, `GET /v0/addresses/{address}/transactions`, mapped to `NormalizedTx`) and `risk` (RPC `getTokenLargestAccounts` + `getTokenSupply` for top-holder concentration; mint/freeze-authority checks are a documented stub — see `TODO(provider)` in `risk.ts`) capabilities, rate-limited to ~9 requests/sec. Without a key, both capabilities report `missing_key` via `getProviderStatuses()` and gracefully fall back to the deterministic mock world rather than crashing. Everything else (BSC activity/risk, token metadata, wallet discovery) remains Wave-4-pending; see the rest of `.env.example` for their env vars.
+Set `MOCK_MODE=false` to use live adapters. Missing keys never crash the app — the affected capability reports `missing_key` / `stub` on the Settings and Source Health pages and falls back to mock. Per `.env.example`:
 
-**Market data (DexScreener, keyless)** — set `MOCK_MODE=false` and market data for BOTH chains works out of the box, no API key required (`packages/providers/src/market/dexscreener.ts`). It calls the public `GET https://api.dexscreener.com/latest/dex/tokens/{tokenAddress}` endpoint (confirmed live this session — the docs site's per-endpoint rate-limit badge didn't render machine-readably, so the ~300 req/min limiter figure this adapter uses is a widely-documented-but-not-verbatim-doc-confirmed default; re-check `docs.dexscreener.com/api/reference` before relying on it for capacity planning), filters the returned pairs to the requested chain, and picks the highest-liquidity pair (ties broken by 24h volume) for `getTokenMarket`; `getTokenPairs` returns every matching pair. Provides `priceUsd`, `marketCapUsd`, `fdvUsd`, `liquidityUsd`, and `vol5m`/`vol1h`/`vol6h`/`vol24h` — **`holderCount` is always `null`**, since DexScreener's pair payload has no holder-count field at all. `getProviderStatuses()` reports this capability `'live'` unconditionally (there's no key to be missing). When a token address isn't a real on-chain mint/contract (e.g. this repo's synthetic mock-world seed addresses), DexScreener returns no pairs and `getTokenMarket` returns `null` — the `marketDataHot`/`marketDataNormal` worker jobs log that as a normal 0-refreshed cycle, not an error.
+| Env var | Effect when set (`MOCK_MODE=false`) |
+|---|---|
+| `HELIUS_API_KEY` | **Live Solana** wallet activity (Enhanced Transactions API) + token risk (RPC top-holder concentration). Rate-limited ~9 rps. Without it, Solana activity/risk fall back to mock. |
+| `BSCSCAN_API_KEY` | **Live BSC** wallet activity via the unified **Etherscan API V2** (`chainid=56`, `txlist` + `tokentx` merged). Must be an Etherscan-V2 key (legacy BscScan V1 is rejected). Free tier ~3 rps. Swap detection is best-effort. |
+| `GOPLUS_API_KEY` | **BSC token risk** (GoPlus `token_security`). **Keyless-live** — the key is *optional*, only raising rate limits. |
+| *(none)* — DexScreener | **Market data on both chains** is keyless-live out of the box (`~300 req/min`, default/unconfirmed). `holderCount` is always `null` (not in the API). |
+| `SOLANA_TRACKER_API_KEY` | Candidate discovery — Solana PnL leaderboard feeder (primary). |
+| `BIRDEYE_API_KEY` | Candidate **evidence** — wallet PnL summary + token top-traders. Evidence-only: consumed by validation / top-trader backfill, does **not** seed candidates directly. |
+| `CIELO_API_KEY` | **Stub** — no verified public API; ships as a typed stub (always returns none). |
+| `KOLSCAN_API_KEY` / `KOLSCAN_API_BASE` | **Stub** — operator-supplied swap-in point; no network call until a real endpoint is wired. |
+| `GMGN_API_KEY` / `GMGN_API_BASE` | **Stub** — operator-supplied swap-in point; same as KOLScan. |
+| `DUNE_API_KEY` | Dune saved-query execution for the overlap finder + top-trader backfill. Credit-safe (see below). |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Real Telegram alert delivery. Without both, alerts are `skipped_no_token`. |
+| `BIRDEYE_API_KEY` / `MORALIS_API_KEY` / `BITQUERY_API_KEY` | Reserved for typed BSC provider stubs (swap-in points, no live adapter yet). |
+| `DISCORD_WEBHOOK_URL` | Deferred — interface stub only. |
 
-**BSC (BscScan + GoPlus)** — set `MOCK_MODE=false` and BSC's `walletActivity`/`risk` capabilities resolve to real adapters (`packages/providers/src/bsc/{bscscan,goplus}.ts`). `walletActivity` uses **BscScan via the unified Etherscan API V2** (`https://api.etherscan.io/v2/api?chainid=56&...` — confirmed live this session that the legacy `api.bscscan.com/api` endpoint now hard-rejects with "You are using a deprecated V1 endpoint, switch to Etherscan API V2"), calling both `account/txlist` (native BNB transfers) and `account/tokentx` (BEP-20 transfer events) and merging both into one `NormalizedTx` per tx hash. It needs a **new Etherscan-issued API key** — set `BSCSCAN_API_KEY` (the env var name is unchanged from before the V2 migration, but the value must be an Etherscan-V2-compatible key). Rate-limited to the doc-verified free-tier **3 requests/sec**. Without a key, `walletActivity` reports `missing_key` and gracefully falls back to the mock world. **Swap detection is best-effort/deferred**: BscScan's txlist/tokentx rows carry no decoded swap event (unlike Helius's `events.swap` for Solana), so a DEX swap shows up as its constituent `token_transfer`/`native_transfer`/`contract_interaction` legs rather than a synthesized `swap_leg` pair — see `bscscanMapper.ts`'s file header for the full rationale. `risk` uses **GoPlus's `token_security` endpoint**, which is **keyless-live** (`GOPLUS_API_KEY` is optional, only raising rate limits — live-verified this session with real calls against BSC USDT and a second address with no security data) and reports flags for honeypot, buy/sell tax, unverified source, mintable authority, `cannot_sell_all`, and top-holder concentration. `getProviderStatuses()` reports BSC `risk` as `'live'` unconditionally (no key ever gates it). GoPlus's keyless tier throttles aggressively under bursty load (HTTP 200 with `{"code":4029,"message":"too many requests"}`, no `result` field) — this adapter checks the response `code` before reading `result` and surfaces a clean per-token error (never a crash) when throttled; the rate limiter is tuned to 1 req/sec as a conservative default. Three more BSC-capable providers — **Birdeye, Moralis, Bitquery** — exist only as typed stubs (`packages/providers/src/bsc/stubs.ts`): every method resolves empty/null with no network I/O, existing solely so `getProviderStatuses()` surfaces their swap-in point on the Settings page (env vars `BIRDEYE_API_KEY`/`MORALIS_API_KEY`/`BITQUERY_API_KEY` already reserved in `.env.example`).
+---
 
-_Remaining chains/capabilities to be filled in Task 32._
+## Trust & ethics
 
-## External candidate-wallet connectors (Wave 4.5, Spec §5b)
+- **Probabilistic labels only.** Confidence bands (weak / possible / probable / strong) are shown everywhere; nothing is asserted as certain, and no real-world identity is claimed.
+- **Analytics-only, no execution.** FlowRadar never sends a transaction, places an order, or moves funds.
+- **Candidates → validate → promote.** External feeders (Solana Tracker, Birdeye, the stubs) write `CandidateWallet` rows. A candidate is **never** counted by the signal engine — smart-wallet counts, FlowScore, signals all read **only promoted, tracked `Wallet`s**. A source's own claimed PnL / win-rate / ROI is never trusted at face value; it must pass validation and be promoted first.
+- **Dune credit-safety.** The default serves each query's **latest cached result** (`DUNE_USE_LATEST_RESULT=true`); fresh, billable execution is gated behind `DUNE_EXECUTE_FRESH=true` and off by default.
 
-FlowRadar bootstraps its own candidate-wallet universe from 6 external feeders, seeded once as `ExternalWalletSource` rows and visible (enabled state, live/mock/stub status, env-key presence, last sync, candidate counts) on the **Source Health** page (`/sources`). **Critical trust rule:** a `CandidateWallet` row from any of these sources is NEVER counted by the signal engine (smart-wallet counts, scores, signals) until it passes Task 35's validation pipeline and is promoted to a real, tracked `Wallet` — a source's own claimed PnL/win-rate/ROI figures are never trusted at face value.
+---
 
-| Source name | Status | Docs | Env vars |
-|---|---|---|---|
-| `solana_tracker_pnl` | **Live** (key-gated) | [Solana Traders Leaderboard](https://docs.solanatracker.io/data-api/pnl-v2/leaderboard/solana-traders-leaderboard.md) — `GET https://data.solanatracker.io/v2/pnl/leaderboard/top`, header `x-api-key` | `SOLANA_TRACKER_API_KEY` |
-| `birdeye_wallet_pnl` | **Live** (key-gated), evidence-only | [Wallet PnL Summary](https://docs.birdeye.so/reference/get-wallet-v2-pnl-summary.md) — `GET https://public-api.birdeye.so/wallet/v2/pnl/summary`, headers `X-API-KEY` + `x-chain` | `BIRDEYE_API_KEY` |
-| `birdeye_top_traders` | **Live** (key-gated), evidence-only | [Token Top Traders](https://docs.birdeye.so/reference/get-defi-v2-tokens-top_traders.md) — `GET https://public-api.birdeye.so/defi/v2/tokens/top_traders` | `BIRDEYE_API_KEY` |
-| `cielo` | **Stub** — no public API reference found | in-app "Settings > API key" only, no REST reference discoverable | `CIELO_API_KEY` |
-| `kolscan` | **Stub** — no official public API | none found | `KOLSCAN_API_KEY`, `KOLSCAN_API_BASE` (operator-supplied swap-in point) |
-| `gmgn_smart_money` | **Stub** — no official public API | none found (site returned 403 to an unauthenticated fetch) | `GMGN_API_KEY`, `GMGN_API_BASE` (operator-supplied swap-in point) |
+## Known limitations / scale notes
 
-Notes:
-- **Solana Tracker** is the primary Solana PnL leaderboard feeder — `fetchCandidates('SOLANA')` maps the doc-verified leaderboard response directly into `ExternalCandidate` rows (wallet, rank, claimed PnL/win-rate/trade-count/ROI).
-- **Birdeye**'s two doc-verified endpoints are single-wallet-lookup and single-token-top-traders respectively — neither is itself a "list of candidate addresses to scan" endpoint, so both `CandidateSourceProvider.fetchCandidates` adapters return `[]` by design; their real value is as evidence providers (`getBirdeyeWalletPnl`, `createBirdeyeTokenTopTraders().getTopTraders`) called with a specific address/token by the validation and top-trader-backfill jobs.
-- **Cielo / KOLScan / GMGN**: per the "no hardcoded unofficial endpoints" rule, these three ship as typed stubs only — `fetchCandidates` always resolves to `[]`, status reports `'stub'`, and no network call is ever made regardless of whether an API key is set. KOLScan/GMGN additionally expose an operator-supplied `*_API_BASE` env var as a documented swap-in point (e.g. for an operator's own scraper or a future official API) — setting it changes nothing about this repo's behavior today, since the stub bodies contain no fetch call at all.
-- Missing key ⇒ `createXCandidateSource(...)` returns `null` (docs-verified adapters) and `runExternalWalletSourceSync`'s resolver treats that as a graceful per-source skip, never a crash. `getCandidateSourceStatuses()` (analogous to `getProviderStatuses()`) reports `mock`/`live`/`missing_key`/`stub` per source for the Source Health page.
+- **Inline per-token risk fetch doesn't scale on live data.** The flow-scoring pass (`packages/db/src/scoring-pass.ts`) calls `getTokenRisk` once per token, serially, inside the scoring loop. Under mock mode this is free, but against a live risk provider (Helius ~9 rps, GoPlus ~1 rps) N tracked tokens means N sequential rate-limited calls per cycle — fine for a handful of tokens, a bottleneck at scale. A production build would batch/cache risk out of the hot loop (e.g. a separate risk-refresh job writing a cached `RiskReport` per token). Deliberately left inline for the MVP.
+- **Cold-start thresholds.** Default Rule A (20+ profitable wallets in 30 min) will rarely fire on *live* data until hundreds of quality wallets are tracked. Mock mode demonstrates every rule; thresholds are Settings-editable for live tuning. Expected, not a bug.
+- **Single-token threshold tuning.** Rule thresholds are global, not per-token/per-chain; a token with unusual liquidity/age may need manual Settings tuning.
+- **PnL is approximate** from public APIs (pre-window inventory, airdrops, internal transfers are invisible). Confidence scoring + CSV override mitigate; the UI always shows confidence.
+- **Live top-trader backfill uses Birdeye** (evidence-only endpoints), and several candidate sources (Cielo / KOLScan / GMGN) are **typed stubs** — no verified public API exists yet, so they return nothing regardless of key until an endpoint is wired at their documented swap-in point.
+- **"Production-ready" = a robust local single-user app**, not a deployed multi-tenant SaaS. No auth/multi-user.
+
+---
+
+*FlowRadar is an analytics tool. It is not financial advice. Do your own research.*

@@ -138,23 +138,43 @@ export interface ParsedOverlapRows {
   droppedCount: number;
 }
 
+/** Why a raw row was dropped — `missing_wallet_address` (the one required field) vs `type_mismatch` (a present field with the wrong type). */
+export type OverlapRowDropReason = 'missing_wallet_address' | 'type_mismatch';
+
 /**
  * Zod-validates a raw Dune result set against DuneOverlapRowSchema. Rows
  * missing `wallet_address` (or otherwise failing validation) are dropped and
  * counted, never thrown — same "one bad row never aborts the batch"
  * convention as every other per-item try/catch in this codebase (e.g.
  * externalWalletSource.ts's per-source try/catch).
+ *
+ * `onDrop` is an optional per-dropped-row callback so a caller can log the
+ * drop reason at DEBUG (distinguishing "no wallet_address at all" from "a
+ * field was the wrong type") without coupling this pure function to a logger.
  */
-export function parseOverlapRows(rawRows: DuneRawRow[]): ParsedOverlapRows {
+export function parseOverlapRows(
+  rawRows: DuneRawRow[],
+  onDrop?: (reason: OverlapRowDropReason, rowIndex: number) => void
+): ParsedOverlapRows {
   const rows: DuneOverlapRow[] = [];
   let droppedCount = 0;
 
-  for (const raw of rawRows) {
+  for (let i = 0; i < rawRows.length; i++) {
+    const raw = rawRows[i]!;
     const result = DuneOverlapRowSchema.safeParse(raw);
     if (result.success) {
       rows.push(result.data);
     } else {
       droppedCount += 1;
+      if (onDrop) {
+        // wallet_address is the ONLY required field; if any issue targets it
+        // (absent or non-string), classify as missing_wallet_address, else a
+        // type mismatch on some optional field.
+        const walletIssue = result.error.issues.some(
+          (issue) => issue.path[0] === 'wallet_address'
+        );
+        onDrop(walletIssue ? 'missing_wallet_address' : 'type_mismatch', i);
+      }
     }
   }
 

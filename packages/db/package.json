@@ -11,7 +11,8 @@
   "scripts": {
     "build": "tsc -b",
     "generate": "prisma generate",
-    "db:migrate": "tsx ../../scripts/db-local.ts ensure && prisma migrate dev --name init",
+    "db:migrate": "tsx ../../scripts/db-local.ts ensure && prisma migrate deploy",
+    "db:migrate:new": "tsx ../../scripts/db-local.ts ensure && prisma migrate dev",
     "db:seed": "tsx ../../scripts/db-local.ts ensure && tsx src/seed.ts",
     "db:studio": "tsx ../../scripts/db-local.ts ensure && prisma studio",
     "backtest:replay": "tsx src/scripts/runReplay.ts"
