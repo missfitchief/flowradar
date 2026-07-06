@@ -16,7 +16,11 @@ import type { Chain, GraphSearchParams, NodeType, WalletGraphRelationship } from
  * One edge as returned by an EdgeFetcher, before dedupe/aggregation. `source`
  * is Task 19's naming for the edge's origin address, `dest` for its
  * destination (kept distinct from ../types.ts's GraphEdge.from/to, which
- * belongs to a different, unused sketch).
+ * belongs to a different, unused sketch). `source`/`dest` always reflect the
+ * TRUE fund-flow direction (who actually sent to whom) — this does NOT
+ * change under bidirectional discovery (Module 6): only which edges get
+ * RETURNED for a given queried address changes, never how an edge's own
+ * direction is recorded.
  */
 export interface RawGraphEdge {
   source: string;
@@ -65,6 +69,18 @@ export type RegistryLookup = (address: string) => {
  * live/mock fetcher can respect perNodeTxCap, chain, time range, etc.
  * (perNodeTxCap itself is the fetcher's concern; the BFS engine only
  * documents it — see bfs.ts header.)
+ *
+ * Bidirectional discovery contract (Module 6 fix): for a queried `address`,
+ * the fetcher returns EVERY edge touching `address` — both edges where
+ * `address` is the true source (money OUT) and edges where `address` is the
+ * true dest (money IN). The fetcher guarantees every returned RawGraphEdge
+ * has `address` as EITHER `source` OR `dest` (never neither); `source`/`dest`
+ * on the returned edge always reflect the true fund-flow direction and are
+ * NEVER flipped/normalized to put `address` on a particular side. It is the
+ * BFS engine's job (see bfs.ts's expandNode) to compute the counterparty as
+ * whichever side of the edge is NOT `address`, and to admit/enqueue that
+ * counterparty — not the fetcher's job to pre-orient edges around the
+ * queried address.
  */
 export interface EdgeFetcher {
   (address: string, chain: Chain, params: GraphSearchParams): Promise<RawGraphEdge[]>;

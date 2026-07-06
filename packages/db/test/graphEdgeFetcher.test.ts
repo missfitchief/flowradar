@@ -167,9 +167,10 @@ describe.skipIf(!(await probePort('localhost', 5439)))('createDbEdgeFetcher', ()
       }
     });
 
-    // An edge where WALLET_ROOT is the DESTINATION, not source — must be
-    // excluded from fetchEdges(WALLET_ROOT, ...) (fetcher contract: only
-    // edges FROM the queried address).
+    // An edge where WALLET_ROOT is the DESTINATION, not source — must now be
+    // RETURNED from fetchEdges(WALLET_ROOT, ...) (Module 6 bidirectional
+    // discovery fix: the fetcher returns every edge touching the queried
+    // address, in either direction, with true source/dest preserved).
     await prisma.moneyFlowEdge.create({
       data: {
         sourceAddress: WALLET_NATIVE_DEST,
@@ -244,12 +245,21 @@ describe.skipIf(!(await probePort('localhost', 5439)))('createDbEdgeFetcher', ()
     expect(cexEdge!.relationship).toBe('cex_deposit');
   });
 
-  it('excludes edges where the queried address is the destination, not the source', async () => {
+  it('returns inbound edges (queried address as destination) with true source/dest preserved', async () => {
     const fetcher = createDbEdgeFetcher(prisma, { perNodeTxCap: 500 });
     const edges = await fetcher(WALLET_ROOT, CHAIN, BASE_PARAMS);
 
-    // Every returned edge must have source === WALLET_ROOT.
-    expect(edges.every((e) => e.source === WALLET_ROOT)).toBe(true);
+    // Every returned edge must touch WALLET_ROOT as either source or dest —
+    // not exclusively source (Module 6 bidirectional discovery fix).
+    expect(edges.every((e) => e.source === WALLET_ROOT || e.dest === WALLET_ROOT)).toBe(true);
+
+    // The inbound row (WALLET_NATIVE_DEST -> WALLET_ROOT) must appear, with
+    // its TRUE direction preserved (source=WALLET_NATIVE_DEST, not flipped).
+    const inboundEdge = edges.find((e) => e.dest === WALLET_ROOT && e.source === WALLET_NATIVE_DEST);
+    expect(inboundEdge).toBeDefined();
+    expect(inboundEdge!.relationship).toBe('native_transfer');
+    expect(inboundEdge!.amountUsd).toBe(150);
+    expect(inboundEdge!.txCount).toBe(1);
   });
 
   it('caps aggregated edges to perNodeTxCap, keeping the highest-value ones', async () => {

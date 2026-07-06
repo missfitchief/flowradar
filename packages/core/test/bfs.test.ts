@@ -104,8 +104,11 @@ const REGISTRY: Record<string, ReturnType<RegistryLookup>> = {
 
 const registry: RegistryLookup = (address) => REGISTRY[address] ?? null;
 
+// Bidirectional discovery fetcher (Module 6 fix): returns every edge
+// touching `address` as EITHER its true source or true dest, never flipped —
+// matching the EdgeFetcher contract in packages/core/src/graph/types.ts.
 function makeFetcher(edges: RawGraphEdge[] = ALL_EDGES): EdgeFetcher {
-  return async (address: string) => edges.filter((e) => e.source === address);
+  return async (address: string) => edges.filter((e) => e.source === address || e.dest === address);
 }
 
 function baseParams(overrides: Partial<GraphSearchParams> = {}): GraphSearchParams {
@@ -541,5 +544,77 @@ describe('runBfs', () => {
 
     const result = await runBfs(baseParams({ mode: 'FULL_RAW' }), makeFetcher(), rootIsRouter);
     expect(addr(result.nodes, 'A')).toBeDefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // Module 6: bidirectional counterparty discovery (sent-to OR received-from)
+  // -------------------------------------------------------------------------
+
+  it('pure-recipient root finds its funder via an inbound-only edge', async () => {
+    // R has ONLY an inbound edge Y->R (Y sent to R); no outbound edge at all.
+    const edges: RawGraphEdge[] = [edge('Y', 'R', 'direct_transfer', 2000, minutes(0))];
+    const result = await runBfs(baseParams({ mode: 'FULL_RAW', rootAddress: 'R' }), makeFetcher(edges), registry);
+
+    const y = addr(result.nodes, 'Y');
+    expect(y).toBeDefined();
+    expect(y?.depth).toBe(1);
+
+    const ra = result.edges.find((e) => e.source === 'Y' && e.dest === 'R');
+    expect(ra).toBeDefined();
+    expect(ra?.relationship).toBe('direct_transfer');
+
+    const root = addr(result.nodes, 'R');
+    expect(root?.totalReceivedUsd).toBe(2000);
+    expect(root?.totalSentUsd).toBe(0);
+  });
+
+  it('bidirectional depth-1: root with an inbound funder AND an outbound recipient both discovered', async () => {
+    const edges: RawGraphEdge[] = [
+      edge('Y', 'R', 'direct_transfer', 2000, minutes(0)), // Y sent to R (inbound)
+      edge('R', 'A', 'direct_transfer', 3000, minutes(1)) // R sent to A (outbound)
+    ];
+    const result = await runBfs(baseParams({ mode: 'FULL_RAW', rootAddress: 'R' }), makeFetcher(edges), registry);
+
+    expect(addr(result.nodes, 'Y')).toBeDefined();
+    expect(addr(result.nodes, 'Y')?.depth).toBe(1);
+    expect(addr(result.nodes, 'A')).toBeDefined();
+    expect(addr(result.nodes, 'A')?.depth).toBe(1);
+  });
+
+  it('cross-endpoint dedupe: edge Y->R discovered from both R and Y merges to exactly one edge, not double-counted', async () => {
+    // Y->R is discoverable when expanding R (Y->R touches R as dest) AND
+    // again when expanding Y (Y->R touches Y as source, plus Y gets an
+    // outbound edge Y->W so Y itself passes Gate 2 and gets expanded).
+    const edges: RawGraphEdge[] = [
+      edge('Y', 'R', 'direct_transfer', 2000, minutes(0)),
+      edge('Y', 'W', 'direct_transfer', 1500, minutes(1))
+    ];
+    const result = await runBfs(baseParams({ mode: 'FULL_RAW', rootAddress: 'R', maxDepth: 3 }), makeFetcher(edges), registry);
+
+    // Y and W both discovered.
+    expect(addr(result.nodes, 'Y')).toBeDefined();
+    expect(addr(result.nodes, 'W')).toBeDefined();
+
+    // Exactly ONE (Y,R,direct_transfer) edge — merged idempotently, not 2x.
+    const yrEdges = result.edges.filter((e) => e.source === 'Y' && e.dest === 'R' && e.relationship === 'direct_transfer');
+    expect(yrEdges.length).toBe(1);
+    expect(yrEdges[0].amountUsd).toBe(2000); // 1x, NOT 4000 (2x)
+    expect(yrEdges[0].txCount).toBe(1); // 1x, NOT 2
+
+    // R's totalReceivedUsd must also reflect only ONE sighting of the edge.
+    const root = addr(result.nodes, 'R');
+    expect(root?.totalReceivedUsd).toBe(2000);
+  });
+
+  it('self-loop edge (X->X) is skipped: no counterparty, edge never appears', async () => {
+    const edges: RawGraphEdge[] = [
+      edge('R', 'A', 'direct_transfer', 1000, minutes(0)),
+      edge('A', 'A', 'direct_transfer', 500, minutes(1)) // self-loop
+    ];
+    const result = await runBfs(baseParams({ mode: 'FULL_RAW', rootAddress: 'R' }), makeFetcher(edges), registry);
+
+    expect(addr(result.nodes, 'A')).toBeDefined();
+    const selfLoop = result.edges.find((e) => e.source === 'A' && e.dest === 'A');
+    expect(selfLoop).toBeUndefined();
   });
 });

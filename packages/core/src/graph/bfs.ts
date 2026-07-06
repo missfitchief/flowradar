@@ -39,6 +39,33 @@
 //   regardless of any Gate 2 condition.
 // -----------------------------------------------------------------------
 //
+// Bidirectional counterparty discovery (Module 6 fix):
+//
+//   A node's counterparties are discovered in BOTH directions: for a queried
+//   address X, the fetcher returns every edge touching X (X as true source
+//   OR true dest — see EdgeFetcher's contract in graph/types.ts), and
+//   expandNode computes counterparty = (edge.source === X ? edge.dest :
+//   edge.source) for each one. The edge is always admitted with its TRUE
+//   source/dest (fund-flow direction is never flipped), so net-flow
+//   aggregation and displayed arrows stay correct — only which node gets
+//   discovered/enqueued as "the other side" is direction-agnostic. Self-loop
+//   edges (source === dest) are skipped entirely (no counterparty, nothing
+//   to discover). Gate 1 (min value, include-flags, mode allowlists), Gate 2
+//   (mode heuristics, do-not-expand) and the maxNodes/maxEdges caps all apply
+//   identically regardless of which direction discovered the edge.
+//
+//   Cross-endpoint idempotency: the SAME underlying edge (e.g. Y->R) is
+//   returned once when expanding R (Y->R touches R as dest) and again when
+//   expanding Y (Y->R touches Y as source) — both fetches hand back
+//   identical RawGraphEdge content (same amountUsd/txCount/sampleTxHashes).
+//   Naively merging both sightings into edgeMap under the dedupe key would
+//   double-count the amount. A sightings guard (keyed by edgeKey + the raw
+//   edge's own sampleTxHashes, its most stable identity) makes re-sighting
+//   the identical edge a no-op, while a genuinely distinct edge sharing the
+//   same (source,dest,relationship) — different underlying transactions —
+//   still merges/sums as before.
+// -----------------------------------------------------------------------
+//
 // Global value-priority admission (fixes Critical 1 + Critical 2):
 //
 //   Admission under maxNodes/maxEdges is NOT parent-by-parent BFS. Every
@@ -212,6 +239,10 @@ export async function runBfs(
 
   const nodes = new Map<string, MutableNode>();
   const edgeMap = new Map<string, MutableEdge>();
+  // Sighting identity guard (Module 6 cross-endpoint dedupe): the same
+  // underlying edge can be handed back once per endpoint it touches. See the
+  // "Cross-endpoint idempotency" note in the header comment above.
+  const seenSightings = new Set<string>();
   let truncated = false;
 
   nodes.set(params.rootAddress, {
@@ -250,6 +281,8 @@ export async function runBfs(
   // pops, so the whole traversal is deterministic).
   interface Candidate {
     raw: RawGraphEdge;
+    /** The node NOT equal to the address being expanded — may be raw.source or raw.dest depending on which direction discovered it. */
+    counterparty: string;
     destDepth: number;
     sourceIsRoot: boolean;
     sourceDiscoveryAmountUsd: number;
@@ -276,7 +309,10 @@ export async function runBfs(
     const sorted = [...rawEdges].sort((a, b) => b.amountUsd - a.amountUsd || b.txCount - a.txCount);
 
     for (const raw of sorted) {
-      if (raw.source !== address) continue; // fetcher contract: edges FROM this address
+      if (raw.source === raw.dest) continue; // self-loop: no counterparty to discover, skip
+      if (raw.source !== address && raw.dest !== address) continue; // fetcher contract: every edge touches `address`
+      const counterparty = raw.source === address ? raw.dest : raw.source;
+
       if (!passesGate1(raw, params)) continue;
 
       const destDepth = depth + 1;
@@ -284,6 +320,7 @@ export async function runBfs(
 
       queue.push({
         raw,
+        counterparty,
         destDepth,
         sourceIsRoot: isRootNode,
         sourceDiscoveryAmountUsd: discoveryAmountUsd,
@@ -306,12 +343,19 @@ export async function runBfs(
 
     const candidate = queue.shift()!;
     const raw = candidate.raw;
-    const destAddress = raw.dest;
+    const destAddress = candidate.counterparty; // the newly-discovered node, regardless of which side of raw it is
     const destDepth = candidate.destDepth;
 
     const destExistsAlready = nodes.has(destAddress);
     const key = edgeKey(raw);
     const edgeIsNew = !edgeMap.has(key);
+    // Cross-endpoint sighting identity: the SAME underlying edge is returned
+    // once from each endpoint's fetch (e.g. Y->R touches both R and Y). Both
+    // sightings carry identical raw content, so key on edgeKey + the raw
+    // edge's own sampleTxHashes to recognize "this exact edge, already
+    // merged" vs. "a genuinely distinct edge for the same (source,dest,rel)".
+    const sightingKey = `${key}::${[...raw.sampleTxHashes].sort().join(',')}`;
+    const alreadySighted = seenSightings.has(sightingKey);
 
     // Single commit point (fixes Critical 2): check BOTH caps before writing
     // anything. If admitting this candidate's edge (and, if needed, its new
@@ -326,7 +370,7 @@ export async function runBfs(
       break;
     }
 
-    // --- commit: edge ---
+    // --- commit: edge (idempotent re-sighting guard) ---
     if (edgeIsNew) {
       edgeMap.set(key, {
         source: raw.source,
@@ -339,7 +383,8 @@ export async function runBfs(
         lastTs: raw.lastTs,
         sampleTxHashes: [...raw.sampleTxHashes].slice(0, 5)
       });
-    } else {
+      seenSightings.add(sightingKey);
+    } else if (!alreadySighted) {
       const existing = edgeMap.get(key)!;
       existing.amountUsd += raw.amountUsd;
       existing.txCount += raw.txCount;
@@ -349,9 +394,10 @@ export async function runBfs(
         if (existing.sampleTxHashes.length >= 5) break;
         if (!existing.sampleTxHashes.includes(h)) existing.sampleTxHashes.push(h);
       }
+      seenSightings.add(sightingKey);
     }
 
-    // --- commit: node (first edge touching an address creates it) ---
+    // --- commit: counterparty node (first edge touching an address creates it) ---
     let destNode = nodes.get(destAddress);
     if (!destNode) {
       const { nodeType, tags } = nodeTypeAndTags(destAddress, raw.counterpartyType);
@@ -373,17 +419,21 @@ export async function runBfs(
       destNode.discoveryEdgeAmountUsd = raw.amountUsd;
     }
 
-    // aggregates: update BOTH endpoints touched by this accepted edge
-    const srcNode = nodes.get(raw.source)!;
-    srcNode.totalSentUsd += raw.amountUsd;
-    srcNode.interactionCount += raw.txCount;
-    srcNode.firstSeen = srcNode.firstSeen === null || raw.firstTs < srcNode.firstSeen ? raw.firstTs : srcNode.firstSeen;
-    srcNode.lastSeen = srcNode.lastSeen === null || raw.lastTs > srcNode.lastSeen ? raw.lastTs : srcNode.lastSeen;
+    // aggregates: update BOTH true endpoints touched by this accepted edge,
+    // only on first sighting (a re-sighted edge already contributed once).
+    if (!alreadySighted) {
+      const srcNode = nodes.get(raw.source)!;
+      srcNode.totalSentUsd += raw.amountUsd;
+      srcNode.interactionCount += raw.txCount;
+      srcNode.firstSeen = srcNode.firstSeen === null || raw.firstTs < srcNode.firstSeen ? raw.firstTs : srcNode.firstSeen;
+      srcNode.lastSeen = srcNode.lastSeen === null || raw.lastTs > srcNode.lastSeen ? raw.lastTs : srcNode.lastSeen;
 
-    destNode.totalReceivedUsd += raw.amountUsd;
-    destNode.interactionCount += raw.txCount;
-    destNode.firstSeen = destNode.firstSeen === null || raw.firstTs < destNode.firstSeen ? raw.firstTs : destNode.firstSeen;
-    destNode.lastSeen = destNode.lastSeen === null || raw.lastTs > destNode.lastSeen ? raw.lastTs : destNode.lastSeen;
+      const dstNode = nodes.get(raw.dest)!;
+      dstNode.totalReceivedUsd += raw.amountUsd;
+      dstNode.interactionCount += raw.txCount;
+      dstNode.firstSeen = dstNode.firstSeen === null || raw.firstTs < dstNode.firstSeen ? raw.firstTs : dstNode.firstSeen;
+      dstNode.lastSeen = dstNode.lastSeen === null || raw.lastTs > dstNode.lastSeen ? raw.lastTs : dstNode.lastSeen;
+    }
 
     // confidence: max over inbound accepted edges of (base - 10*(depth-1)), floored
     const base = CONFIDENCE_BASE[raw.relationship] ?? DEFAULT_CONFIDENCE_BASE;
