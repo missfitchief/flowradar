@@ -125,6 +125,48 @@ UI: **Source Health page** (`/sources`) — per source: enabled, status, last sy
 
 **Critical trust rule (test-enforced):** the live signal engine reads ONLY validated/promoted tracked wallets; `CandidateWallet` rows never influence counts, scores, or signals until promotion.
 
+### 5c. Wave 3.5 — Operator UI (Signal Feed) + Backtest/Shadow Simulation (added 2026-07-06)
+
+Queued by the user after the Wave 3 gate, before Wave 4 live providers. Rationale (verbatim intent): the current UI is technically functional but not operator-friendly — it reads like a raw admin/Dune table, not a signal a trader can act on in under 10 seconds. Separately, mock data only proves the code path runs; it does not prove the strategy has edge. Both problems are fixed together, in build order Phase A→D (backtest/shadow first, then the UI redesign), before wiring any live provider in Wave 4. This wave supersedes the original Wave 5 Task 31 (see §12 and the plan's Task 31 heading).
+
+**Backtest evaluator (Phase A).** Evaluate a signal against its later price series. Metrics: signal count; hit rate to +50%/2x/5x/10x; median & average return; max upside; max drawdown; time-to-peak; time-to-2x; false-positive rate; rug/exit-warning rate; how often smart wallets exited before the dump; performance broken out by mcap bucket, liquidity bucket, unique-entity-count, cluster-concentration, and rule-combination. Horizons: 15m/1h/6h/24h/3d/7d — the `BacktestResult` schema is expanded to carry these metrics. Mock-world historical-replay unit tests exist here too, but per the hard framing rule below they only prove the evaluator's code path, not signal quality.
+
+**Positive-signal label taxonomy (binding).** +50% before −50% = small win; 2x before −50% = good win; 5x before −60% = major win; a dump >60% without hitting 2x first = failure; a liquidity/rug failure = hard failure.
+
+**Historical replay + tuning (Phase B).** Historical replay re-runs signals over a chosen period using only data available as-of time T (aggregates are reconstructed as-of T — no lookahead bias). Reports rule performance per rule A–G, and combined-strategy performance for: A only; A+B; A+C; A+entity-adjusted count; A+low sell pressure; F only; F+entity cluster confidence; A/B/F combined. Threshold tuning sweeps: min smart wallets, min unique entities, min net smart flow, max sell pressure, max mcap expansion, min liquidity, min confidence, min profit-rotation confidence, max cluster-concentration risk — output is best/worst threshold sets, precision by signal type, recommended default settings, and an explicit overfitting warning. Walk-forward validation is required: tune on period 1, test on later period 2; never tune and test on the same sample only.
+
+**Shadow mode (Phase C).** Runs live for days, recording every signal without trading or acting on it, then evaluates outcomes at 15m/1h/6h/24h/3d/7d. Two new pages: **Backtest** (rule-performance table, threshold comparison, best/worst sets, recommended defaults, overfitting warning) and **Shadow Mode** (live alerts generated, current outcome, pending evaluation windows, per-window results, good/bad/unknown). Hard framing line, enforced in UI copy: do **not** claim the bot is trained or profitable from mock data — only historical replay and shadow results validate signal quality.
+
+**Signal Feed / operator UI redesign (Phase D, built last).** New **default landing page**, "Signal Feed / Alpha Feed," answering: what token should I look at right now, why, and what evidence supports it? Signal card fields: token symbol/name/address, chain, status (HOT/WATCH/PROFIT_ROTATION/EXIT_WARNING/DEAD), confidence, FlowScore, mcap, liquidity, smart wallets buying, unique entities, largest cluster size, net smart flow, avg smart entry mcap, current mcap, mcap expansion, sell pressure, profit rotation y/n, risk level, last updated.
+
+Every card leads with a plain-English explanation, in this order: why it fired (first), what would invalidate it, what changed since the previous check — evidence is second, raw data is third. Example copy: "36 tracked smart wallets bought $NOVA, but entity clustering estimates 19 unique entities. Net smart flow is +$75k, sell pressure is low, and market cap expanded only 1.4x from average smart entry. This looks like accumulation, not late chase." Rotation copy example: "Wallet group realized profit on $ALPHA, bridged funds through Wormhole, and a linked wallet bought $BETA 65 minutes later. Amount match: 80%. Confidence: probable."
+
+Sections: Hot now / Accumulating / Profit rotation / Exit warnings / New watched tokens / Best performing previous alerts / Worst performing previous alerts. Visual hierarchy: bigger font, fewer columns, larger cards, clear badges, plain explanations, why→evidence→raw ordering, responsive mobile/desktop — tables become **tertiary** evidence, not the main UX.
+
+Nav reorder (replaces the Wave-1 order in §8): 1 Signal Feed (default) → 2 Token Detail → 3 Money Flow → 4 Wallet Graph → 5 Wallets → 6 Alerts → 7 Settings.
+
+### 5d. Wave 4.6 — Dune Query Connector + Multi-Token Wallet Overlap Finder (added 2026-07-06)
+
+**Product framing (binding).** Dune is the best bootstrap/backfill source for wallet-overlap discovery, smart-wallet discovery, and token-trader backfill — it helps *discover* and *validate* candidate wallets. It does **not** replace the 30–60s tracked-wallet monitoring loop: live alerts still come only from FlowRadar's own tracked-wallet pipeline. Dune rows are never trusted blindly and never auto-promote to tracked wallets; they enter as `CandidateWallet` and go through the same validation path as Wave 4.5 connectors.
+
+**Use case.** Given 2–5 token contract addresses, find wallets that traded multiple/all of them — especially early or profitable recurring wallets and co-trading groups — via `CandidateWallet` with `source=dune_token_overlap` → validate → promote only if thresholds pass (pnl_30d ≥ 4000, trades ≥ 8, winRate ≥ 35%, not a router/pool/CEX/bridge, not an obvious sniper/bot unless explicitly allowed).
+
+**Data-access priority (binding).** Dune saved queries + the Dune API are primary. Frontend scraping is fallback-only and **disabled by default** — the design does not rely on fragile scraping.
+
+**Models.** `DuneQuerySource` — id, name, queryId, purpose (`token_overlap`|`token_traders`|`smart_wallet_candidates`|`funding_links`|`entity_cluster_research`), enabled, resultFormat (`json`|`csv`), lastExecutionId, lastRunAt, lastSuccessAt, status, creditsEstimate, parametersJson, outputSchemaJson, notes. `TokenOverlapSearch` / `TokenOverlapWalletResult` / `TokenOverlapGroupResult` (overlap import target). `CandidateWallet.source` vocabulary (Spec §5b) gains `dune_token_overlap`.
+
+**Dune API client behavior.** Store `query_id`; execute via the Dune API; poll execution status; fetch results as JSON or CSV. Latest-cached-result mode saves credits (`DUNE_USE_LATEST_RESULT=true` default); fresh execution is disabled unless `DUNE_EXECUTE_FRESH=true`. Query params: chain, token_address_1..3, start_time, end_time, min_trade_usd, min_tokens_overlap, max_results. Paginate where needed; respect rate limits; cache results locally; never re-execute expensive queries repeatedly. Errors never break the app — they land as a `ProviderSyncState` error row; a missing key yields mode `missing_key` with mock fallback.
+
+**Overlap query row shape (Zod-validated).** wallet_address, chain, token_address, token_symbol, first_buy_time, first_sell_time, buy_count, sell_count, total_buy_usd, total_sell_usd, estimated_pnl_usd, entry_market_cap_usd, tx_hashes, tokens_overlap_count, overlap_group_id?.
+
+**Workers.** `duneQueryWorker` — executes enabled `DuneQuerySource` queries, fetches, Zod-validates rows, stores a raw result snapshot, normalizes useful rows (`source=dune_query`), and never blindly trusts a row. `duneOverlapImportWorker` — imports overlap rows into `TokenOverlapSearch`/`WalletResult`/`GroupResult`, creates `CandidateWallet` rows with `discoverySource=dune_token_overlap`, and hands them to `walletCandidateValidationWorker` (Spec §5b).
+
+**Overlap Finder UI.** Data-source selector: local DB first | Dune query | provider API | hybrid. In Dune mode: paste 2–5 token CAs → call the configured overlap query → import common wallets → show traded-all, bought-all, bought-early-across-multiple, est-PnL-across-selected, recurring co-trader groups, and possible entity clusters. Every Dune result carries a coverage display: query_id, last_run_at, rows_returned, cached-vs-fresh, cap/truncation warning, source confidence.
+
+**Env (added to `.env.example`).** `DUNE_API_KEY`, `DUNE_DEFAULT_OVERLAP_QUERY_ID`, `DUNE_USE_LATEST_RESULT=true`, `DUNE_EXECUTE_FRESH=false`.
+
+**`docs/dune/` templates.** Four parameterized illustrative SQL templates (token_overlap, early_buyer_overlap, recurring_cotraders, token_top_traders), binding params `{{token_1..3}}`/`{{chain}}`/`{{min_trade_usd}}`/`{{start_time}}`/`{{end_time}}`, each requiring saved-query creation in the Dune UI before use — see `docs/dune/README.md`.
+
 ## 6. Core engine (pure functions, unit-tested)
 
 **WalletScore (0–100):** pnl 25%, winRate 15%, tradeCount 10%, humanLikelihood 15%, avgEntryQuality 10%, holdingQuality 10%, recentPerformance 15%; botPenalty up to −30; result × confidence multiplier (0.5–1.0 from pnlConfidence); clamp 0–100. Components stored in `scoreComponents`.
@@ -219,9 +261,12 @@ Executed with ultracode subagent orchestration inside each wave; integration + `
 
 - **Wave 1** = Phases 1–2: scaffold, compose, schema+migrations, mock world, seed, Overview + Token Detail + Leaderboard.
 - **Wave 2** = Phases 3–5: CSV import, WalletScore/FlowScore + rules A–G + unit tests, Telegram alerts + cooldowns + test button.
-- **Wave 3** = Phases 6–7: Wallet Graph Finder (BFS, page, viz, exports), MoneyFlowEdge + clustering + rotation + Money Flow page.
-- **Wave 4** = Phases 8–10: Helius + DexScreener live Solana adapters (docs-verified), BSC scaffold (BscScan + risk stubs), AddressRegistry seeding + tagging.
-- **Wave 5** = Phases 11–12: backtest worker + results page, polish (loading/empty/error states), README, final verify.
+- **Wave 3** = Phases 6–7: Wallet Graph Finder (BFS, page, viz, exports), MoneyFlowEdge + clustering + rotation + Money Flow page. **→ Wave 3 gate.**
+- **Wave 3.5** (added 2026-07-06, §5c) = T40–T43: backtest outcome evaluator + label taxonomy (T40) → historical replay + rule/combined perf + threshold tuning + walk-forward (T41) → shadow mode + Backtest/Shadow pages (T42) → Signal Feed operator UI redesign, default landing, nav reorder (T43). Executes after the Wave 3 gate, before Wave 4.
+- **Wave 4** = Phases 8–10: Helius + DexScreener live Solana adapters (docs-verified), BSC scaffold (BscScan + risk stubs), AddressRegistry seeding + tagging. (Tasks 26–30.)
+- **Wave 4.5** = External Smart Wallet Source Connectors, §5b (Tasks 34–36).
+- **Wave 4.6** (added 2026-07-06, §5d) = Dune Query Connector + multi-token wallet overlap finder: framework+schema+workers+overlap import (T37), Overlap Finder UI + coverage (T38), SQL templates + docs (T39). Depends on Wave 4.5.
+- **Wave 5** = Phases 11–12: polish (loading/empty/error states), README, final verify. Original Task 31 (backtest worker + results page) is **removed/superseded** by T40–T42 above — see the superseded note on Task 31 in the plan.
 
 ## 13. Commands and env
 

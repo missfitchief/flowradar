@@ -322,6 +322,78 @@ Matcher tests: exit(realized ≥ $500) + transfer 4h later + receipt 92% + dest 
 - [ ] `npm run verify` green; fresh seed→worker→all 7 pages preview-checked; wallet-graph alert (type 3) wired for fresh-wallet fundings from watched wallets (rule E context) — template test passes.
 - [ ] Review checklist; fix biggest gap. Commit `chore: wave 3 gate`.
 
+# Wave 3.5 — Operator UI + Backtest/Shadow (added 2026-07-06, executes AFTER Wave 3 gate, BEFORE Wave 4)
+
+Queued by the user after the Wave 3 gate (Spec §5c). Build order is the user's Phase A→D: backtest evaluator first, then historical replay/tuning, then shadow mode, then the operator UI redesign last. Rationale: mock data only proves the code path runs, not that the strategy has edge — replay + shadow must land before any live provider is wired in Wave 4. This wave supersedes the original Wave 5 Task 31 (see the superseded note on that task below).
+
+### Task 40: Backtest outcome evaluator + expanded schema (TDD)
+
+**Files:** Modify `packages/core/src/backtest/evaluate.ts` (expand beyond the Wave-5-original scope) + `packages/db/prisma/schema.prisma` (expand `BacktestResult` — migration `backtest_metrics`); Tests `packages/core/test/backtest.test.ts`.
+
+**Interfaces:** `evaluateSignalOutcome(signal: SignalOutcomeInput, series: TokenMarketSnapshot[], horizons: Horizon[]): SignalOutcomeResult` where `Horizon = 'M15'|'H1'|'H6'|'H24'|'D3'|'D7'` and `SignalOutcomeResult` carries, per horizon: hitRate50, hitRate2x, hitRate5x, hitRate10x, medianReturnPct, avgReturnPct, maxUpsidePct, maxDrawdownPct, timeToPeakMin, timeTo2xMin?, timeTo5xMin?, timeTo10xMin?, falsePositive: boolean, rugOrExitWarning: boolean, smartExitedBeforeDump: boolean, label: `'small_win'|'good_win'|'major_win'|'failure'|'hard_failure'`. Also produces perf-bucket aggregation helpers: `bucketByMcap`, `bucketByLiquidity`, `bucketByUniqueEntityCount`, `bucketByClusterConcentration`, `bucketByRuleCombination`.
+
+**Positive-signal label taxonomy (binding, Spec §5c verbatim):** +50% before −50% ⇒ `small_win`; 2x before −50% ⇒ `good_win`; 5x before −60% ⇒ `major_win`; dump >60% without hitting 2x first ⇒ `failure`; liquidity/rug failure ⇒ `hard_failure`.
+
+**Horizons:** 15m/1h/6h/24h/3d/7d (`M15`/`H1`/`H6`/`H24`/`D3`/`D7`) — matches existing `BacktestResult.horizon` enum; schema migration adds the new metric columns (hitRate50Pct, hitRate2xPct, hitRate5xPct, hitRate10xPct, medianReturnPct, falsePositive, rugOrExitWarning, label) without breaking the existing unique (signalId, horizon).
+
+- [ ] Failing tests first: label boundary cases (exactly +50% before any −50% ⇒ small_win; 2x then −55% ⇒ good_win; 5x then −65% ⇒ major_win; straight −70% with no 2x ⇒ failure; liquidity rug scenario ⇒ hard_failure); hit-rate math over a fixture series set; bucket helpers group correctly; **mock historical-replay unit tests only assert the evaluator's code path runs correctly — comment in test file states this explicitly per the hard framing rule** (Spec §5c: mock data proves code path only).
+- [ ] Migration applies; `npm run test -w packages/core` PASS.
+- [ ] Commit `feat(backtest): signal outcome evaluator + label taxonomy + expanded schema (TDD)`.
+
+### Task 41: Historical replay + rule/combined perf + threshold tuning + walk-forward (TDD)
+
+**Files:** Create `packages/core/src/backtest/{replay,rulePerf,thresholdTuning,walkForward}.ts`; Tests per module; `apps/worker/src/jobs/historicalReplay.ts`.
+
+**Interfaces:**
+```ts
+// replay.ts — NO LOOKAHEAD: reconstructs aggregates using only data with ts <= T
+export function replayPeriod(input: { trades: TradeRow[]; market: MarketPoint[]; wallets: WalletInfo[]; clusters: ClusterMembership[]; from: Date; to: Date; settings: Settings }): ReplayedSignal[];
+
+// rulePerf.ts
+export function computeRulePerformance(signals: ReplayedSignal[], outcomes: SignalOutcomeResult[]): Record<'A'|'B'|'C'|'D'|'E'|'F'|'G', RulePerfSummary>;
+export function computeCombinedPerformance(signals: ReplayedSignal[], outcomes: SignalOutcomeResult[], combos: CombinationSpec[]): CombinedPerfSummary[];
+// combos required by Spec §5c: A only; A+B; A+C; A+entity-adjusted count; A+low sell pressure; F only; F+entity cluster confidence; A/B/F combined.
+
+// thresholdTuning.ts — dimensions per Spec §5c
+export interface ThresholdSweepDims { minSmartWallets: number[]; minUniqueEntities: number[]; minNetSmartFlow: number[]; maxSellPressure: number[]; maxMcapExpansion: number[]; minLiquidity: number[]; minConfidence: number[]; minProfitRotationConfidence: number[]; maxClusterConcentrationRisk: number[]; }
+export function tuneThresholds(signals: ReplayedSignal[], outcomes: SignalOutcomeResult[], dims: ThresholdSweepDims): { best: ThresholdSet[]; worst: ThresholdSet[]; precisionBySignalType: Record<string, number>; recommendedDefaults: ThresholdSet; overfittingWarning: string };
+
+// walkForward.ts — tune on period 1, test on period 2; never tune+test on the same sample only
+export function walkForwardValidate(fullSeries: ReplaySeries, splitAt: Date, dims: ThresholdSweepDims): { tunedOn: ThresholdSet; testedOnPeriod2: { precision: number; recall: number; regressionVsTuning: number } };
+```
+
+- [ ] Failing tests first: replay — a signal that would only fire using future data does NOT fire in replay (lookahead-bias regression test, required); rule perf — per-rule A–G summaries computed independently; combined — all 8 required combos present with distinct precision numbers on a fixture with overlapping/near-miss signals; threshold tuning — sweep returns best/worst distinctly, `recommendedDefaults` present, `overfittingWarning` non-empty when best-set sample size is small; walk-forward — tuning on period 1 fixture then testing on period 2 fixture shows `regressionVsTuning` computed (not silently reusing period-1 numbers).
+- [ ] Implement; PASS. Wire `historicalReplay` worker job (on-demand enqueue, params: period from/to) that runs `replayPeriod` → persists outcomes via Task 40's evaluator → feeds rule/combined perf + tuning for the Backtest page (Task 42).
+- [ ] Commit `feat(backtest): historical replay (no-lookahead), rule/combined perf, threshold tuning, walk-forward (TDD)`.
+
+### Task 42: Shadow mode + Backtest/Shadow pages
+
+**Files:** Modify `packages/db/prisma/schema.prisma` (+ migration `shadow_mode`: new `ShadowObservation` model — signalId, capturedAt, pendingHorizons[], results Json keyed by horizon, overallLabel); Create `apps/worker/src/jobs/shadowMode.ts` (on every new Signal: create a ShadowObservation row; on each worker tick, evaluate any horizon whose window has elapsed via Task 40's evaluator against live `TokenMarketSnapshot` data — records outcome WITHOUT any trading/acting), `apps/web/app/backtest/page.tsx` (rule-performance table, threshold comparison, best/worst sets, recommended defaults, overfitting warning — sourced from Task 41's replay/tuning output), `apps/web/app/shadow/page.tsx` (live alerts generated, current outcome, pending eval windows, per-window results, good/bad/unknown badge), nav links for both (Backtest, Shadow Mode — see Task 43 for final nav order).
+
+**Interfaces:** Consumes Task 40 (`evaluateSignalOutcome`) + Task 41 (`computeRulePerformance`, `computeCombinedPerformance`, `tuneThresholds`) outputs. Shadow mode never writes to any execution/trading path — read-only observation by construction (no such path exists in FlowRadar; this is a documentation/copy guarantee, not new isolation code).
+
+**Hard framing (binding UI copy requirement, Spec §5c):** both pages must include a visible banner/notice: mock data only proves the code path works; it does **not** prove the strategy has edge — only historical replay and shadow-mode results validate signal quality. This copy is asserted in a component test (string presence), not just written once.
+
+- [ ] Migration applies. Component test asserts hard-framing banner text present on both pages.
+- [ ] Verify: seed produces at least one ShadowObservation per Wave-3-gate seeded signal ($NOVA/$QUIET/$SEED/$DUMP/$ALPHA→$BETA); Backtest page renders rule-perf table + best/worst threshold sets from a replay run over the mock world's 72h window; Shadow page shows pending vs evaluated windows with good/bad/unknown badges. Preview screenshot both pages.
+- [ ] Commit `feat(shadow): shadow mode worker + backtest page + shadow page (hard framing copy)`.
+
+### Task 43: Signal Feed operator UI redesign (default landing page, nav reorder)
+
+**Files:** Create `apps/web/app/page.tsx` rewrite (Signal Feed becomes the app root / default landing page — the Wave-1 Overview hot-tokens table moves to a secondary route, e.g. `apps/web/app/tokens/page.tsx`, and becomes tertiary/tables-only view), `components/signals/{SignalCard,SignalSection,WhyItFired,WhatWouldInvalidate,WhatChanged}.tsx`. Modify `apps/web/app/layout.tsx` nav order.
+
+**Interfaces:** `SignalCardData` assembled server-side from latest `TokenFlowSnapshot` + `Signal` + `EntityCluster` + `ProfitRotationSignal` joins — fields exactly per Spec §5c: token symbol/name/address, chain, status (HOT/WATCH/PROFIT_ROTATION/EXIT_WARNING/DEAD), confidence, FlowScore, mcap, liquidity, smart wallets buying, unique entities, largest cluster size, net smart flow, avg smart entry mcap, current mcap, mcap expansion, sell pressure, profit rotation y/n, risk level, last updated.
+
+Card content order (binding): plain-English "why it fired" first, "what would invalidate it" second, "what changed since previous check" third, evidence fourth, raw data/table last (tertiary). Copy generation is template-based off signal `reasons`/metrics (not free-form) — e.g. accumulation template: "N tracked smart wallets bought $TOKEN, but entity clustering estimates M unique entities. Net smart flow is +$X, sell pressure is Y, and market cap expanded only Zx from average smart entry." matching Spec §5c's `$NOVA` example verbatim in a snapshot test; rotation template matching the `$ALPHA`→`$BETA` example verbatim in a snapshot test.
+
+**Sections (binding, exact list/order):** Hot now / Accumulating / Profit rotation / Exit warnings / New watched tokens / Best performing previous alerts / Worst performing previous alerts.
+
+**Nav reorder (binding, exact order):** 1 Signal Feed (default) → 2 Token Detail → 3 Money Flow → 4 Wallet Graph → 5 Wallets → 6 Alerts → 7 Settings. (Backtest + Shadow Mode from Task 42, and Sources from Wave 4.5 Task 36, remain reachable but are not part of this 7-item primary nav — place them in a secondary/overflow nav group.)
+
+- [ ] Visual hierarchy verify: bigger font, fewer columns, larger cards, clear badges vs the old dense table — preview screenshot comparison (before/after) at mobile + desktop widths.
+- [ ] Snapshot tests: $NOVA-equivalent seeded card renders the exact example copy pattern; rotation card renders the exact example copy pattern; all 7 sections render (empty-state copy where a section has zero entries); tables-view route still reachable and functional (tertiary, not default).
+- [ ] `npm run verify` green. Commit `feat(web): signal feed operator UI — default landing, plain-English cards, nav reorder`.
+
 # Wave 4 — Live Adapters + Registry (Spec Phases 8–10)
 
 ### Task 26: Address registry data + tagging
@@ -386,9 +458,46 @@ Executed after Task 30 (Wave 4 gate), before Wave 5 polish. Goal: FlowRadar boot
 
 - [ ] Adapter mapper unit tests on fixture payloads for docs-verified adapters; page renders mock-mode counts; toggle persists. Root verify green. Commit `feat(connectors): live source adapters (verified-or-stubbed) + source health page` + trailer.
 
+# Wave 4.6 — Dune Query Connector (added 2026-07-06)
+
+Depends on Wave 4.5 (`CandidateWallet` + `walletCandidateValidationWorker` + `ExternalWalletSource` from Tasks 34–36). Implements Spec §5d. Product framing (binding): Dune is a bootstrap/backfill source for wallet-overlap discovery — it does not replace the tracked-wallet live pipeline; Dune rows enter as `CandidateWallet` and must pass validation like any other connector.
+
+### Task 37: Dune connector framework + schema + workers + overlap import (TDD)
+
+**Files:** Modify `packages/db/prisma/schema.prisma` (+ migration `dune`): `DuneQuerySource` (id, name, queryId, purpose enum `token_overlap|token_traders|smart_wallet_candidates|funding_links|entity_cluster_research`, enabled, resultFormat `json|csv`, lastExecutionId, lastRunAt, lastSuccessAt, status, creditsEstimate, parametersJson, outputSchemaJson, notes), `TokenOverlapSearch`, `TokenOverlapWalletResult`, `TokenOverlapGroupResult` per Spec §5d. `CandidateWallet.source` vocabulary extended with `dune_token_overlap` (Spec §5b enum, no schema shape change — value addition only).
+
+Create `packages/providers/src/dune/{client,types}.ts` — Dune API client: store `query_id`; execute via Dune API; poll execution status; fetch results JSON or CSV; `DUNE_USE_LATEST_RESULT=true` default (serves cached latest result to save credits), fresh execution gated behind `DUNE_EXECUTE_FRESH=true`; query params `{chain, token_address_1..3, start_time, end_time, min_trade_usd, min_tokens_overlap, max_results}`; pagination where needed; respects rate limits; caches results locally. Errors never throw out of the client — surfaced as `ProviderSyncState` error rows; missing `DUNE_API_KEY` ⇒ mode `missing_key` + mock fallback.
+
+Row schema (Zod-validated): `wallet_address, chain, token_address, token_symbol, first_buy_time, first_sell_time, buy_count, sell_count, total_buy_usd, total_sell_usd, estimated_pnl_usd, entry_market_cap_usd, tx_hashes, tokens_overlap_count, overlap_group_id?`.
+
+Create `apps/worker/src/jobs/{duneQuery,duneOverlapImport}.ts`: `duneQueryWorker` executes enabled `DuneQuerySource` rows, fetches, Zod-validates rows (invalid rows dropped + logged, never thrown), stores a raw result snapshot, normalizes rows with `source=dune_query`. `duneOverlapImportWorker` imports overlap rows into `TokenOverlapSearch`/`WalletResult`/`GroupResult`, creates `CandidateWallet` rows with `discoverySource=dune_token_overlap` (dedupe on existing unique (walletAddress, chain, source) tuple from Wave 4.5), and hands new candidates to `walletCandidateValidationWorker` (Wave 4.5 Task 35) — never auto-promotes.
+
+**Interfaces:** Produces the Dune client + both workers, consumed by Task 38's UI. Reuses Wave 4.5's `CandidateSourceProvider`-style validation path unchanged — Dune is just another feeder.
+
+- [ ] Failing tests first: Zod row validation (valid row parses; malformed row dropped with logged reason, not thrown); cached-vs-fresh mode selection (`DUNE_USE_LATEST_RESULT=true` ⇒ never calls execute; `DUNE_EXECUTE_FRESH=true` ⇒ calls execute then polls); missing API key ⇒ `missing_key` + mock fallback, no crash; overlap import creates `CandidateWallet` rows with `discoverySource=dune_token_overlap` and dedupes on rerun (second import adds 0 rows for identical result set); trust-boundary regression (same shape as Wave 4.5 Task 35): imported-but-unvalidated Dune candidate contributes NOTHING to smartWalletCount/uniqueEntityCount until promoted.
+- [ ] Migration applies. Root `npm run verify` green. Commit `feat(dune): connector framework, schema, query+overlap-import workers (TDD)` + trailer.
+
+### Task 38: Overlap Finder UI + coverage display
+
+**Files:** Create `apps/web/app/overlap/page.tsx` + `components/overlap/{DataSourceSelector,TokenCaInput,OverlapResultsTable,CoverageBadge}.tsx` + `apps/web/app/api/overlap/route.ts` (POST: source mode + 2–5 token CAs → enqueue `duneOverlapImportWorker` when source=dune; GET by search id → results).
+
+**Interfaces:** Data-source selector: local DB first | Dune query | provider API | hybrid. Dune mode: paste 2–5 token CAs → calls the configured `DuneQuerySource` (via `DUNE_DEFAULT_OVERLAP_QUERY_ID`) → imports common wallets → displays: traded-all, bought-all, bought-early-across-multiple, est-PnL-across-selected, recurring co-trader groups, possible entity clusters. Every Dune result renders a coverage badge: query_id, last_run_at, rows_returned, cached-vs-fresh, cap/truncation warning, source confidence.
+
+- [ ] Verify: local-DB-only mode works with zero Dune config (no key ⇒ Dune option shows disabled/missing_key, doesn't crash the page); with a mock Dune client fixture, paste 3 token CAs → results render with coverage badge showing `cached` mode by default. Preview screenshot.
+- [ ] Commit `feat(web): overlap finder page (data-source selector, dune mode, coverage display)`.
+
+### Task 39: SQL templates + docs
+
+**Files:** Create `docs/dune/README.md` (saved-query setup instructions, param binding `{{token_1..3}}`/`{{chain}}`/`{{min_trade_usd}}`/`{{start_time}}`/`{{end_time}}`, cached-vs-fresh credit policy explanation, note that frontend scraping is fallback-only and disabled by default) + 4 template files `docs/dune/{token_overlap,early_buyer_overlap,recurring_cotraders,token_top_traders}.sql` — parameterized illustrative SQL, header comment on each: "conceptual logic — adapt table names to current Dune schema (e.g. solana.dex.trades)"; `token_overlap.sql` follows the user's starter shape (CTE `token_traders` → `GROUP BY wallet HAVING COUNT(DISTINCT token) = N`). All four marked as templates requiring saved-query creation in the Dune UI before `DuneQuerySource.queryId` can reference them.
+
+- [ ] Docs-only task — no code/tests. Verify: all 4 `.sql` files present with header comment + parameter placeholders; README covers setup, param binding, credit policy, scraping-disabled note.
+- [ ] Commit `docs(dune): saved-query README + 4 SQL templates`.
+
 # Wave 5 — Backtest + Polish + Done Bar (Spec Phases 11–12)
 
-### Task 31: Backtest (TDD) + page
+### Task 31: Backtest (TDD) + page [SUPERSEDED 2026-07-06 — absorbed into Tasks 40–42; do not execute]
+
+Superseded note: the backtest evaluator, historical replay, and results/shadow pages described below were absorbed into Wave 3.5 Tasks 40 (evaluator + schema), 41 (replay/tuning), and 42 (pages), which run earlier (after the Wave 3 gate) and with a materially expanded scope (label taxonomy, walk-forward, shadow mode). Do not execute this task.
 
 **Files:** Create `packages/core/src/backtest/evaluate.ts` + test (fixture snapshot series: signal at $500k mcap, series peaks 3× at +4h, dips −40% at +30m ⇒ M15 drawdown −40%, H6 upside +200%, timeTo2x ≈ 3h, roiNow from last point; missing series ⇒ null metrics + note), `apps/worker/src/jobs/backtest.ts` (all horizons per signal, upsert BacktestResult), `apps/web/app/backtest/page.tsx` (simple table: signal, rule, token, per-horizon ROI/upside/drawdown, smart-exit flag) + nav link.
 
