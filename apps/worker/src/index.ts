@@ -66,6 +66,8 @@ import * as walletGraph from './jobs/walletGraph';
 import * as walletStatsRefresh from './jobs/walletStatsRefresh';
 import * as walletDiscovery from './jobs/walletDiscovery';
 import * as externalWalletSource from './jobs/externalWalletSource';
+import * as walletCandidateValidation from './jobs/walletCandidateValidation';
+import * as tokenTopTraderBackfill from './jobs/tokenTopTraderBackfill';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const HOUR_MS = 60 * 60 * 1000;
@@ -205,6 +207,25 @@ async function main(): Promise<void> {
       name: 'externalWalletSource',
       run: externalWalletSource.run,
       intervalSec: settings.connectors.syncHours * 3600
+    },
+    // walletCandidateValidation (Task 35, Wave 4.5): shares
+    // connectors.syncHours with externalWalletSource — validating shortly
+    // after each sync pass is the natural cadence (Task 35 binding decision 2
+    // documents this reuse instead of introducing a new settings field).
+    {
+      name: 'walletCandidateValidation',
+      run: walletCandidateValidation.run,
+      intervalSec: settings.connectors.syncHours * 3600
+    },
+    // tokenTopTraderBackfill (Task 35, Wave 4.5): daily-ish cadence — 4x
+    // connectors.syncHours (24h at the default 6h syncHours), a slower cadence
+    // than the sync/validation passes since mcap-expansion backfill is a
+    // slower-moving signal (Task 35 binding decision 3: "register at a
+    // daily-ish interval").
+    {
+      name: 'tokenTopTraderBackfill',
+      run: tokenTopTraderBackfill.run,
+      intervalSec: settings.connectors.syncHours * 4 * 3600
     }
   ];
 

@@ -41,3 +41,28 @@ export interface CandidateSourceProvider {
   chains: Chain[];
   fetchCandidates(chain: Chain, opts?: FetchCandidatesOpts): Promise<ExternalCandidate[]>;
 }
+
+// ---------------------------------------------------------------------------
+// Token top-traders capability (Task 35, Wave 4.5, Spec §5b) — feeds
+// tokenTopTraderBackfill: tokens whose mcap recently expanded a lot get their
+// top traders pulled and inserted as CandidateWallet rows
+// (source='birdeye_top_traders'), same "never trusted at face value, goes
+// through the validation pipeline" contract as every other candidate source.
+// ---------------------------------------------------------------------------
+
+/** One top trader for a specific token, as reported by a TokenTopTradersProvider — never trusted at face value. */
+export interface TokenTopTrader {
+  walletAddress: string;
+  chain: Chain;
+  pnlUsd?: number;
+  winRate?: number;
+  tradeCount?: number;
+}
+
+export interface GetTopTradersOpts {
+  limit?: number;
+}
+
+export interface TokenTopTradersProvider {
+  getTopTraders(chain: Chain, tokenAddress: string, opts?: GetTopTradersOpts): Promise<TokenTopTrader[]>;
+}

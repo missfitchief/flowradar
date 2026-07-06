@@ -10,6 +10,8 @@ export * from './rotation';
 export * from './walletStatsRefresh';
 export * from './walletDiscovery';
 export * from './externalWalletSource';
+export * from './candidateValidation';
+export * from './tokenTopTraderBackfill';
 export * from './signals';
 export * from './backtest';
 export * from './replayRunner';

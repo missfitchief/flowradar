@@ -36,6 +36,7 @@ import { runHistoricalReplay } from './replayRunner';
 import { importWalletsCsv } from './csv/importWalletsCsv';
 import { runGraphSearch } from './graph/runSearch';
 import { runExternalWalletSourceSync } from './externalWalletSource';
+import { runCandidateValidation } from './candidateValidation';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
@@ -315,6 +316,45 @@ async function seedExternalWalletSourceSync(world: MockWorld, settings: Settings
     }
   );
   log('external wallet source sync pass complete.', { ...result });
+  return result;
+}
+
+/**
+ * Runs ONE runCandidateValidation pass (Task 35 binding decision 4) — must
+ * run AFTER Phase 6 (ingestAllWallets), since local computeFifoPnl evidence
+ * requires WalletTokenTrade rows to already exist for candidate addresses
+ * that are also mock-world wallets. No provider wallet-PnL capability is
+ * resolvable in the seed script either (same as the worker's
+ * walletCandidateValidation job — see that file's header), so every
+ * candidate's evidence falls through to local computeFifoPnl or
+ * 'insufficient'.
+ *
+ * The batch size used for THIS pass is deliberately uncapped (Number.MAX_SAFE_INTEGER
+ * override, local to this one call only — the PERSISTED Settings row still
+ * carries the real default validationBatchSize=100, exactly as a live
+ * deployment would use it). Rationale: the mock world's 5 poisoned addresses
+ * are each synced once PER enabled external source (6 sources), producing up
+ * to 6 separate CandidateWallet rows per poisoned address (unique on
+ * (walletAddress, chain, source)) alongside ~225 good candidates — well over
+ * 100 total pending rows. A real batchSize=100 worker tick would correctly
+ * leave some of those rows pending until its NEXT scheduled tick (batching
+ * across ticks is the intended, non-buggy behavior — see
+ * candidateValidation.ts's own header), but the seed script only ever runs
+ * ONE tick, so without this override its self-checks (which need every
+ * poisoned address's rows to reach a terminal state within that one pass)
+ * would be at the mercy of $batch ordering. Uncapping it here is a seed-only
+ * convenience, not a change to production defaults.
+ */
+async function seedCandidateValidationPass(settings: Settings) {
+  const seedTimeSettings: Settings = {
+    ...settings,
+    connectors: { ...settings.connectors, validationBatchSize: Number.MAX_SAFE_INTEGER }
+  };
+  const result = await runCandidateValidation(prisma, seedTimeSettings, undefined, {
+    info: (msg, meta) => log(msg, meta),
+    error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+  });
+  log('candidate validation pass complete.', { ...result });
   return result;
 }
 
@@ -716,6 +756,213 @@ async function ingestAllWallets(world: MockWorld): Promise<{ walletsIngested: nu
   return { walletsIngested };
 }
 
+/**
+ * Persists WalletClassification rows for every NON-smart mock-world wallet
+ * that carries at least one label (Task 35, Wave 4.5 — fix pass).
+ *
+ * Root cause this closes: seedComputedWalletStats (Phase 5(a)) only writes
+ * WalletClassification rows for smart_money/human_like/whale wallets — a
+ * possible_bot/sniper/mev-only mock wallet (the world's "noise cohort") gets
+ * a real Wallet row via ingestAllWallets (Phase 6) but NEVER a
+ * WalletClassification row, so Task 35's candidateValidation evidence
+ * assembly (which reads WalletClassification, not the in-memory MockWallet
+ * labels — packages/db is not supposed to know about MockWorld internals)
+ * sees an empty label list and cannot auto-reject on bot/sniper grounds. This
+ * was caught by this task's own poisoned-candidate self-check: a possible_bot
+ * poisoned candidate was incorrectly promoted because its bot label never
+ * reached the DB.
+ *
+ * Must run AFTER Phase 6 (ingestAllWallets) — the target wallets only get a
+ * Wallet row there (smart wallets already got both their Wallet row AND
+ * their WalletClassification rows in Phase 5(a), so this pass explicitly
+ * skips any wallet that already has a classification row to avoid a
+ * duplicate insert).
+ */
+async function seedNonSmartWalletClassifications(world: MockWorld): Promise<number> {
+  let created = 0;
+  for (const mockWallet of world.wallets) {
+    if (mockWallet.labels.length === 0) continue;
+    const isSmart = mockWallet.labels.some((l) => SMART_LABELS.has(l));
+    if (isSmart) continue; // already classified in Phase 5(a)
+
+    const wallet = await prisma.wallet.findUnique({
+      where: { address_chain: { address: mockWallet.address, chain: mockWallet.chain } },
+      select: { id: true }
+    });
+    if (!wallet) continue; // never ingested (no activity) — nothing to classify
+
+    const existing = await prisma.walletClassification.findFirst({ where: { walletId: wallet.id } });
+    if (existing) continue;
+
+    for (const label of mockWallet.labels) {
+      await prisma.walletClassification.create({
+        data: {
+          walletId: wallet.id,
+          label,
+          confidence: 80,
+          evidence: { source: 'mock-world-label' }
+        }
+      });
+    }
+    created += 1;
+  }
+  log('seeded WalletClassification rows for non-smart (noise-cohort) wallets.', { count: created });
+  return created;
+}
+
+const QUALIFYING_CANDIDATE_COUNT = 3;
+
+/**
+ * Gives a small, deterministic subset of the "good" (non-poisoned) SOLANA
+ * candidate addresses REAL, profitable WalletTokenTrade history — enough to
+ * independently clear settings.profitableWallet via local computeFifoPnl —
+ * so Task 35's candidate-validation self-check ("some good candidates
+ * promoted") has something genuine to promote.
+ *
+ * Root cause this closes: the mock world's own wallets (see Task 4's design)
+ * mostly carry 1 real trade each (noise cohort), and even NOVA/QUIET's
+ * scripted buyers are BUY-only (no SELLs) — realistic for the flow-scoring/
+ * rule-firing demos those scenarios exist for, but structurally incapable of
+ * ever satisfying a REALIZED-PnL-based validation gate (computeFifoPnl needs
+ * profitable SELLs to realize anything). Rather than let every single
+ * candidate's local evidence be genuinely "below thresholds" or bot/
+ * registry-rejected forever, this phase seeds real, honest, profitable
+ * trade history for a few of the mock world's own highest-walletScore
+ * candidates — the same MockCandidateSource ranking the external
+ * wallet-source sync itself uses (Task 34) — so a handful of GOOD candidates
+ * are provably, not just claimedly, profitable and validation promotes them
+ * on real (if synthetic-world) evidence, never on the claim alone.
+ *
+ * Deterministic: same world -> same MockCandidateSource ranking -> same
+ * addresses picked, same seededRandomFor-derived trade figures every run.
+ * Trades are attached to a DEDICATED token created just for this phase
+ * (T35QUALIFYTOKEN — never one of the mock world's own 28 scenario/noise
+ * tokens) specifically so this phase can NEVER perturb any existing
+ * token-scoped self-check (flowScore, signal firing, entity clustering, …).
+ * Earlier draft of this phase reused the NOVA token as a "convenient
+ * existing price anchor" — that corrupted NOVA's own flowScore/signal
+ * self-checks (extra unrelated buy/sell volume shifted its aggregate window)
+ * and is exactly the mistake a dedicated token avoids.
+ */
+async function seedQualifyingCandidateTrades(
+  world: MockWorld,
+  tokenIdByAddress: Map<string, string>
+): Promise<{ addressesSeeded: string[] }> {
+  void tokenIdByAddress; // kept in the signature for call-site symmetry with other tokenIdByAddress-consuming seed phases; this phase creates its own dedicated token instead of looking one up.
+
+  const qualifyToken = await prisma.token.upsert({
+    where: { chain_address: { chain: 'SOLANA', address: 'T35QUALIFYTOKEN' } },
+    create: {
+      chain: 'SOLANA',
+      address: 'T35QUALIFYTOKEN',
+      symbol: 'T35QT',
+      name: 'Task 35 Candidate Qualification Token (seed-only, isolated from every scenario self-check)',
+      decimals: 9,
+      firstSeenAt: new Date(),
+      riskFlags: []
+    },
+    update: {}
+  });
+  const qualifyTokenId = qualifyToken.id;
+
+  // A single market snapshot so this token isn't "skippedNoWindow" in the
+  // flow-scoring pass and computeFifoPnl's currentPriceUsd resolution has a
+  // snapshot to prefer over the last-trade-price fallback (see
+  // walletStatsRefresh.ts's identical resolution order).
+  await prisma.tokenMarketSnapshot.create({
+    data: {
+      tokenId: qualifyTokenId,
+      ts: new Date(),
+      priceUsd: 5,
+      marketCapUsd: 500_000,
+      fdvUsd: 500_000,
+      liquidityUsd: 50_000,
+      vol5m: 0,
+      vol1h: 0,
+      vol6h: 0,
+      vol24h: 0,
+      holderCount: 50
+    }
+  });
+
+  const candidateSource = new MockCandidateSource(world);
+  const candidates = await candidateSource.fetchCandidates('SOLANA');
+  const poisoned = getPoisonedAddresses(world, 'SOLANA');
+  const poisonedAddresses = new Set([...poisoned.routerOrCex, ...poisoned.possibleBot, ...poisoned.belowThreshold]);
+
+  const goodCandidates = candidates
+    .filter((c) => !poisonedAddresses.has(c.walletAddress))
+    .slice(0, QUALIFYING_CANDIDATE_COUNT);
+
+  const addressesSeeded: string[] = [];
+  const now = new Date();
+
+  for (const candidate of goodCandidates) {
+    const wallet = await prisma.wallet.upsert({
+      where: { address_chain: { address: candidate.walletAddress, chain: 'SOLANA' } },
+      create: { address: candidate.walletAddress, chain: 'SOLANA', firstSeenAt: now, lastActiveAt: now, isWatched: false },
+      update: {}
+    });
+
+    const rng = seededRandomFor(`t35qualify:${candidate.walletAddress}`);
+    let slot = 1;
+    // 10 BUYs then 10 SELLs at a markup, comfortably clearing every
+    // profitableWallet threshold (pnl30d>=4000, minTrades>=8, minWinRate>=0.35,
+    // minRealized>=1000, minAvgTradeSizeUsd>=50) — same shape as this file's
+    // seedComputedWalletStats figures, but backed by REAL WalletTokenTrade
+    // rows this time, not just a decorative WalletStats row.
+    const buyPriceUsd = 2 + rng() * 3; // 2-5
+    const sellPriceUsd = buyPriceUsd * (1.6 + rng() * 0.6); // 60-120% markup
+    for (let i = 0; i < 10; i++) {
+      const amountToken = 100 + rng() * 50;
+      await prisma.walletTokenTrade.create({
+        data: {
+          walletId: wallet.id,
+          tokenId: qualifyTokenId,
+          chain: 'SOLANA',
+          action: 'BUY',
+          amountToken,
+          amountUsd: amountToken * buyPriceUsd,
+          txHash: `T35QUALIFY_${candidate.walletAddress}_buy_${slot}`,
+          blockOrSlot: BigInt(slot),
+          ts: new Date(now.getTime() - (60 - slot) * 60_000),
+          priceUsd: buyPriceUsd,
+          marketCapAtTrade: 500_000,
+          walletScoreAtTime: candidate.claimedPnlUsd ? Math.min(100, candidate.claimedPnlUsd / 1000) : 50,
+          provider: 'test'
+        }
+      });
+      slot += 1;
+    }
+    for (let i = 0; i < 10; i++) {
+      const amountToken = 100 + rng() * 50;
+      await prisma.walletTokenTrade.create({
+        data: {
+          walletId: wallet.id,
+          tokenId: qualifyTokenId,
+          chain: 'SOLANA',
+          action: 'SELL',
+          amountToken,
+          amountUsd: amountToken * sellPriceUsd,
+          txHash: `T35QUALIFY_${candidate.walletAddress}_sell_${slot}`,
+          blockOrSlot: BigInt(slot),
+          ts: new Date(now.getTime() - (30 - slot) * 60_000),
+          priceUsd: sellPriceUsd,
+          marketCapAtTrade: 500_000,
+          walletScoreAtTime: candidate.claimedPnlUsd ? Math.min(100, candidate.claimedPnlUsd / 1000) : 50,
+          provider: 'test'
+        }
+      });
+      slot += 1;
+    }
+
+    addressesSeeded.push(candidate.walletAddress);
+  }
+
+  log('seeded qualifying local trade history for a subset of good candidates (Task 35).', { addressesSeeded });
+  return { addressesSeeded };
+}
+
 // ---------------------------------------------------------------------------
 // Phase 7.9: demo WalletGraphSearch (Task 20 binding decision 7) — one
 // CAPITAL_FLOW/depth-3 search rooted at the graph-demo scenario's fixed root
@@ -781,7 +1028,8 @@ async function runSelfCheck(
   backtestResult: { signalsEvaluated: number; rowsUpserted: number; labelCounts: Record<string, number> },
   replayRunResult: Awaited<ReturnType<typeof runHistoricalReplay>>,
   csvOkRows: number,
-  externalWalletSourceSyncResult: { sourcesConsidered: number; candidatesUpserted: number; errors: number }
+  externalWalletSourceSyncResult: { sourcesConsidered: number; candidatesUpserted: number; errors: number },
+  candidateValidationResult: Awaited<ReturnType<typeof runCandidateValidation>>
 ): Promise<{ rows: SelfCheckRow[]; hardFail: boolean; concerns: string[] }> {
   const rows: SelfCheckRow[] = [];
   const concerns: string[] = [];
@@ -808,33 +1056,106 @@ async function runSelfCheck(
     pass: candidateCount > 0
   });
 
-  const nonPendingCandidateCount = await prisma.candidateWallet.count({ where: { validationStatus: { not: 'pending' } } });
-  rows.push({
-    check: 'every CandidateWallet row is validationStatus=pending (Task 35 validation has not run yet)',
-    expected: '0 non-pending rows',
-    actual: `${nonPendingCandidateCount} non-pending row(s)`,
-    pass: nonPendingCandidateCount === 0
-  });
-
-  const poisonedSolana = getPoisonedAddresses(world, 'SOLANA');
-  const allPoisonedAddresses = [...poisonedSolana.routerOrCex, ...poisonedSolana.possibleBot, ...poisonedSolana.belowThreshold];
-  const poisonedRows = await prisma.candidateWallet.findMany({
-    where: { walletAddress: { in: allPoisonedAddresses }, chain: 'SOLANA' }
-  });
-  const allPoisonedPresentAsPending =
-    poisonedRows.length >= allPoisonedAddresses.length && poisonedRows.every((r) => r.validationStatus === 'pending');
-  rows.push({
-    check: 'all 5 poisoned SOLANA addresses present as CandidateWallet rows with validationStatus=pending (Task 35 will reject them)',
-    expected: `${allPoisonedAddresses.length} rows, all pending`,
-    actual: `${poisonedRows.length} row(s) found, ${poisonedRows.filter((r) => r.validationStatus === 'pending').length} pending`,
-    pass: allPoisonedPresentAsPending
-  });
-
   rows.push({
     check: 'external wallet source sync: zero errors across all 6 enabled sources',
     expected: '0 errors',
     actual: `${externalWalletSourceSyncResult.errors} error(s), ${externalWalletSourceSyncResult.candidatesUpserted} candidates upserted across ${externalWalletSourceSyncResult.sourcesConsidered} sources`,
     pass: externalWalletSourceSyncResult.errors === 0
+  });
+
+  // -----------------------------------------------------------------------
+  // Candidate VALIDATION self-checks (Task 35, Wave 4.5, Spec §5b binding
+  // decision 4): "ALL 5 poisoned candidates end 'rejected' with a reason (2
+  // registry-service, 2 bot, 1 below-threshold); >= some good candidates
+  // 'promoted' -> Wallet isWatched=true created; candidates with no local
+  // trade evidence stay 'pending' (insufficient)." One CandidateWallet row
+  // exists PER (address, source) — a poisoned address can appear under
+  // multiple enabled sources, so every SUCH row (not just one) must show the
+  // correct terminal state.
+  // -----------------------------------------------------------------------
+  const poisonedSolana = getPoisonedAddresses(world, 'SOLANA');
+
+  const registryOrCexRows = await prisma.candidateWallet.findMany({
+    where: { walletAddress: { in: poisonedSolana.routerOrCex }, chain: 'SOLANA' }
+  });
+  const registryOrCexAllRejectedCorrectly =
+    registryOrCexRows.length > 0 &&
+    registryOrCexRows.every((r) => r.validationStatus === 'rejected' && (r.rejectionReason ?? '').includes('excluded service address'));
+  rows.push({
+    check: '2 poisoned router/CEX addresses: every CandidateWallet row rejected with "excluded service address" reason',
+    expected: `>0 rows, all rejected w/ registry reason (addresses: ${JSON.stringify(poisonedSolana.routerOrCex)})`,
+    actual: `${registryOrCexRows.length} row(s), ${registryOrCexRows.filter((r) => r.validationStatus === 'rejected').length} rejected, ${registryOrCexRows.filter((r) => (r.rejectionReason ?? '').includes('excluded service address')).length} with the registry reason`,
+    pass: registryOrCexAllRejectedCorrectly
+  });
+
+  const possibleBotRows = await prisma.candidateWallet.findMany({
+    where: { walletAddress: { in: poisonedSolana.possibleBot }, chain: 'SOLANA' }
+  });
+  const possibleBotAllRejectedCorrectly =
+    possibleBotRows.length > 0 &&
+    possibleBotRows.every((r) => r.validationStatus === 'rejected' && (r.rejectionReason ?? '').includes('bot/sniper-dominant'));
+  rows.push({
+    check: '2 poisoned possible_bot addresses: every CandidateWallet row rejected with "bot/sniper-dominant" reason',
+    expected: `>0 rows, all rejected w/ bot reason (addresses: ${JSON.stringify(poisonedSolana.possibleBot)})`,
+    actual: `${possibleBotRows.length} row(s), ${possibleBotRows.filter((r) => r.validationStatus === 'rejected').length} rejected, ${possibleBotRows.filter((r) => (r.rejectionReason ?? '').includes('bot/sniper-dominant')).length} with the bot reason`,
+    pass: possibleBotAllRejectedCorrectly
+  });
+
+  const belowThresholdRows = await prisma.candidateWallet.findMany({
+    where: { walletAddress: { in: poisonedSolana.belowThreshold }, chain: 'SOLANA' }
+  });
+  // The below-threshold poisoned entry's claim itself is below the pnl30d
+  // floor, but its terminal state can legitimately be EITHER 'rejected'
+  // (below thresholds — if it has local trade evidence) OR 'pending'
+  // (insufficient — if it has no local trade history at all yet); either
+  // way it must NEVER be 'promoted'.
+  const belowThresholdNeverPromoted = belowThresholdRows.length > 0 && belowThresholdRows.every((r) => r.validationStatus !== 'promoted');
+  rows.push({
+    check: '1 poisoned below-threshold address: never promoted (rejected on thresholds, or still pending/insufficient)',
+    expected: `>0 rows, none promoted (address: ${JSON.stringify(poisonedSolana.belowThreshold)})`,
+    actual: `${belowThresholdRows.length} row(s), statuses: ${belowThresholdRows.map((r) => r.validationStatus).join(', ')}`,
+    pass: belowThresholdNeverPromoted
+  });
+
+  rows.push({
+    check: 'candidate validation: at least one candidate promoted to a tracked, isWatched=true Wallet',
+    expected: '>= 1 promoted',
+    actual: `${candidateValidationResult.promoted} promoted`,
+    pass: candidateValidationResult.promoted >= 1
+  });
+
+  const promotedRows = await prisma.candidateWallet.findMany({
+    where: { validationStatus: 'promoted' },
+    select: { promotedWalletId: true }
+  });
+  // A single Wallet can be the promotedWalletId of MULTIPLE CandidateWallet
+  // rows (the same address synced from several enabled sources) — dedupe
+  // before comparing counts, or this check would demand
+  // Wallet.count(...) === "number of promoted CandidateWallet rows" instead
+  // of the actually-intended "number of DISTINCT promoted wallets".
+  const promotedWalletIds = [
+    ...new Set(promotedRows.map((r) => r.promotedWalletId).filter((id): id is string => id !== null))
+  ];
+  const isWatchedPromotedCount = await prisma.wallet.count({ where: { id: { in: promotedWalletIds }, isWatched: true } });
+  rows.push({
+    check: 'every promoted CandidateWallet.promotedWalletId points at a Wallet with isWatched=true',
+    expected: `${promotedWalletIds.length} distinct wallet(s) (all isWatched)`,
+    actual: String(isWatchedPromotedCount),
+    pass: isWatchedPromotedCount === promotedWalletIds.length && promotedWalletIds.length > 0
+  });
+
+  rows.push({
+    check: 'candidate validation: at least one candidate stays pending (insufficient — no local trade evidence yet)',
+    expected: '>= 1 pending',
+    actual: `${candidateValidationResult.stayedPending} stayed pending`,
+    pass: candidateValidationResult.stayedPending >= 1
+  });
+
+  rows.push({
+    check: 'candidate validation: zero errors during the seed-time pass',
+    expected: '0 errors',
+    actual: `${candidateValidationResult.errors} error(s)`,
+    pass: candidateValidationResult.errors === 0
   });
 
   // Bars recalibrated 2026-07-05 (controller): matched to the Task-4 mock world's real scale
@@ -874,12 +1195,23 @@ async function runSelfCheck(
     pass: snapshotCount > 600
   });
 
+  // Was hardcoded "== 28" (the mock world's own token count) — Task 35, Wave
+  // 4.5 adds ONE dedicated qualify-candidate token (T35QUALIFYTOKEN,
+  // seedQualifyingCandidateTrades) outside the mock world proper. The real
+  // invariant this check protects is "exactly one TokenFlowSnapshot row per
+  // token that HAS market data" (runFlowScoringPass skips any token with zero
+  // TokenMarketSnapshot rows — e.g. a quote-asset stub token ingest.ts
+  // auto-creates for USDC legs, which the pre-existing "tokens >= 28"
+  // check's own comment already anticipated: "28 world tokens plus any
+  // quote-asset stubs ingest correctly auto-creates"), not a magic constant
+  // that silently drifts whenever the token universe legitimately grows.
   const flowSnapshotCount = await prisma.tokenFlowSnapshot.count();
+  const tokensWithMarketData = await prisma.token.count({ where: { marketSnapshots: { some: {} } } });
   rows.push({
-    check: 'flow snapshots == 28',
-    expected: '28',
+    check: `flow snapshots == tokens-with-market-data count (one snapshot per scoreable token, no dupes)`,
+    expected: String(tokensWithMarketData),
     actual: String(flowSnapshotCount),
-    pass: flowSnapshotCount === 28
+    pass: flowSnapshotCount === tokensWithMarketData
   });
 
   const csvImportJob = await prisma.importJob.findFirst({
@@ -1546,6 +1878,38 @@ async function printCandidateSummary(world: MockWorld): Promise<void> {
   console.log('');
 }
 
+/** Prints the Task 35 candidate-validation summary: promoted/rejected/pending totals + rejection reason category breakdown, plus the 5 poisoned addresses' individual terminal states for direct visual cross-reference. */
+async function printValidationSummary(world: MockWorld, result: Awaited<ReturnType<typeof runCandidateValidation>>): Promise<void> {
+  const promotedCount = await prisma.candidateWallet.count({ where: { validationStatus: 'promoted' } });
+  const rejectedCount = await prisma.candidateWallet.count({ where: { validationStatus: 'rejected' } });
+  const pendingCount = await prisma.candidateWallet.count({ where: { validationStatus: 'pending' } });
+
+  console.log('Candidate validation summary (Task 35, Wave 4.5):');
+  console.log(`  this pass:            considered=${result.candidatesConsidered} promoted=${result.promoted} rejected=${result.rejected} stayedPending=${result.stayedPending} errors=${result.errors}`);
+  console.log(`  overall totals:       promoted=${promotedCount} rejected=${rejectedCount} pending=${pendingCount}`);
+  console.log('  rejection reason breakdown (this pass):');
+  for (const [category, count] of Object.entries(result.rejectionReasonCounts)) {
+    console.log(`    ${category.padEnd(20)} ${count}`);
+  }
+
+  const poisonedSolana = getPoisonedAddresses(world, 'SOLANA');
+  const allPoisoned = [
+    ...poisonedSolana.routerOrCex.map((a) => ({ address: a, expected: 'registry (CEX/ROUTER)' })),
+    ...poisonedSolana.possibleBot.map((a) => ({ address: a, expected: 'bot label' })),
+    ...poisonedSolana.belowThreshold.map((a) => ({ address: a, expected: 'below threshold / insufficient' }))
+  ];
+  console.log('  poisoned SOLANA candidates — individual terminal states:');
+  for (const { address, expected } of allPoisoned) {
+    const rows = await prisma.candidateWallet.findMany({ where: { walletAddress: address, chain: 'SOLANA' } });
+    for (const row of rows) {
+      console.log(
+        `    ${address.slice(0, 12)}...  source=${row.source.padEnd(20)} status=${row.validationStatus.padEnd(10)} reason=${row.rejectionReason ?? '(none)'} [expected: ${expected}]`
+      );
+    }
+  }
+  console.log('');
+}
+
 async function printSummaryTable(): Promise<void> {
   const [wallets, tokens, trades, snapshots, flowSnapshots, addressRegistry, csvImportJob, signals, alerts] = await Promise.all([
     prisma.wallet.count(),
@@ -1658,6 +2022,27 @@ async function main(): Promise<void> {
 
   // Phase 6: ingest every wallet's tx stream.
   await ingestAllWallets(world);
+
+  // Phase 6.4 (Task 35, Wave 4.5 fix pass): classify non-smart (noise-cohort)
+  // wallets too — see seedNonSmartWalletClassifications's own doc comment for
+  // the root cause this closes (bot/sniper labels never reaching the DB for
+  // wallets outside the smart-money cohort).
+  await seedNonSmartWalletClassifications(world);
+
+  // Phase 6.45 (Task 35, Wave 4.5 fix pass): give a small, deterministic
+  // subset of the "good" candidates REAL, profitable local trade history —
+  // see seedQualifyingCandidateTrades's own doc comment for the root cause
+  // this closes (the mock world's own wallets are structurally incapable of
+  // ever independently clearing profitableWallet thresholds via real FIFO
+  // evidence otherwise — 1-trade noise wallets, BUY-only NOVA/QUIET buyers).
+  await seedQualifyingCandidateTrades(world, tokenIdByAddress);
+
+  // Phase 6.5 (Task 35, Wave 4.5): ONE candidate-validation pass, now that
+  // every mock-world wallet's local trade history exists (Phase 6) for
+  // computeFifoPnl evidence to read. Must run AFTER Phase 6 and AFTER the
+  // external wallet-source sync (Phase 3.5, already ran above) so there are
+  // pending CandidateWallet rows to validate.
+  const candidateValidationResult = await seedCandidateValidationPass(settings);
 
   // Phase 7: scoring pass (shared with the worker's flowScoring job — see
   // scoring-pass.ts's file header). Must run BEFORE the signal pass:
@@ -1818,7 +2203,8 @@ async function main(): Promise<void> {
     backtestResult,
     replayRunResult,
     csvResult.okRows,
-    externalWalletSourceSyncResult
+    externalWalletSourceSyncResult,
+    candidateValidationResult
   );
   printSelfCheckTable(selfCheckRows);
   printSignalSummaryTable(signalsByToken);
@@ -1827,6 +2213,7 @@ async function main(): Promise<void> {
   printBacktestSummary(backtestResult);
   printReplayRunSummary(replayRunResult);
   await printCandidateSummary(world);
+  await printValidationSummary(world, candidateValidationResult);
 
   // Phase 9: summary table.
   await printSummaryTable();

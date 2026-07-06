@@ -4,3 +4,4 @@
 
 export * from './types';
 export * from './mockSource';
+export * from './mockTopTraders';
