@@ -42,6 +42,13 @@ FULL mode is auto-detected when `REDIS_URL` is set **or** `DATABASE_URL` points 
 npm run verify              # typecheck (all workspaces) + vitest + next build
 ```
 
+> **Full test coverage needs the LITE database up.** The `packages/db` integration
+> tests self-skip when Postgres isn't reachable on `:5439`, so `npm run verify`
+> (or `npm run test`) on a fresh checkout — *before* `npm run db:migrate` has
+> started the embedded cluster — will silently skip them and still exit 0. Run
+> `npm run db:migrate` first for the complete suite (865 tests; only the opt-in
+> `LIVE_SMOKE` DexScreener test stays skipped).
+
 ### Authoring a new DB migration
 
 `npm run db:migrate` applies **existing** migrations idempotently (`prisma migrate deploy`) — safe to run repeatedly, no name needed. To author a NEW migration after changing `packages/db/prisma/schema.prisma`:
