@@ -1,0 +1,30 @@
+# FlowRadar line-ending policy.
+#
+# This repo is developed on a Windows box with core.autocrlf=true, where a
+# plain checkout smudges tracked text files to CRLF. A few tooling paths expect
+# LF — most visibly a byte-exact source-snapshot test (apps/web
+# test/framingBanner.test.ts) and shell scripts executed via tsx/node. The
+# committed blobs are already LF; this file makes that explicit and guarantees
+# LF working trees on every future checkout, so the CRLF class of failure
+# cannot recur regardless of a contributor's autocrlf setting.
+#
+# NOTE: adding this file does NOT rewrite the current working tree; it governs
+# future checkouts. No whole-repo renormalization was performed (the index is
+# already LF-clean), keeping this a single-file, no-noise change.
+
+# Auto-detect text vs binary; force LF in the working tree for all text files.
+* text=auto eol=lf
+
+# Explicit binary types — never touch their bytes / line endings.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.woff  binary
+*.woff2 binary
+*.ttf  binary
+*.eot  binary
+*.pdf  binary
+*.zip  binary
