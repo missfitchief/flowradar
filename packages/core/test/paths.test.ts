@@ -102,8 +102,16 @@ describe('extractPaths', () => {
     expect(paths.some((p) => p.addresses.join('>') === 'R>A>B>C')).toBe(true);
   });
 
-  it('single-hop paths are included by default (minHops defaults below 2, i.e. no floor)', () => {
+  it('single-hop paths are excluded by default (minHops defaults to 2)', () => {
     const paths = extractPaths(nodes, edges, 'R');
+    expect(paths.some((p) => p.hops.length === 1)).toBe(false);
+    // the 2-hop and 3-hop paths are still present by default
+    expect(paths.some((p) => p.addresses.join('>') === 'R>A>B')).toBe(true);
+    expect(paths.some((p) => p.addresses.join('>') === 'R>A>B>C')).toBe(true);
+  });
+
+  it('minHops explicit override to 0 restores single-hop paths', () => {
+    const paths = extractPaths(nodes, edges, 'R', { minHops: 0 });
     expect(paths.some((p) => p.hops.length === 1)).toBe(true);
   });
 

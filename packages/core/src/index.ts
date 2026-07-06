@@ -22,13 +22,12 @@ export * from './window/aggregate';
 export * from './alerts/templates';
 export * from './alerts/cooldown';
 
-// Graph module: exported by NAME (not `export *`) because graph/types.ts
-// intentionally defines its own GraphNode/GraphEdge/RawGraphEdge — richer,
-// real shapes per Task 19's binding decisions — which collide by name with
-// the abbreviated (unused-elsewhere) sketches already in ./types. Both are
-// kept; consumers that want the graph engine's shapes import these names
-// (or import directly from '@flowradar/core/src/graph/types' /
-// './graph/types' within the monorepo).
+// Graph module: the unused sketch GraphNode/GraphEdge/RawGraphEdge that used
+// to live in ./types (never implemented or consumed — confirmed by repo-wide
+// grep) have been deleted, so there is no longer a name collision here.
+// graph/types.ts's shapes are the graph engine's one real contract; still
+// exported by name (rather than `export *`) so WalletGraphNode/WalletGraphEdge
+// keep their disambiguated aliases for existing consumers.
 export type {
   GraphNode as WalletGraphNode,
   GraphEdge as WalletGraphEdge,

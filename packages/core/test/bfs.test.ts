@@ -331,6 +331,97 @@ describe('runBfs', () => {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // Global value-priority frontier (Critical 1) + no-orphan-edges (Critical 2)
+  // -------------------------------------------------------------------------
+
+  // Minimal dedicated fixture for the cross-branch priority proof: root has
+  // two children, A (discoveryAmount 10000, low-value grandchild Z=100) and
+  // F (discoveryAmount 1500, high-value grandchildren F0..F4=5000..4996).
+  // Parent-by-parent BFS (the pre-fix bug) would admit {R, A, F, Z} because A
+  // is processed before F, even though Z ($100) is worth far less than F0
+  // ($5000). A TRUE global value-priority frontier must admit {R, A, F, F0}
+  // instead: F0 is the next-highest-value candidate globally once R, A, and F
+  // are all admitted, and it beats Z regardless of which parent discovered it.
+  const CROSS_BRANCH_EDGES: RawGraphEdge[] = [
+    edge('R', 'A', 'direct_transfer', 10000, minutes(0)),
+    edge('A', 'Z', 'direct_transfer', 100, minutes(1)),
+    edge('R', 'F', 'direct_transfer', 1500, minutes(0)),
+    edge('F', 'F0', 'direct_transfer', 5000, minutes(1)),
+    edge('F', 'F1', 'direct_transfer', 4999, minutes(1)),
+    edge('F', 'F2', 'direct_transfer', 4998, minutes(1)),
+    edge('F', 'F3', 'direct_transfer', 4997, minutes(1)),
+    edge('F', 'F4', 'direct_transfer', 4996, minutes(1))
+  ];
+
+  it('cross-branch global priority: maxNodes 4 admits {R, A, F, F0} — the $5000 F0, NOT the $100 Z', async () => {
+    const result = await runBfs(
+      baseParams({ mode: 'FULL_RAW', maxDepth: 3, maxNodes: 4 }),
+      makeFetcher(CROSS_BRANCH_EDGES),
+      registry
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.nodes.length).toBe(4);
+
+    const admitted = new Set(result.nodes.map((n) => n.address));
+    expect(admitted).toEqual(new Set(['R', 'A', 'F', 'F0']));
+
+    // Z must NOT beat F0 into the graph purely because A was discovered first.
+    expect(admitted.has('Z')).toBe(false);
+  });
+
+  // Reusable invariant: every edge's source AND dest must be present in the
+  // node set. Under the pre-fix code, an edge could be committed before its
+  // destination node's cap-check, leaving an edge whose endpoint has no
+  // corresponding node once maxEdges (or maxNodes) truncates the search.
+  function assertNoOrphanEdges(result: { nodes: GraphNode[]; edges: { source: string; dest: string }[] }): void {
+    const nodeAddresses = new Set(result.nodes.map((n) => n.address));
+    for (const e of result.edges) {
+      expect(nodeAddresses.has(e.source)).toBe(true);
+      expect(nodeAddresses.has(e.dest)).toBe(true);
+    }
+  }
+
+  it('no orphan edges under cap: every edge endpoint is a present node, across several maxNodes/maxEdges values', async () => {
+    const capCombinations: Array<Partial<GraphSearchParams>> = [
+      { maxEdges: 1 },
+      { maxEdges: 2 },
+      { maxEdges: 3 },
+      { maxNodes: 2 },
+      { maxNodes: 3 },
+      { maxNodes: 4 },
+      { maxNodes: 3, maxEdges: 2 },
+      { maxNodes: 20, maxDepth: 3 } // fan-out-bomb branch under a moderate node cap
+    ];
+
+    for (const overrides of capCombinations) {
+      const result = await runBfs(baseParams({ mode: 'FULL_RAW', ...overrides }), makeFetcher(), registry);
+      assertNoOrphanEdges(result);
+      expect(result.truncated).toBe(true);
+    }
+  });
+
+  it('determinism: repeated capped runs produce identical node and edge ordering', async () => {
+    const params = baseParams({ mode: 'FULL_RAW', maxDepth: 3, maxNodes: 20, maxEdges: 30 });
+
+    const first = await runBfs(params, makeFetcher(), registry);
+    const second = await runBfs(params, makeFetcher(), registry);
+
+    expect(second.nodes.map((n) => n.address)).toEqual(first.nodes.map((n) => n.address));
+    expect(second.edges.map((e) => `${e.source}>${e.dest}>${e.relationship}`)).toEqual(
+      first.edges.map((e) => `${e.source}>${e.dest}>${e.relationship}`)
+    );
+    expect(second.truncated).toBe(first.truncated);
+
+    // Also verify determinism on the cross-branch fixture (exercises the
+    // global-priority tiebreak path directly).
+    const crossParams = baseParams({ mode: 'FULL_RAW', maxDepth: 3, maxNodes: 4 });
+    const crossFirst = await runBfs(crossParams, makeFetcher(CROSS_BRANCH_EDGES), registry);
+    const crossSecond = await runBfs(crossParams, makeFetcher(CROSS_BRANCH_EDGES), registry);
+    expect(crossSecond.nodes.map((n) => n.address)).toEqual(crossFirst.nodes.map((n) => n.address));
+  });
+
   it('CAPITAL_FLOW follows the decaying R->A->B->C chain', async () => {
     const result = await runBfs(baseParams({ mode: 'CAPITAL_FLOW', maxDepth: 3 }), makeFetcher(), registry);
 

@@ -25,6 +25,7 @@ const PATH_RELATIONSHIPS: ReadonlySet<WalletGraphRelationship> = new Set([
 
 const MAX_HOPS = 4;
 const DEFAULT_MAX_PATHS = 20;
+const DEFAULT_MIN_HOPS = 2;
 
 export function extractPaths(
   nodes: GraphNode[],
@@ -33,7 +34,7 @@ export function extractPaths(
   opts?: { maxPaths?: number; minHops?: number }
 ): TransactionPath[] {
   const maxPaths = opts?.maxPaths ?? DEFAULT_MAX_PATHS;
-  const minHops = opts?.minHops ?? 0;
+  const minHops = opts?.minHops ?? DEFAULT_MIN_HOPS;
 
   const confidenceByAddress = new Map(nodes.map((n) => [n.address, n.confidence]));
 

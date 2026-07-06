@@ -358,34 +358,6 @@ export interface GraphSearchParams {
   maxEdges: number;
 }
 
-export interface GraphNode {
-  address: string;
-  chain: Chain;
-  nodeType: NodeType;
-  label?: string;
-  depth: number;
-}
-
-export interface GraphEdge {
-  from: string;
-  to: string;
-  relationship: WalletGraphRelationship;
-  amountUsd: number;
-  ts: Date;
-  txHash?: string;
-}
-
-export interface RawGraphEdge {
-  from: string;
-  to: string;
-  relationship: WalletGraphRelationship;
-  amountToken: string;
-  amountUsd?: number;
-  ts: Date;
-  txHash?: string;
-  asset?: { address?: string; symbol: string; decimals: number };
-}
-
 // ---------------------------------------------------------------------------
 // Providers (providers/types.ts consumer contract)
 // ---------------------------------------------------------------------------
