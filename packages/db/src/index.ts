@@ -7,6 +7,8 @@ export * from './clustering';
 export * from './moneyFlow';
 export * from './bridgeFlow';
 export * from './rotation';
+export * from './walletStatsRefresh';
+export * from './walletDiscovery';
 export * from './signals';
 export * from './backtest';
 export * from './replayRunner';

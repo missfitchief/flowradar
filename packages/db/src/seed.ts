@@ -28,6 +28,7 @@ import { prisma } from './client';
 import { ingestNormalizedTxs, snapshotMarket } from './ingest';
 import { runFlowScoringPass } from './scoring-pass';
 import { runEntityClustering } from './clustering';
+import { runWalletStatsRefresh } from './walletStatsRefresh';
 import { runSignalDetectionPass } from './signals';
 import { dispatchPendingAlerts } from './alerts';
 import { runBacktestPass } from './backtest';
@@ -710,7 +711,8 @@ async function runSelfCheck(
   signalsByToken: SignalsByToken,
   graphDemoSearchId: string,
   backtestResult: { signalsEvaluated: number; rowsUpserted: number; labelCounts: Record<string, number> },
-  replayRunResult: Awaited<ReturnType<typeof runHistoricalReplay>>
+  replayRunResult: Awaited<ReturnType<typeof runHistoricalReplay>>,
+  csvOkRows: number
 ): Promise<{ rows: SelfCheckRow[]; hardFail: boolean; concerns: string[] }> {
   const rows: SelfCheckRow[] = [];
   const concerns: string[] = [];
@@ -1206,6 +1208,39 @@ async function runSelfCheck(
     pass: persistedRun?.syntheticEvidence === true
   });
 
+  // Task 30 binding decision 1's anti-clobber guarantee, asserted against
+  // real seeded data: every one of the `csvOkRows` CSV fixture wallets
+  // (Phase 5(b), seedCsvWallets) must STILL have source='csv' as their
+  // latest WalletStats row after Phase 7.97's walletStatsRefresh pass ran —
+  // if this ever fails, the refresh pass has started clobbering Layer-1
+  // authoritative CSV data, which is a hard-fail-worthy regression. Same
+  // "latest row per wallet, ordered computedAt desc, first occurrence wins"
+  // reduction pattern as fetchAggregateInputs.ts's latestStatsByWallet /
+  // walletStatsRefresh.ts's latestSourceByWallet.
+  const csvWalletIds = [
+    ...new Set((await prisma.walletStats.findMany({ where: { source: 'csv' }, select: { walletId: true } })).map(
+      (r) => r.walletId
+    ))
+  ];
+  const allStatsForCsvWallets = await prisma.walletStats.findMany({
+    where: { walletId: { in: csvWalletIds } },
+    orderBy: { computedAt: 'desc' },
+    select: { walletId: true, source: true }
+  });
+  const latestSourceByCsvWallet = new Map<string, string>();
+  for (const row of allStatsForCsvWallets) {
+    if (!latestSourceByCsvWallet.has(row.walletId)) {
+      latestSourceByCsvWallet.set(row.walletId, row.source);
+    }
+  }
+  const csvWalletsStillCsv = [...latestSourceByCsvWallet.values()].filter((s) => s === 'csv').length;
+  rows.push({
+    check: `all ${csvOkRows} CSV fixture wallets remain source='csv' after walletStatsRefresh (anti-clobber)`,
+    expected: String(csvOkRows),
+    actual: String(csvWalletsStillCsv),
+    pass: csvWalletsStillCsv === csvOkRows
+  });
+
   // Hard-fail checks (brief: "exit code 1 if any fails") exclude only the
   // NOVA 60-70 flowScore band (the brief's own explicit "still pass but
   // flag" carve-out, handled separately above via `concerns.push` while
@@ -1602,13 +1637,26 @@ async function main(): Promise<void> {
     syntheticEvidencePresent: replayRunResult.summary.syntheticEvidencePresent
   });
 
+  // Phase 7.97: one walletStatsRefresh pass (Task 30 binding decision 1) —
+  // OPTIONAL per the task brief, run here so `npm run db:seed` exercises the
+  // same shared body the worker's walletStatsRefresh job calls on a schedule,
+  // and so the self-check below can assert the anti-clobber guarantee against
+  // real seeded data (the 40 CSV fixture wallets from seedCsvWallets, Phase
+  // 5(b)) rather than only against packages/db/test's synthetic fixtures.
+  const statsRefreshResult = await runWalletStatsRefresh(prisma, {
+    info: (msg, meta) => log(msg, meta),
+    error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+  });
+  log('wallet stats refresh pass complete.', { ...statsRefreshResult });
+
   // Phase 8: self-check.
   const { rows: selfCheckRows, hardFail, concerns } = await runSelfCheck(
     world,
     signalsByToken,
     graphDemoResult.searchId,
     backtestResult,
-    replayRunResult
+    replayRunResult,
+    csvResult.okRows
   );
   printSelfCheckTable(selfCheckRows);
   printSignalSummaryTable(signalsByToken);

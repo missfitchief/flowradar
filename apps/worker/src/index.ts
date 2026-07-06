@@ -22,11 +22,13 @@
 //   5. createRunner() (InlineRunner in LITE/no-REDIS_URL, BullMqRunner in
 //      FULL), register the scheduled jobs (walletActivity, marketDataHot,
 //      marketDataNormal, flowScoring, entityClustering, moneyFlow,
-//      bridgeFlow, profitRotation, signalDetection, alertDispatch, backtest —
-//      entityClustering added Task 22; moneyFlow/bridgeFlow/profitRotation
-//      added Task 23; backtest added Task 40 (its own intervals.backtestHours
-//      converted to seconds before sharing the same ms pipeline every other
-//      job uses)) on schedule() with settings.intervals.* converted to ms,
+//      bridgeFlow, profitRotation, signalDetection, alertDispatch, backtest,
+//      walletStatsRefresh, walletDiscovery — entityClustering added Task 22;
+//      moneyFlow/bridgeFlow/profitRotation added Task 23; backtest added
+//      Task 40; walletStatsRefresh/walletDiscovery added Task 30 (all three
+//      of backtestHours/walletStatsRefreshHours/walletDiscoveryHours convert
+//      hours to seconds before sharing the same ms pipeline every other job
+//      uses)) on schedule() with settings.intervals.* converted to ms,
 //      plus walletImport/walletGraph registered on-demand via process() (see
 //      below) — WORKER_FAST=1 overrides every scheduled interval to 3s so a
 //      manual verification run doesn't need to wait minutes for a full cycle
@@ -59,6 +61,8 @@ import * as alertDispatch from './jobs/alertDispatch';
 import * as backtest from './jobs/backtest';
 import * as walletImport from './jobs/walletImport';
 import * as walletGraph from './jobs/walletGraph';
+import * as walletStatsRefresh from './jobs/walletStatsRefresh';
+import * as walletDiscovery from './jobs/walletDiscovery';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const HOUR_MS = 60 * 60 * 1000;
@@ -176,7 +180,19 @@ async function main(): Promise<void> {
     // intervals.* field above) — converted to seconds here so it can share
     // the same `intervalSec` -> intervalMsFor() pipeline (and therefore the
     // same WORKER_FAST=1 -> 3s override) as every other scheduled job.
-    { name: 'backtest', run: backtest.run, intervalSec: settings.intervals.backtestHours * 3600 }
+    { name: 'backtest', run: backtest.run, intervalSec: settings.intervals.backtestHours * 3600 },
+    // walletStatsRefresh/walletDiscovery (Task 30): both intervals are also
+    // expressed in HOURS — same *3600 conversion as backtestHours above.
+    {
+      name: 'walletStatsRefresh',
+      run: walletStatsRefresh.run,
+      intervalSec: settings.intervals.walletStatsRefreshHours * 3600
+    },
+    {
+      name: 'walletDiscovery',
+      run: walletDiscovery.run,
+      intervalSec: settings.intervals.walletDiscoveryHours * 3600
+    }
   ];
 
   for (const job of jobs) {
