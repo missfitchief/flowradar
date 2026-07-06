@@ -251,7 +251,7 @@ describe('getCandidateSourceStatuses', () => {
 
     const names = new Set(statuses.map((s) => s.sourceName));
     expect(names).toEqual(
-      new Set(['solana_tracker_pnl', 'birdeye_wallet_pnl', 'birdeye_top_traders', 'kolscan', 'gmgn_smart_money', 'cielo'])
+      new Set(['solana_tracker_pnl', 'birdeye_wallet_pnl', 'birdeye_top_traders', 'kolscan', 'gmgn_smart_money', 'cielo', 'dune'])
     );
   });
 
@@ -262,6 +262,7 @@ describe('getCandidateSourceStatuses', () => {
     delete process.env.KOLSCAN_API_KEY;
     delete process.env.GMGN_API_KEY;
     delete process.env.CIELO_API_KEY;
+    delete process.env.DUNE_API_KEY;
 
     const statuses = getCandidateSourceStatuses();
 
@@ -274,11 +275,22 @@ describe('getCandidateSourceStatuses', () => {
     const birdeyeTopTraders = statuses.filter((s) => s.sourceName === 'birdeye_top_traders');
     expect(birdeyeTopTraders.every((s) => s.mode === 'live')).toBe(true);
 
+    const dune = statuses.filter((s) => s.sourceName === 'dune');
+    expect(dune.every((s) => s.mode === 'missing_key')).toBe(true);
+
     for (const stubName of ['kolscan', 'gmgn_smart_money', 'cielo']) {
       const rows = statuses.filter((s) => s.sourceName === stubName);
       expect(rows.length).toBeGreaterThan(0);
       expect(rows.every((s) => s.mode === 'stub')).toBe(true);
     }
+  });
+
+  it('live mode + DUNE_API_KEY present: dune reports live', () => {
+    process.env.MOCK_MODE = 'false';
+    process.env.DUNE_API_KEY = 'present';
+    const statuses = getCandidateSourceStatuses();
+    const dune = statuses.filter((s) => s.sourceName === 'dune');
+    expect(dune.every((s) => s.mode === 'live')).toBe(true);
   });
 
   it('live mode + key present for a stub source still reports stub (a key alone does not make an unverified endpoint live)', () => {

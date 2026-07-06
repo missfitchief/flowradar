@@ -29,7 +29,10 @@
 //      of backtestHours/walletStatsRefreshHours/walletDiscoveryHours convert
 //      hours to seconds before sharing the same ms pipeline every other job
 //      uses); externalWalletSource added Task 34 (Wave 4.5 — registered on
-//      settings.connectors.syncHours, same hours->seconds conversion)) on
+//      settings.connectors.syncHours, same hours->seconds conversion);
+//      duneQuery added Task 37 (Wave 4.6 — registered on
+//      settings.connectors.dune.syncHours, same hours->seconds conversion,
+//      credit-safe latest-cached-result refresh by default)) on
 //      schedule() with settings.intervals.* converted to ms,
 //      plus walletImport/walletGraph registered on-demand via process() (see
 //      below) — WORKER_FAST=1 overrides every scheduled interval to 3s so a
@@ -68,6 +71,7 @@ import * as walletDiscovery from './jobs/walletDiscovery';
 import * as externalWalletSource from './jobs/externalWalletSource';
 import * as walletCandidateValidation from './jobs/walletCandidateValidation';
 import * as tokenTopTraderBackfill from './jobs/tokenTopTraderBackfill';
+import * as duneQuery from './jobs/duneQuery';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const HOUR_MS = 60 * 60 * 1000;
@@ -226,6 +230,17 @@ async function main(): Promise<void> {
       name: 'tokenTopTraderBackfill',
       run: tokenTopTraderBackfill.run,
       intervalSec: settings.connectors.syncHours * 4 * 3600
+    },
+    // duneQuery (Task 37, Wave 4.6): refreshes enabled DuneQuerySource rows
+    // credit-safely (latest-cached-result by default — see duneQuery.ts's own
+    // header). Registered on settings.connectors.dune.syncHours (24h
+    // default), a distinct, slower-moving cadence from the wallet-source
+    // connectors' own syncHours (6h) — same *3600 hours->seconds conversion
+    // as every other hours-denominated interval above.
+    {
+      name: 'duneQuery',
+      run: duneQuery.run,
+      intervalSec: settings.connectors.dune.syncHours * 3600
     }
   ];
 

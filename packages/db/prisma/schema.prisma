@@ -825,6 +825,135 @@ model CandidateWallet {
 }
 
 // ---------------------------------------------------------------------------
+// 25a. Dune Query Connector (Task 37 — Wave 4.6, dune-feature-wave46.md)
+// ---------------------------------------------------------------------------
+
+/// DuneQuerySource.purpose — what a saved Dune query is used for.
+enum DuneQueryPurpose {
+  token_overlap
+  token_traders
+  smart_wallet_candidates
+  funding_links
+  entity_cluster_research
+}
+
+/// DuneQuerySource.resultFormat — how a saved query's results are fetched.
+enum DuneResultFormat {
+  json
+  csv
+}
+
+/// TokenOverlapSearch.status — lifecycle of one overlap-finder search.
+enum TokenOverlapSearchStatus {
+  queued
+  running
+  done
+  failed
+}
+
+/// One configured Dune saved query (Query Execution API `query_id`), seeded/
+/// operator-managed. CREDIT-SAFE BY DEFAULT: refreshing an enabled row
+/// (runDuneQuerySync/duneQuery worker) serves the query's LATEST CACHED
+/// result (GET /v1/query/{query_id}/results) unless DUNE_EXECUTE_FRESH=true —
+/// see packages/providers/src/candidates/dune/client.ts header for the full
+/// credit-safety contract. `enabled=false` until an operator supplies a real
+/// DUNE_API_KEY + queryId (see seed.ts).
+model DuneQuerySource {
+  id                String            @id @default(cuid())
+  name              String            @unique
+  queryId           String
+  purpose           DuneQueryPurpose
+  enabled           Boolean           @default(false)
+  resultFormat      DuneResultFormat  @default(json)
+  lastExecutionId   String?
+  lastRunAt         DateTime?
+  lastSuccessAt     DateTime?
+  status            String            @default("idle")
+  creditsEstimate   Int?
+  parametersJson    Json?
+  outputSchemaJson  Json?
+  notes             String?
+
+  @@map("dune_query_sources")
+}
+
+/// One "given 2-5 token CAs, find wallets that traded multiple/all of them"
+/// search (Overlap Finder, Task 38 UI). `params` carries the overlap query's
+/// own knobs (min_trade_usd, min_tokens_overlap, max_results, start/end —
+/// dune-feature-wave46.md's documented query params) so a search is fully
+/// reproducible from its own row. `usedCachedResult`/`truncated` surface the
+/// credit-safety + result-cap coverage flags Task 38's UI displays per
+/// dune-feature-wave46.md's "Coverage display on every Dune result".
+model TokenOverlapSearch {
+  id                String                    @id @default(cuid())
+  chain             ChainId
+  tokenAddresses     String[]
+  params            Json
+  status            TokenOverlapSearchStatus  @default(queued)
+  rowsReturned      Int?
+  usedCachedResult  Boolean?
+  truncated         Boolean?
+  executionId       String?
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  error             String?
+  createdAt         DateTime                  @default(now())
+
+  walletResults     TokenOverlapWalletResult[]
+  groupResults      TokenOverlapGroupResult[]
+
+  @@index([status])
+  @@map("token_overlap_searches")
+}
+
+/// One wallet row from an overlap search's result set — one per
+/// (searchId, walletAddress). Never trusted directly: runTokenOverlapSearch
+/// ALSO creates a CandidateWallet (source='dune_token_overlap', pending) per
+/// distinct wallet so it flows through Task 35's validation/promotion
+/// pipeline — this table is the raw Dune-shaped result archive, not itself a
+/// signal input (Spec §5b trust boundary, restated for Wave 4.6 at
+/// dune-feature-wave46.md's "Dune rows are never trusted blindly").
+model TokenOverlapWalletResult {
+  id                  String   @id @default(cuid())
+  searchId            String
+  walletAddress       String
+  chain               ChainId
+  tokensOverlapCount  Int
+  totalBuyUsd         Decimal? @db.Decimal(20, 4)
+  totalSellUsd        Decimal? @db.Decimal(20, 4)
+  estimatedPnlUsd     Decimal? @db.Decimal(20, 4)
+  firstBuyTime        DateTime?
+  buyCount            Int?
+  sellCount           Int?
+  entryMarketCapUsd   Decimal? @db.Decimal(20, 4)
+  overlapGroupId      String?
+  txHashesSample      String[]
+
+  search              TokenOverlapSearch @relation(fields: [searchId], references: [id], onDelete: Cascade)
+
+  @@index([searchId])
+  @@map("token_overlap_wallet_results")
+}
+
+/// One recurring co-trader group within an overlap search (wallets sharing
+/// `overlapGroupId` — dune-feature-wave46.md's "recurring co-trader groups /
+/// possible entity clusters"). Purely descriptive/UI-facing; never itself a
+/// CandidateWallet or signal input.
+model TokenOverlapGroupResult {
+  id                String   @id @default(cuid())
+  searchId          String
+  overlapGroupId    String
+  walletCount       Int
+  walletAddresses   String[]
+  sharedTokenCount  Int
+
+  search            TokenOverlapSearch @relation(fields: [searchId], references: [id], onDelete: Cascade)
+
+  @@index([searchId])
+  @@map("token_overlap_group_results")
+}
+
+// ---------------------------------------------------------------------------
 // 23. BacktestRun (Task 41 binding decision 5)
 // ---------------------------------------------------------------------------
 

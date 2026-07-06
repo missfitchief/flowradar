@@ -138,11 +138,22 @@ const TopTraderBackfillSchema = z.object({
   topN: z.number()
 });
 
+// Task 37 (Wave 4.6, dune-feature-wave46.md) — Dune Query Connector refresh
+// cadence. syncHours reuses the SAME name/units convention as
+// connectors.syncHours (hours, converted to seconds by the worker's own
+// *3600 pipeline) but is a DISTINCT field — Dune's credit-safe refresh
+// (latest-cached-result only, unless DUNE_EXECUTE_FRESH=true) is intended to
+// run independently of the external-wallet-source connectors' own cadence.
+const DuneConnectorSchema = z.object({
+  syncHours: z.number()
+});
+
 const ConnectorsSchema = z.object({
   sourcesEnabled: z.record(z.string(), z.boolean()),
   syncHours: z.number(),
   validationBatchSize: z.number(),
-  topTraderBackfill: TopTraderBackfillSchema
+  topTraderBackfill: TopTraderBackfillSchema,
+  dune: DuneConnectorSchema
 });
 
 export const SettingsSchema = z
@@ -277,6 +288,12 @@ export const DEFAULT_SETTINGS: Settings = {
       mcapExpansionMin: 2,
       lookbackHours: 24,
       topN: 20
+    },
+    dune: {
+      // Slower-moving than the wallet-source connectors — Dune refreshes are
+      // credit-conscious by design (latest-cached-result only by default), so
+      // a daily-ish default cadence (24h) rather than syncHours' 6h.
+      syncHours: 24
     }
   }
 };

@@ -1,13 +1,17 @@
 // FlowRadar — getCandidateSourceStatuses: reports the effective mode for each
-// of the 6 seeded ExternalWalletSource names (Task 36, Wave 4.5, Spec §5b).
-// Analogous to registry.ts's getProviderStatuses — used by the Source Health
-// page (apps/web/app/sources/page.tsx) and by ops/debugging. Never echoes
-// secret values, only whether the required env key is present.
+// of the 6 seeded ExternalWalletSource names (Task 36, Wave 4.5, Spec §5b),
+// plus one `dune` row (Task 37, Wave 4.6). Analogous to registry.ts's
+// getProviderStatuses — used by the Source Health page
+// (apps/web/app/sources/page.tsx) and by ops/debugging. Never echoes secret
+// values, only whether the required env key is present.
 //
 // Mode per source, in MOCK_MODE (default):
-//   ALL 6 sources report mode='mock' (every ExternalWalletSource name
-//   resolves to the shared MockCandidateSource — Task 34 binding decision 3),
-//   same "MOCK_MODE is the one switch" convention getProviderStatuses uses.
+//   ALL 6 ExternalWalletSource-backed sources report mode='mock' (every
+//   ExternalWalletSource name resolves to the shared MockCandidateSource —
+//   Task 34 binding decision 3), same "MOCK_MODE is the one switch"
+//   convention getProviderStatuses uses. The `dune` row ALSO reports 'mock'
+//   in MOCK_MODE — MockDuneOverlapSource stands in regardless of
+//   DUNE_API_KEY, same convention.
 //
 // Mode per source, live (MOCK_MODE=false):
 //   - solana_tracker_pnl / birdeye_wallet_pnl / birdeye_top_traders: 'live'
@@ -17,6 +21,8 @@
 //     verified endpoint exists yet — see kolscanStub.ts/gmgnStub.ts/cielo.ts)
 //     regardless of whether their key env var happens to be set, since a key
 //     alone doesn't make an unverified endpoint real.
+//   - dune: 'live' when DUNE_API_KEY is present, else 'missing_key'
+//     (docs-verified Query Execution API client — see dune/client.ts).
 
 import type { ProviderStatus } from '@flowradar/core';
 
@@ -76,6 +82,13 @@ const SOURCE_SPECS: SourceStatusSpec[] = [
     chains: ['SOLANA', 'BSC'],
     keyEnvVar: 'CIELO_API_KEY',
     hasLiveAdapter: false
+  },
+  {
+    sourceName: 'dune',
+    displayName: 'Dune',
+    chains: ['SOLANA', 'BSC'],
+    keyEnvVar: 'DUNE_API_KEY',
+    hasLiveAdapter: true
   }
 ];
 

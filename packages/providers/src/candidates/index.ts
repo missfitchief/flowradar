@@ -11,3 +11,4 @@ export * from './cielo';
 export * from './kolscanStub';
 export * from './gmgnStub';
 export * from './sourceStatus';
+export * from './dune';

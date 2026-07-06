@@ -21,7 +21,7 @@ import path from 'node:path';
 import { DEFAULT_SETTINGS } from '@flowradar/core';
 import type { Chain, Settings } from '@flowradar/core';
 import { computeWalletScore } from '@flowradar/core';
-import { createMockWorld, GRAPH_DEMO_ROOT_ADDRESS, MockCandidateSource, MockProvider, STATIC_REGISTRY_ENTRIES, getPoisonedAddresses } from '@flowradar/providers';
+import { createMockWorld, GRAPH_DEMO_ROOT_ADDRESS, MockCandidateSource, MockProvider, STATIC_REGISTRY_ENTRIES, getPoisonedAddresses, createMockDuneClient, getDunePoisonedAddresses } from '@flowradar/providers';
 import type { MockWorld } from '@flowradar/providers';
 import type { Prisma } from '@prisma/client';
 import { prisma } from './client';
@@ -37,6 +37,7 @@ import { importWalletsCsv } from './csv/importWalletsCsv';
 import { runGraphSearch } from './graph/runSearch';
 import { runExternalWalletSourceSync } from './externalWalletSource';
 import { runCandidateValidation } from './candidateValidation';
+import { runTokenOverlapSearch } from './dune/duneOverlap';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
@@ -90,6 +91,13 @@ async function wipeAllTables(): Promise<void> {
   // before wallet.deleteMany() (Task 34, Wave 4.5).
   await prisma.candidateWallet.deleteMany();
   await prisma.externalWalletSource.deleteMany();
+  // TokenOverlapWalletResult/GroupResult carry an FK to TokenOverlapSearch
+  // (Task 37, Wave 4.6) — wiped leaf-first, same convention as every other
+  // FK'd pair in this function.
+  await prisma.tokenOverlapWalletResult.deleteMany();
+  await prisma.tokenOverlapGroupResult.deleteMany();
+  await prisma.tokenOverlapSearch.deleteMany();
+  await prisma.duneQuerySource.deleteMany();
   await prisma.wallet.deleteMany();
   await prisma.token.deleteMany();
   await prisma.importJob.deleteMany();
@@ -355,6 +363,106 @@ async function seedCandidateValidationPass(settings: Settings) {
     error: (msg, meta) => log(`ERROR: ${msg}`, meta)
   });
   log('candidate validation pass complete.', { ...result });
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3.6: Dune Query Connector seed rows (Task 37, Wave 4.6,
+// dune-feature-wave46.md) — ONE DuneQuerySource row (disabled by default
+// until an operator supplies a real DUNE_API_KEY + queryId), plus ONE MOCK
+// token-overlap search over 3 real mock-world scenario tokens so
+// `npm run db:seed` populates TokenOverlapSearch/WalletResult/GroupResult +
+// dune_token_overlap CandidateWallet rows out of the box, same
+// "MOCK_MODE-equivalent, no live connector required" convention as Phase 3.5's
+// ExternalWalletSource sync above.
+// ---------------------------------------------------------------------------
+
+const DUNE_QUERY_SOURCE_SEED_NAME = 'default_token_overlap';
+
+async function bootstrapDuneQuerySource(): Promise<void> {
+  await prisma.duneQuerySource.create({
+    data: {
+      name: DUNE_QUERY_SOURCE_SEED_NAME,
+      queryId: process.env.DUNE_DEFAULT_OVERLAP_QUERY_ID || 'REPLACE_WITH_REAL_DUNE_QUERY_ID',
+      purpose: 'token_overlap',
+      // Disabled by default until an operator supplies a real DUNE_API_KEY +
+      // a real saved queryId — see dune-feature-wave46.md's "Dune SAVED
+      // QUERIES + Dune API is primary" framing and .env.example's own
+      // DUNE_API_KEY/DUNE_DEFAULT_OVERLAP_QUERY_ID comments.
+      enabled: false,
+      resultFormat: 'json',
+      notes: 'Seeded placeholder — set DUNE_API_KEY + a real saved queryId, then enable this row, to refresh from live Dune data.'
+    }
+  });
+  log('bootstrapped DuneQuerySource seed row (disabled by default).', { name: DUNE_QUERY_SOURCE_SEED_NAME });
+}
+
+/**
+ * Picks 3 real mock-world SOLANA token addresses that share genuine buyer/
+ * seller overlap (same swap_leg-scanning convention MockDuneOverlapSource
+ * itself uses) so the seed-time overlap search exercises real, non-contrived
+ * data. Falls back to the first 3 tokens in the world if no 3-way overlap is
+ * found (still a valid — if likely near-empty — search; never throws).
+ */
+function pickOverlapScenarioTokens(world: MockWorld): string[] {
+  const walletsByAddress = new Map(world.wallets.filter((w) => w.chain === 'SOLANA').map((w) => [w.address, w]));
+  const tradersByToken = new Map<string, Set<string>>();
+
+  for (const [walletAddress, txs] of world.txsByWallet) {
+    if (!walletsByAddress.has(walletAddress)) continue;
+    for (const tx of txs) {
+      for (const leg of tx.legs) {
+        if (leg.kind !== 'swap_leg' || !leg.asset.address) continue;
+        if (leg.to !== walletAddress && leg.from !== walletAddress) continue;
+        const set = tradersByToken.get(leg.asset.address) ?? new Set<string>();
+        set.add(walletAddress);
+        tradersByToken.set(leg.asset.address, set);
+      }
+    }
+  }
+
+  const tokens = [...tradersByToken.keys()].sort();
+  let best: { tokens: string[]; overlapCount: number } | null = null;
+
+  for (let i = 0; i < tokens.length; i++) {
+    for (let j = i + 1; j < tokens.length; j++) {
+      for (let k = j + 1; k < tokens.length; k++) {
+        const a = tradersByToken.get(tokens[i]!)!;
+        const b = tradersByToken.get(tokens[j]!)!;
+        const c = tradersByToken.get(tokens[k]!)!;
+        const overlapCount = [...c].filter((w) => a.has(w) && b.has(w)).length;
+        if (overlapCount > 0 && (!best || overlapCount > best.overlapCount)) {
+          best = { tokens: [tokens[i]!, tokens[j]!, tokens[k]!], overlapCount };
+        }
+      }
+    }
+  }
+
+  if (best) return best.tokens;
+  return tokens.slice(0, 3); // fallback — still a valid search, just likely sparse overlap
+}
+
+/**
+ * Runs ONE MOCK token-overlap search (Task 37 binding decision 5) over 3
+ * real scenario tokens from `world` — credit-safe by construction (the mock
+ * DuneClient never calls a real network endpoint at all). Produces the
+ * TokenOverlapSearch/WalletResult/GroupResult rows plus pending
+ * dune_token_overlap CandidateWallet rows the self-check below asserts.
+ */
+async function seedDuneOverlapSearch(world: MockWorld) {
+  const tokenAddresses = pickOverlapScenarioTokens(world);
+  const client = createMockDuneClient(world);
+
+  const result = await runTokenOverlapSearch(
+    prisma,
+    { chain: 'SOLANA', tokenAddresses, minTokensOverlap: 2, maxResults: 500 },
+    () => client,
+    {
+      info: (msg, meta) => log(msg, meta),
+      error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+    }
+  );
+  log('dune mock overlap search pass complete.', { ...result, tokenAddresses });
   return result;
 }
 
@@ -1029,7 +1137,8 @@ async function runSelfCheck(
   replayRunResult: Awaited<ReturnType<typeof runHistoricalReplay>>,
   csvOkRows: number,
   externalWalletSourceSyncResult: { sourcesConsidered: number; candidatesUpserted: number; errors: number },
-  candidateValidationResult: Awaited<ReturnType<typeof runCandidateValidation>>
+  candidateValidationResult: Awaited<ReturnType<typeof runCandidateValidation>>,
+  duneOverlapSearchResult: Awaited<ReturnType<typeof runTokenOverlapSearch>>
 ): Promise<{ rows: SelfCheckRow[]; hardFail: boolean; concerns: string[] }> {
   const rows: SelfCheckRow[] = [];
   const concerns: string[] = [];
@@ -1156,6 +1265,64 @@ async function runSelfCheck(
     expected: '0 errors',
     actual: `${candidateValidationResult.errors} error(s)`,
     pass: candidateValidationResult.errors === 0
+  });
+
+  // -----------------------------------------------------------------------
+  // Dune Query Connector self-checks (Task 37, Wave 4.6, dune-feature-wave46.md
+  // binding decision 5): "search done, overlap results>0, candidates created
+  // source dune_token_overlap, poisoned overlap wallet present as pending."
+  // -----------------------------------------------------------------------
+  rows.push({
+    check: 'Dune mock overlap search: status done',
+    expected: 'done',
+    actual: duneOverlapSearchResult.status,
+    pass: duneOverlapSearchResult.status === 'done'
+  });
+
+  rows.push({
+    check: 'Dune mock overlap search: overlap wallet results > 0',
+    expected: '> 0',
+    actual: String(duneOverlapSearchResult.walletResultsCreated),
+    pass: duneOverlapSearchResult.walletResultsCreated > 0
+  });
+
+  const duneCandidateCount = await prisma.candidateWallet.count({ where: { source: 'dune_token_overlap' } });
+  rows.push({
+    check: 'CandidateWallet rows created with source=dune_token_overlap',
+    expected: '> 0',
+    actual: String(duneCandidateCount),
+    pass: duneCandidateCount > 0
+  });
+
+  const dunePoisonedSolana = getDunePoisonedAddresses(world, 'SOLANA');
+  const dunePoisonedCandidates = await prisma.candidateWallet.findMany({
+    where: { walletAddress: { in: dunePoisonedSolana.routerOrCex }, chain: 'SOLANA', source: 'dune_token_overlap' }
+  });
+  // The poisoned overlap wallet's terminal state after the (already-ran)
+  // Phase 6.5 validation pass may legitimately be 'rejected' (if it was
+  // picked up in this same pass) — the binding decision's own wording is
+  // "present as pending" describing the state immediately after the overlap
+  // import, before validation runs on it; since this seed script validates
+  // in the SAME pass as every other pending candidate, 'rejected' with the
+  // registry reason is the equally-valid, in fact MORE complete signal that
+  // the trust boundary held (it was never blindly trusted, and validation
+  // correctly caught it) — so this check accepts either 'pending' or
+  // 'rejected', but never 'promoted'.
+  const dunePoisonedNeverPromoted =
+    dunePoisonedCandidates.length > 0 && dunePoisonedCandidates.every((r) => r.validationStatus !== 'promoted');
+  rows.push({
+    check: 'Dune poisoned router/CEX overlap wallet present, never promoted (pending or correctly rejected)',
+    expected: `> 0 rows, none promoted (address(es): ${JSON.stringify(dunePoisonedSolana.routerOrCex)})`,
+    actual: `${dunePoisonedCandidates.length} row(s), statuses: ${dunePoisonedCandidates.map((r) => r.validationStatus).join(', ') || 'none found'}`,
+    pass: dunePoisonedNeverPromoted
+  });
+
+  const duneQuerySourceRow = await prisma.duneQuerySource.findUnique({ where: { name: 'default_token_overlap' } });
+  rows.push({
+    check: 'DuneQuerySource placeholder row seeded (disabled by default)',
+    expected: '1 row, enabled=false',
+    actual: duneQuerySourceRow ? `found, enabled=${duneQuerySourceRow.enabled}` : 'not found',
+    pass: duneQuerySourceRow !== null && duneQuerySourceRow.enabled === false
   });
 
   // Bars recalibrated 2026-07-05 (controller): matched to the Task-4 mock world's real scale
@@ -1984,6 +2151,18 @@ async function main(): Promise<void> {
   await bootstrapExternalWalletSources(settings);
   const externalWalletSourceSyncResult = await seedExternalWalletSourceSync(world, settings);
 
+  // Phase 3.6 (Task 37, Wave 4.6): seed the DuneQuerySource placeholder row,
+  // then run ONE MOCK token-overlap search over 3 real scenario tokens so
+  // `npm run db:seed` populates TokenOverlapSearch/WalletResult/GroupResult +
+  // pending dune_token_overlap CandidateWallet rows out of the box (no live
+  // DUNE_API_KEY required — MockDuneOverlapSource, same
+  // mock-mode-by-default convention as Phase 3.5 above). Its resulting
+  // pending candidates flow into the SAME Phase 6.5 runCandidateValidation
+  // pass every other candidate source's pending rows go through — no
+  // separate validation pass needed for Dune specifically.
+  await bootstrapDuneQuerySource();
+  const duneOverlapSearchResult = await seedDuneOverlapSearch(world);
+
   // Token rows must exist before market snapshots / trades can reference
   // them (Token.chain_address is the FK target) — upsert every mock-world
   // token up front (riskFlags persisted here too, per brief item 8's "persist
@@ -2204,7 +2383,8 @@ async function main(): Promise<void> {
     replayRunResult,
     csvResult.okRows,
     externalWalletSourceSyncResult,
-    candidateValidationResult
+    candidateValidationResult,
+    duneOverlapSearchResult
   );
   printSelfCheckTable(selfCheckRows);
   printSignalSummaryTable(signalsByToken);

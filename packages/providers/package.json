@@ -9,7 +9,8 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@flowradar/core": "*"
+    "@flowradar/core": "*",
+    "zod": "^4.1.13"
   },
   "devDependencies": {
     "@types/node": "^26.1.0"
