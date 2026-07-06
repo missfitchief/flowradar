@@ -1,0 +1,6 @@
+{
+  "_docSource": "LIVE-FETCHED this session (2026-07-06): GET https://api.gopluslabs.io/api/v1/token_security/56?contract_addresses=0xbb4cdb9cbd36b01bd1cbaef60af814a3f6f0ee75 (an address GoPlus doesn't have security data for) -> 200 OK, verbatim response: code=1, message=\"OK\", result={} (empty OBJECT, not null and not a 404) — confirms the not-found case must be handled by checking whether `result[address]` is present, not by response status.",
+  "code": 1,
+  "message": "OK",
+  "result": {}
+}

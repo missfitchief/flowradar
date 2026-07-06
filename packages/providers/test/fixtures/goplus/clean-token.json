@@ -1,0 +1,61 @@
+{
+  "_docSource": "LIVE-FETCHED this session (2026-07-06): GET https://api.gopluslabs.io/api/v1/token_security/56?contract_addresses=0x55d398326f99059ff775485246999027b3197955 (BSC USDT) -> 200 OK, verbatim response captured below (fields present exactly as returned; `holders` array trimmed is NOT applied — kept in full since it was short). Keyless call, no Authorization header sent. code=1/message=\"OK\" confirmed as the success envelope.",
+  "code": 1,
+  "message": "OK",
+  "result": {
+    "0x55d398326f99059ff775485246999027b3197955": {
+      "anti_whale_modifiable": "0",
+      "buy_tax": "0",
+      "can_take_back_ownership": "0",
+      "creator_address": "0x970609ba2c160a1b491b90867681918bdc9773af",
+      "creator_balance": "11035.134730136147970439",
+      "creator_percent": "0.000001",
+      "external_call": "0",
+      "hidden_owner": "0",
+      "holder_count": "0",
+      "holders": [
+        {
+          "address": "0x8894e0a0c962cb723c1976a4421c95949be2d4e3",
+          "tag": "",
+          "is_contract": 0,
+          "balance": "489839919.824614645523598553",
+          "percent": "0.053330467022984795",
+          "is_locked": 0
+        },
+        {
+          "address": "0xf977814e90da44bfa03b6295a0616a897441acec",
+          "tag": "",
+          "is_contract": 0,
+          "balance": "381417668.844837856281186329",
+          "percent": "0.041526183528685136",
+          "is_locked": 0
+        }
+      ],
+      "honeypot_with_same_creator": "0",
+      "is_anti_whale": "0",
+      "is_blacklisted": "0",
+      "is_honeypot": "0",
+      "is_in_dex": "1",
+      "is_mintable": "1",
+      "is_open_source": "1",
+      "is_proxy": "0",
+      "is_whitelisted": "0",
+      "owner_address": "0xf68a4b64162906eff0ff6ae34e2bb1cd42fef62d",
+      "owner_balance": "1502.0092659182822",
+      "owner_change_balance": "0",
+      "owner_percent": "0.0",
+      "personal_slippage_modifiable": "0",
+      "selfdestruct": "0",
+      "sell_tax": "0",
+      "slippage_modifiable": "0",
+      "token_name": "Tether USD",
+      "token_symbol": "USDT",
+      "total_supply": "9184992128.673830666581611222",
+      "trading_cooldown": "0",
+      "transfer_pausable": "0",
+      "transfer_tax": "",
+      "cannot_buy": "0",
+      "trust_list": "1"
+    }
+  }
+}

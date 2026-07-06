@@ -1,0 +1,53 @@
+{
+  "_docSource": "https://docs.etherscan.io/api-reference/endpoint/tokentx.md ('Get a list of BEP-20 Token Transfer Events by Address' — same unified V2 endpoint, chainid=56 for BSC). Response field NAMES (blockNumber, timeStamp, hash, nonce, blockHash, from, contractAddress, to, value, tokenName, tokenSymbol, tokenDecimal, transactionIndex, gas, gasPrice, gasUsed, cumulativeGasUsed, input, methodId, functionName, confirmations) are doc-verified; VALUES are synthetic (one BEP-20 USDT-style transfer INTO the wallet, one OUT of the wallet).",
+  "status": "1",
+  "message": "OK",
+  "result": [
+    {
+      "blockNumber": "41200030",
+      "timeStamp": "1751501500",
+      "hash": "0x4444444444444444444444444444444444444444444444444444444444dddd",
+      "nonce": "10",
+      "blockHash": "0xdddd4444eeee5555ffff6666aaaa7777bbbb8888cccc9999dddd0000eeee1111",
+      "from": "0x11ee22ff33aa44bb55cc66dd77ee88ff99aa00bb",
+      "contractAddress": "0x55d398326f99059ff775485246999027b3197955",
+      "to": "0x9f3a2bcd11ee44ff33aa55bb66cc77dd88ee99f0",
+      "value": "100000000000000000000",
+      "tokenName": "Tether USD",
+      "tokenSymbol": "USDT",
+      "tokenDecimal": "18",
+      "transactionIndex": "2",
+      "gas": "60000",
+      "gasPrice": "3000000000",
+      "gasUsed": "55000",
+      "cumulativeGasUsed": "4567890",
+      "input": "deprecated",
+      "methodId": "0xa9059cbb",
+      "functionName": "transfer(address,uint256)",
+      "confirmations": "499970"
+    },
+    {
+      "blockNumber": "41200040",
+      "timeStamp": "1751502000",
+      "hash": "0x5555555555555555555555555555555555555555555555555555555555eeee",
+      "nonce": "45",
+      "blockHash": "0xeeee5555ffff6666aaaa7777bbbb8888cccc9999dddd0000eeee1111ffff2222",
+      "from": "0x9f3a2bcd11ee44ff33aa55bb66cc77dd88ee99f0",
+      "contractAddress": "0xbb4cdb9cbd36b01bd1cbaef60af814a3f6f0ee75",
+      "to": "0x10ed43c718714eb63d5aa57b78b54704e256024e",
+      "value": "2500000000000000000",
+      "tokenName": "Wrapped BNB",
+      "tokenSymbol": "WBNB",
+      "tokenDecimal": "18",
+      "transactionIndex": "5",
+      "gas": "60000",
+      "gasPrice": "3000000000",
+      "gasUsed": "52000",
+      "cumulativeGasUsed": "5678901",
+      "input": "deprecated",
+      "methodId": "0xa9059cbb",
+      "functionName": "transfer(address,uint256)",
+      "confirmations": "499960"
+    }
+  ]
+}

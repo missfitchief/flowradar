@@ -236,3 +236,103 @@ describe('MOCK_MODE="false" marketData live wiring (Task 28 — DexScreener, key
     expect(solAgain).toBe(sol);
   });
 });
+
+describe('MOCK_MODE="false" BSC live wiring (Task 29 — BscScan + GoPlus)', () => {
+  const ORIGINAL_BSCSCAN_API_KEY = process.env.BSCSCAN_API_KEY;
+  const ORIGINAL_GOPLUS_API_KEY = process.env.GOPLUS_API_KEY;
+
+  beforeEach(() => {
+    resetProviderCache();
+    process.env.MOCK_MODE = 'false';
+  });
+
+  afterEach(() => {
+    resetProviderCache();
+    if (ORIGINAL_MOCK_MODE === undefined) {
+      delete process.env.MOCK_MODE;
+    } else {
+      process.env.MOCK_MODE = ORIGINAL_MOCK_MODE;
+    }
+    if (ORIGINAL_BSCSCAN_API_KEY === undefined) {
+      delete process.env.BSCSCAN_API_KEY;
+    } else {
+      process.env.BSCSCAN_API_KEY = ORIGINAL_BSCSCAN_API_KEY;
+    }
+    if (ORIGINAL_GOPLUS_API_KEY === undefined) {
+      delete process.env.GOPLUS_API_KEY;
+    } else {
+      process.env.GOPLUS_API_KEY = ORIGINAL_GOPLUS_API_KEY;
+    }
+  });
+
+  it('with BSCSCAN_API_KEY set: walletActivity resolves to a BscScan-branded provider, not MockProvider', () => {
+    process.env.BSCSCAN_API_KEY = 'test-bscscan-key';
+
+    let walletActivity: ReturnType<typeof getProvider>;
+    expect(() => {
+      walletActivity = getProvider('BSC', 'walletActivity');
+    }).not.toThrow();
+    expect((walletActivity! as { providerName?: string }).providerName).toBe('BscScan');
+  });
+
+  it('with BSCSCAN_API_KEY absent: walletActivity does not throw and falls back to MockProvider; statuses report missing_key', () => {
+    delete process.env.BSCSCAN_API_KEY;
+
+    let walletActivity: ReturnType<typeof getProvider>;
+    expect(() => {
+      walletActivity = getProvider('BSC', 'walletActivity');
+    }).not.toThrow();
+    expect((walletActivity! as { providerName?: string }).providerName).toBe('MockProvider');
+
+    const statuses = getProviderStatuses();
+    const row = statuses.find((s) => s.chain === 'BSC' && s.capability === 'walletActivity');
+    expect(row, 'expected a BSC walletActivity status row').toBeDefined();
+    expect(row!.mode).toBe('missing_key');
+  });
+
+  it('risk (GoPlus) resolves to a GoPlus-branded provider regardless of GOPLUS_API_KEY (keyless-live)', () => {
+    delete process.env.GOPLUS_API_KEY;
+
+    let risk: ReturnType<typeof getProvider>;
+    expect(() => {
+      risk = getProvider('BSC', 'risk');
+    }).not.toThrow();
+    expect((risk! as { providerName?: string }).providerName).toBe('GoPlus');
+
+    const statuses = getProviderStatuses();
+    const row = statuses.find((s) => s.chain === 'BSC' && s.capability === 'risk');
+    expect(row, 'expected a BSC risk status row').toBeDefined();
+    expect(row!.mode).toBe('live');
+    expect(row!.name).toBe('GoPlus');
+  });
+
+  it('getProviderStatuses reports mode "live" for BSC walletActivity when BSCSCAN_API_KEY is present', () => {
+    process.env.BSCSCAN_API_KEY = 'test-bscscan-key';
+
+    const statuses = getProviderStatuses();
+    const row = statuses.find((s) => s.chain === 'BSC' && s.capability === 'walletActivity');
+    expect(row!.mode).toBe('live');
+    expect(row!.name).toBe('BscScan');
+  });
+
+  it('getProviderStatuses still reports the 3 stub-candidate capabilities (tokenMetadata, walletDiscovery) as stub/missing_key, never "live"', () => {
+    delete process.env.BSCSCAN_API_KEY;
+    const statuses = getProviderStatuses();
+    const tokenMetadataRow = statuses.find((s) => s.chain === 'BSC' && s.capability === 'tokenMetadata');
+    const walletDiscoveryRow = statuses.find((s) => s.chain === 'BSC' && s.capability === 'walletDiscovery');
+    expect(['stub', 'missing_key']).toContain(tokenMetadataRow!.mode);
+    expect(['stub', 'missing_key']).toContain(walletDiscoveryRow!.mode);
+  });
+
+  it('shares the same cached BscScan/GoPlus instances across repeated getProvider calls', () => {
+    process.env.BSCSCAN_API_KEY = 'test-bscscan-key';
+
+    const firstActivity = getProvider('BSC', 'walletActivity');
+    const secondActivity = getProvider('BSC', 'walletActivity');
+    expect(secondActivity).toBe(firstActivity);
+
+    const firstRisk = getProvider('BSC', 'risk');
+    const secondRisk = getProvider('BSC', 'risk');
+    expect(secondRisk).toBe(firstRisk);
+  });
+});

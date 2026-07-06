@@ -1,0 +1,6 @@
+{
+  "_docSource": "Etherscan/BscScan V2 documented 'no transactions found' shape: status \"0\" with message \"No transactions found\" and an empty result array — this is the documented not-an-error empty case (distinct from a real API error, which sets message to something else, e.g. 'NOTOK').",
+  "status": "0",
+  "message": "No transactions found",
+  "result": []
+}

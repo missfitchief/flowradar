@@ -15,16 +15,26 @@
 // Task 27 (Wave 4, Solana): MOCK_MODE="false" + HELIUS_API_KEY present now
 // resolves real Helius adapters for SOLANA's walletActivity/risk
 // capabilities (createHeliusActivityProvider/createHeliusRiskProvider —
-// packages/providers/src/solana/{helius,risk}.ts). Every other
-// (chain, capability) pair (BSC's everything, SOLANA's marketData/
-// tokenMetadata/walletDiscovery) has no live adapter yet, and getProvider
+// packages/providers/src/solana/{helius,risk}.ts). When HELIUS_API_KEY is
+// absent, SOLANA walletActivity/risk fall back to the shared MockProvider
+// (graceful keyless fallback, binding decision 5) while getProviderStatuses()
+// still honestly reports 'missing_key' for those rows — the boot/worker
+// cycle never crashes just because a key wasn't configured.
+//
+// Task 29 (Wave 4, BSC scaffold): MOCK_MODE="false" now also resolves real
+// adapters for BSC: walletActivity via BscScan (Etherscan API V2, chainid=56
+// — createBscScanActivityProvider, key-gated on BSCSCAN_API_KEY, same
+// graceful-keyless-mock-fallback contract as Helius) and risk via GoPlus
+// (createGoPlusRiskProvider — keyless-live, GOPLUS_API_KEY only raises rate
+// limits, never gates it — see bsc/goplus.ts's file header for the
+// live-verified proof). Birdeye/Moralis/Bitquery (bsc/stubs.ts) remain typed
+// stubs, never wired into getProvider — only surfaced via
+// getProviderStatuses() so the Settings page shows the swap-in point. Every
+// other (chain, capability) pair (BSC tokenMetadata/walletDiscovery, SOLANA
+// tokenMetadata/walletDiscovery) still has no live adapter, and getProvider
 // still throws for those in live mode rather than silently mocking (same
 // "fail loudly, use getProviderStatuses() to check first" contract as
-// before). When HELIUS_API_KEY is absent, SOLANA walletActivity/risk fall
-// back to the shared MockProvider (graceful keyless fallback, binding
-// decision 5) while getProviderStatuses() still honestly reports
-// 'missing_key' for those rows — the boot/worker cycle never crashes just
-// because a key wasn't configured.
+// before).
 
 import type { Chain, ProviderStatus } from '@flowradar/core';
 import type { MarketDataProvider, ProviderCapability, ProviderCapabilityMap } from './types';
@@ -34,6 +44,8 @@ import { MockProvider } from './mock/provider';
 import { createHeliusActivityProvider } from './solana/helius';
 import { createHeliusRiskProvider } from './solana/risk';
 import { createDexScreenerProvider } from './market/dexscreener';
+import { createBscScanActivityProvider } from './bsc/bscscan';
+import { createGoPlusRiskProvider } from './bsc/goplus';
 
 const ALL_CAPABILITIES: ProviderCapability[] = [
   'walletActivity',
@@ -126,7 +138,12 @@ function getSharedMockProvider(): MockProvider {
 // mock decision from before the key existed.
 // ---------------------------------------------------------------------------
 
-type LiveCacheKey = 'solana:walletActivity' | 'solana:risk' | 'marketData:dexscreener';
+type LiveCacheKey =
+  | 'solana:walletActivity'
+  | 'solana:risk'
+  | 'marketData:dexscreener'
+  | 'bsc:walletActivity'
+  | 'bsc:risk';
 
 const liveProviderCache = new Map<LiveCacheKey, unknown>();
 
@@ -191,6 +208,47 @@ function getSolanaHeliusOrMockFallback<C extends ProviderCapability>(capability:
 }
 
 /**
+ * BSC walletActivity/risk in live mode (Task 29): mirrors
+ * getSolanaHeliusOrMockFallback's shape exactly, but the two capabilities
+ * have different keyless-ness:
+ *  - walletActivity (BscScan/Etherscan-V2) IS key-gated
+ *    (createBscScanActivityProvider returns null without BSCSCAN_API_KEY) —
+ *    same "graceful keyless fallback to the shared MockProvider" contract as
+ *    Solana's Helius adapters.
+ *  - risk (GoPlus) is NOT key-gated — createGoPlusRiskProvider always
+ *    returns a working provider (GOPLUS_API_KEY only raises rate limits; see
+ *    bsc/goplus.ts's file header for the live-verified keyless-tier proof),
+ *    so it is cached and returned directly, with no null-check/mock-fallback
+ *    branch needed.
+ */
+function getBscLiveOrMockFallback<C extends ProviderCapability>(capability: C): ProviderCapabilityMap[C] | null {
+  if (capability === 'walletActivity') {
+    const cacheKey: LiveCacheKey = 'bsc:walletActivity';
+    const cached = liveProviderCache.get(cacheKey);
+    if (cached) return cached as ProviderCapabilityMap[C];
+
+    const live = createBscScanActivityProvider({ BSCSCAN_API_KEY: process.env.BSCSCAN_API_KEY });
+    if (live) {
+      liveProviderCache.set(cacheKey, live);
+      return live as unknown as ProviderCapabilityMap[C];
+    }
+    return getSharedMockProvider() as unknown as ProviderCapabilityMap[C];
+  }
+
+  if (capability === 'risk') {
+    const cacheKey: LiveCacheKey = 'bsc:risk';
+    const cached = liveProviderCache.get(cacheKey);
+    if (cached) return cached as ProviderCapabilityMap[C];
+
+    const live = createGoPlusRiskProvider({ GOPLUS_API_KEY: process.env.GOPLUS_API_KEY });
+    liveProviderCache.set(cacheKey, live);
+    return live as unknown as ProviderCapabilityMap[C];
+  }
+
+  return null;
+}
+
+/**
  * DexScreener (Task 28): the ONLY capability adapter in this registry that is
  * unconditionally live in non-mock mode, on BOTH chains — no API key gates it
  * (see market/dexscreener.ts's file header). Cached at module scope like the
@@ -220,6 +278,11 @@ function getDexScreenerMarketProvider(): MarketDataProvider {
  *    HELIUS_API_KEY is set, or gracefully fall back to the shared
  *    MockProvider when it's missing (Task 27 — see
  *    getSolanaHeliusOrMockFallback above).
+ *  - BSC's walletActivity resolves to the real BscScan adapter when
+ *    BSCSCAN_API_KEY is set, or gracefully falls back to the shared
+ *    MockProvider when it's missing; BSC's risk always resolves to the real
+ *    GoPlus adapter (keyless-live, Task 29 — see getBscLiveOrMockFallback
+ *    above).
  * Every other (chain, capability) pair has no live adapter yet and still
  * throws rather than silently mocking, so a misconfigured deployment fails
  * loudly instead of pretending to be live. Use `getProviderStatuses()` to
@@ -242,6 +305,11 @@ export function getProvider<C extends ProviderCapability>(
 
   if (chain === 'SOLANA') {
     const resolved = getSolanaHeliusOrMockFallback(capability);
+    if (resolved) return resolved;
+  }
+
+  if (chain === 'BSC') {
+    const resolved = getBscLiveOrMockFallback(capability);
     if (resolved) return resolved;
   }
 
@@ -289,23 +357,46 @@ export function getProviderStatuses(): ProviderStatus[] {
         continue;
       }
 
+      // Task 29: BSC risk (GoPlus) is keyless-live — report 'live'
+      // unconditionally, same treatment as marketData/DexScreener above,
+      // since GOPLUS_API_KEY only raises rate limits and is never required
+      // (see bsc/goplus.ts's file header for the live-verified keyless-tier
+      // proof). This must be checked BEFORE the generic keyEnvVar/hasKey
+      // logic below, which would otherwise report 'missing_key' whenever
+      // GOPLUS_API_KEY is unset.
+      if (chain === 'BSC' && capability === 'risk') {
+        statuses.push({
+          name: 'GoPlus',
+          chain,
+          capability,
+          mode: 'live',
+          note: 'Live GoPlus token_security adapter active (keyless; GOPLUS_API_KEY optional, raises rate limits only).'
+        });
+        continue;
+      }
+
       const keyEnvVar = liveKeyEnvVarFor(chain, capability);
       const hasKey = Boolean(keyEnvVar && process.env[keyEnvVar]);
 
-      // Task 27: SOLANA walletActivity/risk have a real Helius adapter now —
+      // Task 27/29: SOLANA walletActivity/risk (Helius) and BSC
+      // walletActivity (BscScan) have a real, key-gated live adapter now —
       // report 'live' when the key is present instead of the generic
       // "not implemented yet" stub note every other (chain, capability) pair
       // still gets.
-      const hasLiveAdapter = chain === 'SOLANA' && (capability === 'walletActivity' || capability === 'risk');
+      const hasLiveAdapter =
+        (chain === 'SOLANA' && (capability === 'walletActivity' || capability === 'risk')) ||
+        (chain === 'BSC' && capability === 'walletActivity');
       if (hasLiveAdapter) {
+        const note =
+          chain === 'BSC'
+            ? 'Live BscScan adapter active (Etherscan API V2, chainid=56 — txlist + tokentx merged; swap detection is best-effort/deferred, see bscscanMapper.ts).'
+            : 'Live Helius adapter active (Enhanced Transactions API + RPC risk checks).';
         statuses.push({
           name: liveAdapterNameFor(chain, capability),
           chain,
           capability,
           mode: hasKey ? 'live' : 'missing_key',
-          note: hasKey
-            ? 'Live Helius adapter active (Enhanced Transactions API + RPC risk checks).'
-            : `Missing ${keyEnvVar ?? 'required env var'}; falling back to MockProvider (graceful keyless fallback).`
+          note: hasKey ? note : `Missing ${keyEnvVar ?? 'required env var'}; falling back to MockProvider (graceful keyless fallback).`
         });
         continue;
       }

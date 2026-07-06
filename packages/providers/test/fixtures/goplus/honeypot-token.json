@@ -1,0 +1,66 @@
+{
+  "_docSource": "SYNTHESIZED from the doc-verified/live-verified field schema (see clean-token.json fixture for the live-fetched real-token baseline this is derived from) — this fixture's ADDRESS/VALUES are synthetic (a hypothetical high-risk token exercising every danger/warn flag this mapper checks: is_honeypot=1, high buy/sell tax, not open source, cannot_sell_all=1, is_mintable=1 with an active owner, and a concentrated top holder), since a real live example of an active honeypot was not sourced this session (would require finding a currently-live scam contract, which is out of scope for a fixture). Field NAMES and shape are unchanged from the doc/live-verified schema — only which flags are toggled on differs.",
+  "code": 1,
+  "message": "OK",
+  "result": {
+    "0x1234500000000000000000000000000000dead1": {
+      "anti_whale_modifiable": "1",
+      "buy_tax": "0.12",
+      "can_take_back_ownership": "1",
+      "creator_address": "0xaaaa000000000000000000000000000000aaaa",
+      "creator_balance": "0",
+      "creator_percent": "0",
+      "external_call": "1",
+      "hidden_owner": "1",
+      "holder_count": "42",
+      "holders": [
+        {
+          "address": "0xbbbb000000000000000000000000000000bbbb",
+          "tag": "",
+          "is_contract": 1,
+          "balance": "550000000",
+          "percent": "0.55",
+          "is_locked": 0
+        }
+      ],
+      "honeypot_with_same_creator": "1",
+      "is_anti_whale": "1",
+      "is_blacklisted": "1",
+      "is_honeypot": "1",
+      "is_in_dex": "1",
+      "is_mintable": "1",
+      "is_open_source": "0",
+      "is_proxy": "1",
+      "is_whitelisted": "0",
+      "owner_address": "0xcccc000000000000000000000000000000cccc",
+      "owner_balance": "100000000",
+      "owner_change_balance": "1",
+      "owner_percent": "0.1",
+      "personal_slippage_modifiable": "1",
+      "selfdestruct": "0",
+      "sell_tax": "0.99",
+      "slippage_modifiable": "1",
+      "token_name": "Scammy Token",
+      "token_symbol": "SCAM",
+      "total_supply": "1000000000",
+      "trading_cooldown": "1",
+      "transfer_pausable": "1",
+      "transfer_tax": "0.05",
+      "cannot_buy": "0",
+      "cannot_sell_all": "1",
+      "trust_list": "0",
+      "lp_holder_count": "1",
+      "lp_holders": [
+        {
+          "address": "0xdddd000000000000000000000000000000dddd",
+          "tag": "Uniswap V2 LP",
+          "value": "1",
+          "is_locked": 0,
+          "balance": "1000",
+          "percent": "1.0",
+          "NFT_list": null
+        }
+      ]
+    }
+  }
+}
