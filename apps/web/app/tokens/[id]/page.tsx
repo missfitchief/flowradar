@@ -15,6 +15,10 @@ import { RiskPanel } from '@/components/tokens/RiskPanel';
 import type { RiskFlagRow } from '@/components/tokens/RiskPanel';
 import { fmtAge, fmtUsd } from '@/lib/format';
 
+// DB-backed detail page — must render per-request, never freeze at build time
+// (matches every other DB-backed route: /tokens, /flow, /graph, /wallets, …).
+export const dynamic = 'force-dynamic';
+
 interface TokenDetailPageProps {
   params: Promise<{ id: string }>;
 }

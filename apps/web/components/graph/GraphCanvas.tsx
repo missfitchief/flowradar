@@ -76,18 +76,15 @@ const NODE_TYPE_COLOR: Record<GraphNodeType, string> = {
   UNKNOWN: '#6b7280', // gray
 };
 
-const CONFIDENCE_BANDS: [number, string][] = [
-  [80, 'strong'],
-  [60, 'probable'],
-  [30, 'possible'],
-];
-
-export function confidenceBand(confidence: number): string {
-  for (const [min, label] of CONFIDENCE_BANDS) {
-    if (confidence >= min) return label;
-  }
-  return 'weak';
-}
+// Canonical confidence bands live in @flowradar/core (0–30 weak, 31–60
+// possible, 61–80 probable, 81–100 strong). Import + re-export the single
+// source of truth so /graph's ConnectedWallets/Paths tables band a value
+// identically to /flow's Clusters/Bridges/Rotations tables — a locally-forked
+// copy here previously diverged at every boundary (whole-branch review
+// finding). Imported (not a bare re-export) because this module also calls it
+// directly in the node-detail panel below.
+import { confidenceBand } from '@flowradar/core';
+export { confidenceBand };
 
 /** sqrt-scaled node diameter from total flow (sent + received), clamped 16-60px. */
 function nodeSizeFor(totalFlowUsd: number, maxFlowUsd: number): number {
