@@ -185,3 +185,54 @@ describe('MOCK_MODE="false" live wiring (Task 27 review — Important #1/#2)', (
     expect(secondRisk).toBe(firstRisk);
   });
 });
+
+describe('MOCK_MODE="false" marketData live wiring (Task 28 — DexScreener, keyless)', () => {
+  beforeEach(() => {
+    resetProviderCache();
+    process.env.MOCK_MODE = 'false';
+    delete process.env.BIRDEYE_API_KEY;
+  });
+
+  afterEach(() => {
+    resetProviderCache();
+    if (ORIGINAL_MOCK_MODE === undefined) {
+      delete process.env.MOCK_MODE;
+    } else {
+      process.env.MOCK_MODE = ORIGINAL_MOCK_MODE;
+    }
+  });
+
+  it('resolves marketData without throwing on SOLANA even with no API key set (keyless adapter)', () => {
+    let marketData: ReturnType<typeof getProvider>;
+    expect(() => {
+      marketData = getProvider('SOLANA', 'marketData');
+    }).not.toThrow();
+    expect(marketData!).toBeDefined();
+  });
+
+  it('resolves marketData without throwing on BSC too (same keyless adapter serves both chains)', () => {
+    let marketData: ReturnType<typeof getProvider>;
+    expect(() => {
+      marketData = getProvider('BSC', 'marketData');
+    }).not.toThrow();
+    expect(marketData!).toBeDefined();
+  });
+
+  it('getProviderStatuses reports mode "live" for marketData on both chains, regardless of any key', () => {
+    const statuses = getProviderStatuses();
+    const solanaRow = statuses.find((s) => s.chain === 'SOLANA' && s.capability === 'marketData');
+    const bscRow = statuses.find((s) => s.chain === 'BSC' && s.capability === 'marketData');
+    expect(solanaRow!.mode).toBe('live');
+    expect(solanaRow!.name).toBe('DexScreener');
+    expect(bscRow!.mode).toBe('live');
+    expect(bscRow!.name).toBe('DexScreener');
+  });
+
+  it('shares the same cached DexScreener instance across chains and repeated calls', () => {
+    const sol = getProvider('SOLANA', 'marketData');
+    const bsc = getProvider('BSC', 'marketData');
+    const solAgain = getProvider('SOLANA', 'marketData');
+    expect(bsc).toBe(sol);
+    expect(solAgain).toBe(sol);
+  });
+});

@@ -27,12 +27,13 @@
 // because a key wasn't configured.
 
 import type { Chain, ProviderStatus } from '@flowradar/core';
-import type { ProviderCapability, ProviderCapabilityMap } from './types';
+import type { MarketDataProvider, ProviderCapability, ProviderCapabilityMap } from './types';
 import { createMockWorld } from './mock/world';
 import type { MockWorld } from './mock/world';
 import { MockProvider } from './mock/provider';
 import { createHeliusActivityProvider } from './solana/helius';
 import { createHeliusRiskProvider } from './solana/risk';
+import { createDexScreenerProvider } from './market/dexscreener';
 
 const ALL_CAPABILITIES: ProviderCapability[] = [
   'walletActivity',
@@ -125,7 +126,7 @@ function getSharedMockProvider(): MockProvider {
 // mock decision from before the key existed.
 // ---------------------------------------------------------------------------
 
-type LiveCacheKey = 'solana:walletActivity' | 'solana:risk';
+type LiveCacheKey = 'solana:walletActivity' | 'solana:risk' | 'marketData:dexscreener';
 
 const liveProviderCache = new Map<LiveCacheKey, unknown>();
 
@@ -190,18 +191,39 @@ function getSolanaHeliusOrMockFallback<C extends ProviderCapability>(capability:
 }
 
 /**
+ * DexScreener (Task 28): the ONLY capability adapter in this registry that is
+ * unconditionally live in non-mock mode, on BOTH chains — no API key gates it
+ * (see market/dexscreener.ts's file header). Cached at module scope like the
+ * Helius live providers, so every getProvider('marketData') call across both
+ * chains shares one rate limiter instance.
+ */
+function getDexScreenerMarketProvider(): MarketDataProvider {
+  const cacheKey: LiveCacheKey = 'marketData:dexscreener';
+  const cached = liveProviderCache.get(cacheKey);
+  if (cached) return cached as MarketDataProvider;
+
+  const live = createDexScreenerProvider();
+  liveProviderCache.set(cacheKey, live);
+  return live;
+}
+
+/**
  * Resolves a provider implementation for `capability` on `chain`. In
  * MOCK_MODE (default), every capability resolves to the shared MockProvider,
  * which implements all five capability interfaces against one MockWorld.
  *
- * Live mode (MOCK_MODE="false"): SOLANA's walletActivity/risk resolve to the
- * real Helius adapter when HELIUS_API_KEY is set, or gracefully fall back to
- * the shared MockProvider when it's missing (Task 27 — see
- * getSolanaHeliusOrMockFallback above). Every other (chain, capability) pair
- * has no live adapter yet and still throws rather than silently mocking, so
- * a misconfigured deployment fails loudly instead of pretending to be live.
- * Use `getProviderStatuses()` to check `mode` before calling `getProvider` in
- * live mode.
+ * Live mode (MOCK_MODE="false"):
+ *  - `marketData` on EITHER chain always resolves to the live, keyless
+ *    DexScreener adapter (Task 28) — no fallback needed since it can't be
+ *    missing a key.
+ *  - SOLANA's walletActivity/risk resolve to the real Helius adapter when
+ *    HELIUS_API_KEY is set, or gracefully fall back to the shared
+ *    MockProvider when it's missing (Task 27 — see
+ *    getSolanaHeliusOrMockFallback above).
+ * Every other (chain, capability) pair has no live adapter yet and still
+ * throws rather than silently mocking, so a misconfigured deployment fails
+ * loudly instead of pretending to be live. Use `getProviderStatuses()` to
+ * check `mode` before calling `getProvider` in live mode.
  */
 export function getProvider<C extends ProviderCapability>(
   chain: Chain,
@@ -212,6 +234,10 @@ export function getProvider<C extends ProviderCapability>(
     // narrows the shared instance to the specific capability the caller asked
     // for (identical object, capability-shaped view).
     return getSharedMockProvider() as unknown as ProviderCapabilityMap[C];
+  }
+
+  if (capability === 'marketData') {
+    return getDexScreenerMarketProvider() as unknown as ProviderCapabilityMap[C];
   }
 
   if (chain === 'SOLANA') {
@@ -244,6 +270,21 @@ export function getProviderStatuses(): ProviderStatus[] {
           capability,
           mode: 'mock',
           note: 'MOCK_MODE active — serving deterministic mock world'
+        });
+        continue;
+      }
+
+      // Task 28: marketData is keyless-live on BOTH chains (DexScreener) —
+      // report 'live' unconditionally, before any env-key lookup, since no
+      // env var gates this capability at all (a `missing_key` row here would
+      // be actively wrong: there's no key to be missing).
+      if (capability === 'marketData') {
+        statuses.push({
+          name: 'DexScreener',
+          chain,
+          capability,
+          mode: 'live',
+          note: 'Live DexScreener adapter active (keyless, ~300 req/min) — holderCount is not provided by this API and is always null.'
         });
         continue;
       }

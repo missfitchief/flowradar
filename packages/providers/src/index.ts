@@ -17,3 +17,5 @@ export * from './registryData';
 export * from './solana/helius';
 export * from './solana/heliusMapper';
 export * from './solana/risk';
+export * from './market/dexscreener';
+export * from './market/dexscreenerMapper';
