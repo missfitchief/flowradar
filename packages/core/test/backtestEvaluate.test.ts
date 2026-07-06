@@ -133,6 +133,29 @@ describe('evaluateSignalOutcome — label taxonomy automaton', () => {
     expect(result.label).toBe('hard_failure');
   });
 
+  it(
+    '(e2) 2x already reached at t+2h, THEN liquidity collapses 100k -> 500 at t+6h => good_win, NOT hard_failure — ' +
+      'the !hit2xSoFar guard means a liquidity rug AFTER the trader already had a real exit opportunity at 2x does ' +
+      'not retroactively punish the signal: step (a)\'s hard-failure liquidity check only arms while hit2xSoFar is ' +
+      'still false, so once 2x has been crossed (at t+2h here), a later collapse (t+6h) is no longer eligible to ' +
+      'flip hardFailureTriggered, and goodWinLocked (already true from the t+2h crossing) stands',
+    () => {
+      const series: MarketPoint[] = [
+        point(0, ENTRY_PRICE, { liquidityUsd: 100_000 }),
+        point(120, 2.0, { liquidityUsd: 90_000 }), // 2x at t+2h, trader had a real exit chance here
+        point(360, 1.8, { liquidityUsd: 500 }) // liquidity collapses 100k -> 500 at t+6h, AFTER the 2x
+      ];
+      const result = evaluateSignalOutcome({
+        triggeredAt: TRIGGER,
+        entryPriceUsd: ENTRY_PRICE,
+        entryMcapUsd: ENTRY_MCAP,
+        series
+      });
+      expect(result.label).toBe('good_win');
+      expect(result.hit2x).toBe(true);
+    }
+  );
+
   it('(f) +30% flat, never crosses +50% or -50% => neutral_pending', () => {
     const series: MarketPoint[] = [point(0, ENTRY_PRICE), point(60, 1.2), point(120, 1.3), point(180, 1.25)];
     const result = evaluateSignalOutcome({

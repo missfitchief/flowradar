@@ -25,6 +25,19 @@
 // hence how much a consumer should TRUST an unrealized non-hit as a genuine
 // miss) differs.
 //
+// Synthetic-provenance `notes` marker (Task 40 fix pass — machine-detectable
+// synthetic provenance): if ANY TokenMarketSnapshot in the series this pass
+// evaluated for a signal carries `source: 'seed_synthetic_continuation'`
+// (currently only ever written by seed.ts's seedBacktestContinuation),
+// `synthetic_continuation` is appended to that signal's every BacktestResult
+// row's `notes` (comma-joined with `window_incomplete` when both apply, e.g.
+// `'window_incomplete,synthetic_continuation'`). This lets a downstream
+// consumer (Task 42's pages) filter out — or clearly flag — any backtest
+// result that was only ever evaluated against fabricated seed-script market
+// data, at either the TokenMarketSnapshot layer (query by `source`) or the
+// BacktestResult layer (query/parse `notes`) without needing to join back to
+// the snapshot rows themselves.
+//
 // `outcomeLabel`/`hitPlus50`/`hit2x`/`hit5x`/`hit10x`/`timeToPeakMin`/`basis`
 // are SERIES-LEVEL (not per-horizon — see evaluate.ts's automaton, which
 // walks the full available series once) and are therefore repeated
@@ -111,19 +124,36 @@ async function findEntryPriceUsd(prisma: PrismaClient, tokenId: string, triggere
   return asOf ? Number(asOf.priceUsd) : null;
 }
 
-/** The full TokenMarketSnapshot series for tokenId from triggeredAt through now (inclusive), converted to @flowradar/core's MarketPoint shape (Decimal -> number). */
-async function loadSeries(prisma: PrismaClient, tokenId: string, triggeredAt: Date, now: Date): Promise<MarketPoint[]> {
+const SYNTHETIC_CONTINUATION_SOURCE = 'seed_synthetic_continuation';
+
+/** The full TokenMarketSnapshot series for tokenId from triggeredAt through now (inclusive), converted to @flowradar/core's MarketPoint shape (Decimal -> number), plus whether ANY row in that series carries the synthetic-continuation source marker. */
+async function loadSeries(
+  prisma: PrismaClient,
+  tokenId: string,
+  triggeredAt: Date,
+  now: Date
+): Promise<{ points: MarketPoint[]; hasSyntheticContinuation: boolean }> {
   const rows = await prisma.tokenMarketSnapshot.findMany({
     where: { tokenId, ts: { gte: triggeredAt, lte: now } },
     orderBy: { ts: 'asc' },
-    select: { ts: true, priceUsd: true, marketCapUsd: true, liquidityUsd: true }
+    select: { ts: true, priceUsd: true, marketCapUsd: true, liquidityUsd: true, source: true }
   });
-  return rows.map((r) => ({
+  const points = rows.map((r) => ({
     ts: r.ts,
     priceUsd: Number(r.priceUsd),
     mcapUsd: r.marketCapUsd !== null ? Number(r.marketCapUsd) : null,
     liquidityUsd: r.liquidityUsd !== null ? Number(r.liquidityUsd) : null
   }));
+  const hasSyntheticContinuation = rows.some((r) => r.source === SYNTHETIC_CONTINUATION_SOURCE);
+  return { points, hasSyntheticContinuation };
+}
+
+/** Joins the completeness note (if any) with the synthetic-provenance note (if any) into BacktestResult.notes — comma-joined when both apply, null when neither does. */
+function buildNotes(complete: boolean, hasSyntheticContinuation: boolean): string | null {
+  const parts: string[] = [];
+  if (!complete) parts.push('window_incomplete');
+  if (hasSyntheticContinuation) parts.push('synthetic_continuation');
+  return parts.length > 0 ? parts.join(',') : null;
 }
 
 /** True when triggeredAt + horizonMinutes has fully elapsed relative to `now`. */
@@ -148,7 +178,7 @@ export async function runBacktestPass(prisma: PrismaClient, _settings: Settings,
   const labelCounts: Record<string, number> = {};
 
   for (const signal of eligible) {
-    const [entryPriceUsd, series] = await Promise.all([
+    const [entryPriceUsd, { points: series, hasSyntheticContinuation }] = await Promise.all([
       findEntryPriceUsd(prisma, signal.tokenId, signal.triggeredAt),
       loadSeries(prisma, signal.tokenId, signal.triggeredAt, now)
     ]);
@@ -167,7 +197,7 @@ export async function runBacktestPass(prisma: PrismaClient, _settings: Settings,
     for (const horizon of ALL_HORIZONS) {
       const horizonResult = outcome.horizons[horizon];
       const complete = horizonElapsed(signal.triggeredAt, horizon, now);
-      const notes = complete ? null : 'window_incomplete';
+      const notes = buildNotes(complete, hasSyntheticContinuation);
 
       await prisma.backtestResult.upsert({
         where: { signalId_horizon: { signalId: signal.id, horizon } },

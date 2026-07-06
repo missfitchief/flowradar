@@ -505,12 +505,22 @@ function assertNever(value: never): never {
  * marketCapUsd/fdvUsd/liquidityUsd/holderCount are nullable (a provider may
  * genuinely not know a value) but the corresponding schema columns are
  * non-nullable Decimal/Int — null is coerced to 0 (see file header).
+ *
+ * `source` (Task 40 fix pass — machine-detectable synthetic provenance)
+ * defaults to `'ingest'`, the correct value for every real call site in this
+ * codebase (the live worker's polling loop, and the seed script's Phase 4
+ * up-front market-series write). The only caller that ever overrides it is
+ * seed.ts's seedBacktestContinuation, which passes
+ * `'seed_synthetic_continuation'` so downstream consumers (runBacktestPass,
+ * and eventually T42's pages) can programmatically distinguish real market
+ * data from this seed-only device — see that function's own doc comment.
  */
 export async function snapshotMarket(
   prisma: PrismaClient,
   tokenId: string,
   market: TokenMarket,
-  ts: Date
+  ts: Date,
+  source: string = 'ingest'
 ): Promise<void> {
   await prisma.tokenMarketSnapshot.create({
     data: {
@@ -524,7 +534,8 @@ export async function snapshotMarket(
       vol1h: market.vol1h,
       vol6h: market.vol6h,
       vol24h: market.vol24h,
-      holderCount: market.holderCount ?? 0
+      holderCount: market.holderCount ?? 0,
+      source
     }
   });
 }

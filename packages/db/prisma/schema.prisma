@@ -322,6 +322,14 @@ model TokenMarketSnapshot {
   vol6h          Decimal  @db.Decimal(20, 4)
   vol24h         Decimal  @db.Decimal(20, 4)
   holderCount    Int
+  /// Task 40 fix pass — machine-detectable synthetic provenance. 'ingest'
+  /// (default) for every real provider-sourced snapshot; snapshotMarket's
+  /// callers can pass an explicit override — currently only
+  /// seed.ts's seedBacktestContinuation, which writes
+  /// 'seed_synthetic_continuation' on every row it creates. runBacktestPass
+  /// checks this column to flag BacktestResult rows evaluated over a
+  /// synthetic-containing series (see backtest.ts).
+  source         String   @default("ingest")
 
   token          Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
 

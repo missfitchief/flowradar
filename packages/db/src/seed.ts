@@ -303,8 +303,45 @@ function seededRng(seedStr: string): () => number {
  * evaluate.ts/backtest.ts headers), it does NOT claim FlowRadar's rules have
  * real trading edge; these synthetic continuations are labeled as such in
  * this comment for exactly that reason.
+ *
+ * Machine-detectable provenance (Task 40 fix pass): every row this function
+ * writes is passed source='seed_synthetic_continuation' (see
+ * snapshotMarket's `source` param) instead of the 'ingest' default every real
+ * TokenMarketSnapshot row gets — so runBacktestPass (and eventually T42's
+ * pages) can programmatically tell "real market data" from "this seed-only
+ * device" at the row level, not just via this comment. Downstream,
+ * runBacktestPass appends 'synthetic_continuation' to BacktestResult.notes
+ * for any signal whose evaluated series contains >=1 such row.
+ *
+ * Defense-in-depth guard: this function throws unless called with
+ * `{ allowSynthetic: true }` AND `process.env.MOCK_MODE !== 'false'` — see
+ * the two checks at the top of the function body. Only this file's own
+ * main() passes the flag; nothing else in the codebase (worker jobs, API
+ * routes) has any legitimate reason to fabricate synthetic market data, so an
+ * accidental call from anywhere else fails loudly instead of silently
+ * writing fake rows into a real deployment's data.
  */
-async function seedBacktestContinuation(tokenIdByAddress: Map<string, string>, world: MockWorld): Promise<{ tokensExtended: number; snapshotsWritten: number }> {
+export async function seedBacktestContinuation(
+  tokenIdByAddress: Map<string, string>,
+  world: MockWorld,
+  options: { allowSynthetic: boolean }
+): Promise<{ tokensExtended: number; snapshotsWritten: number }> {
+  if (!options.allowSynthetic) {
+    throw new Error(
+      'seedBacktestContinuation writes DELIBERATELY SYNTHETIC market data and must only be ' +
+        'called with { allowSynthetic: true } — refusing to run without it (defense-in-depth ' +
+        'guard, Task 40 fix pass: nothing but this file\'s own seed main() should ever call this).'
+    );
+  }
+  if (process.env.MOCK_MODE === 'false') {
+    throw new Error(
+      'seedBacktestContinuation refuses to run when MOCK_MODE=\'false\' — synthetic continuation ' +
+        'data must never be written against a real (non-mock) deployment (defense-in-depth guard, ' +
+        'Task 40 fix pass).'
+    );
+  }
+
+  const SYNTHETIC_SOURCE = 'seed_synthetic_continuation';
   const CONTINUATION_HOURS = 7 * 24; // 7 days, matching BacktestHorizon's longest window (D7)
   const HOUR = 60 * 60 * 1000;
   const RAMP_HOURS = 30; // hours to reach targetMultiple, then hold with noise for the remainder
@@ -413,7 +450,8 @@ async function seedBacktestContinuation(tokenIdByAddress: Map<string, string>, w
           vol24h: 0,
           holderCount: null
         },
-        ts
+        ts,
+        SYNTHETIC_SOURCE
       );
       snapshotsWritten += 1;
     }
@@ -1376,7 +1414,7 @@ async function main(): Promise<void> {
   // below would legitimately see an empty post-trigger series for every
   // signal. Must run AFTER the signal-detection passes above (it reads
   // Signal.triggeredAt/mcapAtTrigger).
-  const continuationResult = await seedBacktestContinuation(tokenIdByAddress, world);
+  const continuationResult = await seedBacktestContinuation(tokenIdByAddress, world, { allowSynthetic: true });
   log('seeded post-signal price continuation for backtest evaluation.', continuationResult);
 
   // Phase 7.95: backtest pass (Task 40 binding decision 3) — shared body with
@@ -1427,11 +1465,18 @@ async function main(): Promise<void> {
   }
 }
 
-main()
-  .catch((err) => {
-    console.error('[seed] fatal error:', err);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+// Guarded so this file is safely importable (e.g. by
+// packages/db/test/backtest.test.ts, which imports seedBacktestContinuation
+// to test its defense-in-depth guard) without triggering a full seed run as
+// a side effect of the import — `npm run db:seed`'s `tsx src/seed.ts`
+// invocation is still the only thing that ever sets import.meta.main here.
+if (import.meta.main) {
+  main()
+    .catch((err) => {
+      console.error('[seed] fatal error:', err);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await prisma.$disconnect();
+    });
+}
