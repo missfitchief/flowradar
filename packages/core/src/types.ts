@@ -155,6 +155,17 @@ export interface TokenWindowAggregate {
   buySellRatio: number;
   smartWalletCount: number;
   humanLikeCount: number;
+  /**
+   * Count of buyers whose `labels` include 'human_like' OR 'smart_money'
+   * (union, not the human_like-only count). Task 15 fix: the product brief's
+   * Rule C contract is "70%+ buying wallets are human_like OR smart_money" —
+   * `humanLikeCount` alone under-counts scenarios whose smart cohort is
+   * split across both labels (e.g. NOVA), so Rule C reads THIS field for its
+   * ratio instead. `humanLikeCount` itself is UNCHANGED (flowScore.ts's
+   * humanRatio component still reads humanLikeCount verbatim — do not
+   * conflate the two).
+   */
+  humanOrSmartLabelCount: number;
   possibleBotCount: number;
   whaleBuys: { walletId: string; usd: number }[];
   uniqueEntityCount: number;
@@ -178,7 +189,22 @@ export interface TokenWindowAggregate {
   trailingBuyVolumeUsd: number;
   /** Alias for trackedBuyVolumeUsd, exposed under the name Rule A's inflow-spike comparison reads most naturally. */
   windowBuyVolumeUsd: number;
+  /**
+   * % of SMART holders-at-window-start (net BUY-SELL position > 0 built
+   * from all trades strictly before `from`) whose in-window sells reach
+   * >= 80% of that pre-window position, unioned with smart buyers who had
+   * no pre-window position but bought-and-dumped >= 80% within the window
+   * itself. Task 15 Fix B — holder-based (not window-buyer-based); see
+   * window/aggregate.ts's `exitedSmartPct` derivation comment for the full
+   * rationale (this replaces a prior window-buy-relative measure that could
+   * never detect a scripted accumulate-then-dump-much-later pattern).
+   */
   exitedSmartPct: number;
+  /**
+   * Among the top-5 holders-at-window-start by pre-window net USD position
+   * (not smart-restricted), count who sold >= 80% of that position
+   * in-window. Task 15 Fix B — holder-based, see `exitedSmartPct` above.
+   */
   topHolderExits: number;
   newSmartBuyers: number;
   /**

@@ -36,6 +36,11 @@
 //     entry position within this window). firstBuyTs/blockOrSlot are the
 //     EARLIEST in-window BUY only.
 //   - smartWalletCount = buyers where isWatched OR meetsProfitable (union).
+//   - humanOrSmartLabelCount (Task 15 Fix A): buyers whose labels include
+//     'human_like' OR 'smart_money' (union) — feeds Rule C's ratio per the
+//     product brief's literal "70%+ buying wallets are human_like OR
+//     smart_money" contract. Distinct from humanLikeCount (human_like-only,
+//     unchanged, still feeds flowScore.ts's humanRatio component).
 //   - whaleBuys: per-wallet MAX single BUY trade amountUsd, only wallets
 //     whose max reaches $10,000 (Task 13 threshold, hardcoded — this is a
 //     structural definition of "whale buy", not a tunable Settings knob;
@@ -68,22 +73,22 @@
 //     (i.e. [from - windowMinutes, from)). windowBuyVolumeUsd is simply an
 //     alias for trackedBuyVolumeUsd exposed under the name Rule A's
 //     comparison reads most naturally.
-//   - exitedSmartPct: % of SMART buyers (this window's buyers who are
-//     watched/profitable) who sold >= 80% of their OWN window buyUsd.
-//     Simplification (documented): this is a WINDOW-buy-relative measure,
-//     not a full historical position measure — a smart wallet whose only
-//     window activity is a partial sell of a pre-window position is not
-//     represented here at all (it isn't a "buyer" this window), and a smart
-//     buyer who bought $100 this window then sold $500 (from an older
-//     position) reads as "sold 500% of window buy", i.e. comfortably over
-//     the 80% floor — a deliberate, documented approximation matching the
-//     task brief's "keep to window buyers" instruction. 0 smart buyers => 0
-//     (no divide-by-zero).
-//   - topHolderExits: among the top-5 buyers BY buyUsd (ties broken by
-//     insertion/trade order — see implementation), count how many sold >=
-//     80% of their OWN buyUsd. NOT restricted to "smart" buyers (rule G's
-//     brief context talks about "top holders" generally, not smart-money
-//     specifically).
+//   - exitedSmartPct / topHolderExits (Task 15 Fix B — HOLDER-based, not
+//     window-buyer-based; full derivation + rationale in the implementation
+//     block below, this is a summary): preWindowNetUsd[wallet] = net
+//     BUY-SELL USD across ALL trades strictly BEFORE `from`; a wallet with
+//     preWindowNetUsd > 0 is a "holder at window start". exitedSmartPct = %
+//     of SMART holders-at-window-start (isWatched OR meetsProfitable) whose
+//     IN-WINDOW sellUsd >= 80% of their preWindowNetUsd, UNIONED with smart
+//     buyers who have NO pre-window position but bought-and-dumped >= 80%
+//     of that same window's buy within the window itself (a legitimate
+//     exit the pure holder-based measure would otherwise miss for a
+//     brand-new in-window position). topHolderExits = among the top-5
+//     holders-at-window-start BY preWindowNetUsd (not smart-restricted),
+//     count who sold >= 80% of that position in-window — this one stays
+//     purely holder-based (a zero-pre-window-position wallet has nothing to
+//     rank by). Both are 0 when their respective population is empty (no
+//     divide-by-zero).
 //   - newSmartBuyers: smart buyers whose in-window firstBuyTs equals their
 //     FIRST TRADE EVER across the entire `trades` input (i.e. this window's
 //     buy is the first time this wallet has ever traded, full stop — not
@@ -268,6 +273,14 @@ export function aggregateWindow(input: AggregateWindowInput): TokenWindowAggrega
   const smartWalletCount = smartBuyerIds.length;
 
   const humanLikeCount = buyers.filter((b) => b.labels.includes('human_like')).length;
+  // Union (OR), not the human_like-only count — Task 15 Fix A: Rule C's
+  // contract is "70%+ buying wallets are human_like OR smart_money", which
+  // humanLikeCount alone cannot represent for scenarios whose smart cohort
+  // is split across both labels. humanLikeCount itself stays untouched
+  // (flowScore.ts's humanRatio component depends on it as-is).
+  const humanOrSmartLabelCount = buyers.filter(
+    (b) => b.labels.includes('human_like') || b.labels.includes('smart_money')
+  ).length;
   const possibleBotCount = buyers.filter((b) => b.labels.includes('possible_bot')).length;
 
   // -- whaleBuys -----------------------------------------------------------
@@ -344,24 +357,91 @@ export function aggregateWindow(input: AggregateWindowInput): TokenWindowAggrega
   }
   const inflowSpike = trailingBuyVolumeUsd > 0 && windowBuyVolumeUsd >= inflowSpikeMult * trailingBuyVolumeUsd;
 
-  // -- exitedSmartPct --------------------------------------------------------
-  const exitedSmartCount = smartBuyerIds.filter((walletId) => {
-    const acc = accByWallet.get(walletId)!;
-    return acc.buyUsd > 0 && (acc.sellUsd / acc.buyUsd) * 100 >= EXIT_POSITION_SOLD_PCT;
-  }).length;
-  const exitedSmartPct = smartBuyerIds.length > 0 ? (exitedSmartCount / smartBuyerIds.length) * 100 : 0;
+  // -- exitedSmartPct / topHolderExits (Task 15 Fix B: HOLDER-based, not
+  // window-buyer-based) -----------------------------------------------------
+  //
+  // Bug this replaces: the prior implementation measured "% of window BUYERS
+  // who sold >= 80% of their OWN window buyUsd" — a wallet whose accumulation
+  // buys sit entirely BEFORE `from` (any window position opened earlier than
+  // the lookback) was never a "buyer" this window at all, so a scripted
+  // accumulate-then-dump-much-later scenario (buys ~60h before the sell
+  // burst, e.g. $DUMP) could never contribute to either metric: its sellers
+  // have zero in-window BUY, so they were invisible to the old buyer-keyed
+  // population. Rule G's exit disjuncts could then never fire for exactly
+  // the pattern they exist to detect.
+  //
+  // Fix: define the exit population from PRE-WINDOW POSITION instead of
+  // in-window buying activity.
+  //   preWindowNetUsd[wallet] = sum(BUY.amountUsd) - sum(SELL.amountUsd)
+  //     over ALL trades (in the full, unfiltered `trades` input) strictly
+  //     BEFORE `from` (not clipped to `wallets`/`buyers` — any wallet that
+  //     traded this token pre-window can be a "holder").
+  //   holdersAtWindowStart = wallets with preWindowNetUsd > 0 (a real net
+  //     position going into the window, on a USD basis per the brief).
+  //   exitedSmartPct = % of SMART holders-at-window-start (isWatched OR
+  //     meetsProfitable, same union `isSmart` uses elsewhere in this file)
+  //     whose IN-WINDOW sellUsd >= 80% of their preWindowNetUsd.
+  //   topHolderExits = among the top-5 holders-at-window-start BY
+  //     preWindowNetUsd (descending, NOT restricted to smart — mirrors the
+  //     prior implementation's "not smart-specific" framing for this
+  //     metric), count how many sold >= 80% of that pre-window position
+  //     in-window.
+  //
+  // Union addition (documented per the brief): a SMART wallet whose FIRST
+  // activity on this token is inside the window itself (preWindowNetUsd <= 0
+  // -- it holds no pre-window position, so it can never appear in
+  // holdersAtWindowStart) but who buys AND then dumps >= 80% of that SAME
+  // window's buy within the window is a legitimate "exited" pattern the
+  // pure holder-based definition would otherwise structurally miss (a
+  // brand-new position opened and fully exited within one window). This is
+  // the ORIGINAL window-relative definition, kept as a second population
+  // unioned into exitedSmartPct's numerator/denominator alongside the new
+  // holder-based population (topHolderExits stays holder-only — a
+  // zero-pre-window-position wallet has no "pre-window net position" to
+  // rank by, so it cannot naturally join a "top-5 by pre-window position"
+  // ordering; see this metric's own definition above).
+  const preWindowNetUsdByWallet = new Map<string, number>();
+  for (const t of trades) {
+    if (t.ts.getTime() >= from.getTime()) continue; // strictly BEFORE `from`
+    const current = preWindowNetUsdByWallet.get(t.walletId) ?? 0;
+    preWindowNetUsdByWallet.set(t.walletId, current + (t.action === 'BUY' ? t.amountUsd : -t.amountUsd));
+  }
 
-  // -- topHolderExits ----------------------------------------------------
-  const buyersByBuyUsdDesc = [...buyerWalletIds].sort((a, b) => {
-    const bBuy = accByWallet.get(b)!.buyUsd;
-    const aBuy = accByWallet.get(a)!.buyUsd;
-    return bBuy - aBuy;
-  });
-  const topHolders = buyersByBuyUsdDesc.slice(0, TOP_HOLDER_COUNT);
-  const topHolderExits = topHolders.filter((walletId) => {
-    const acc = accByWallet.get(walletId)!;
-    return acc.buyUsd > 0 && (acc.sellUsd / acc.buyUsd) * 100 >= EXIT_POSITION_SOLD_PCT;
-  }).length;
+  const holdersAtWindowStart = [...preWindowNetUsdByWallet.entries()]
+    .filter(([, netUsd]) => netUsd > 0)
+    .map(([walletId, netUsd]) => ({ walletId, netUsd }));
+
+  const inWindowSellUsd = (walletId: string): number => accByWallet.get(walletId)?.sellUsd ?? 0;
+
+  const smartHolderExitedIds = new Set(
+    holdersAtWindowStart
+      .filter(({ walletId }) => isSmart(walletId))
+      .filter(({ walletId, netUsd }) => (inWindowSellUsd(walletId) / netUsd) * 100 >= EXIT_POSITION_SOLD_PCT)
+      .map(({ walletId }) => walletId)
+  );
+  const smartHolderIds = new Set(holdersAtWindowStart.filter(({ walletId }) => isSmart(walletId)).map((h) => h.walletId));
+
+  // Union addition: smart buyers with NO pre-window position (not already in
+  // smartHolderIds) whose window buyUsd was itself >= 80% sold within the
+  // SAME window (the original window-relative "exited" definition).
+  const smartWindowOnlyExitedIds = new Set(
+    smartBuyerIds.filter((walletId) => {
+      if (smartHolderIds.has(walletId)) return false; // already counted via the holder-based population
+      const acc = accByWallet.get(walletId)!;
+      return acc.buyUsd > 0 && (acc.sellUsd / acc.buyUsd) * 100 >= EXIT_POSITION_SOLD_PCT;
+    })
+  );
+  const smartWindowOnlyIds = new Set(smartBuyerIds.filter((walletId) => !smartHolderIds.has(walletId)));
+
+  const exitedSmartDenominator = smartHolderIds.size + smartWindowOnlyIds.size;
+  const exitedSmartNumerator = smartHolderExitedIds.size + smartWindowOnlyExitedIds.size;
+  const exitedSmartPct = exitedSmartDenominator > 0 ? (exitedSmartNumerator / exitedSmartDenominator) * 100 : 0;
+
+  // -- topHolderExits (pure holder-based; see comment block above) ---------
+  const topHoldersByPreWindowNet = [...holdersAtWindowStart].sort((a, b) => b.netUsd - a.netUsd).slice(0, TOP_HOLDER_COUNT);
+  const topHolderExits = topHoldersByPreWindowNet.filter(
+    ({ walletId, netUsd }) => (inWindowSellUsd(walletId) / netUsd) * 100 >= EXIT_POSITION_SOLD_PCT
+  ).length;
 
   // -- newSmartBuyers ------------------------------------------------------
   // First trade EVER per wallet, across the FULL (unfiltered-by-window)
@@ -426,6 +506,7 @@ export function aggregateWindow(input: AggregateWindowInput): TokenWindowAggrega
     buySellRatio,
     smartWalletCount,
     humanLikeCount,
+    humanOrSmartLabelCount,
     possibleBotCount,
     whaleBuys,
     uniqueEntityCount,

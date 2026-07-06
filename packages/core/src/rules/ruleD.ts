@@ -3,6 +3,12 @@
 // Normative source: Task 13 brief + settings rules.D defaults
 // (minWhaleBuyUsd 10000, minWallets 15, minBuySellRatio 3).
 //
+// Severity contract (Task 15 fix): Rule D is NOT tiered — fired always means
+// HIGH. There is no WATCH tier for D (unlike Rule A, which is deliberately
+// tiered WATCH/HIGH). A previous implementation returned severity WATCH on
+// fire, which let a fired-D Signal row surface at WATCH severity even though
+// nothing about D's contract is graduated — fixed here.
+//
 // Fires when ALL of:
 //   >= 1 entry in agg.whaleBuys with usd >= minWhaleBuyUsd
 //   agg.smartWalletCount >= minWallets
@@ -51,7 +57,7 @@ export const ruleD: Rule = (agg, settings) => {
   return {
     rule: 'D',
     fired: true,
-    severity: 'WATCH',
+    severity: 'HIGH',
     reasons: [
       `Whale buy of $${maxWhaleBuyUsd.toFixed(0)} >= $${D.minWhaleBuyUsd} threshold.`,
       `${agg.smartWalletCount} profitable/smart wallets >= ${D.minWallets} floor; buy/sell ratio ${agg.buySellRatio} > ${D.minBuySellRatio}.`

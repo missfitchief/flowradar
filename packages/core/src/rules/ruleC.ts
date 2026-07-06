@@ -2,10 +2,17 @@
 //
 // Normative source: Task 13 brief + settings rules.C defaults (minHumanRatio
 // 0.7, maxBotRatio 0.2, maxSingleBlockBuysPct 30, minFundingRoots 3,
-// minFundingRootsPct 0.3).
+// minFundingRootsPct 0.3). Product brief verbatim (Task 15 Fix A — binding,
+// supersedes the human_like-only reading below): "70%+ buying wallets are
+// human_like OR smart_money".
 //
 // Fires when ALL of:
-//   humanRatio = agg.humanLikeCount / agg.buyers.length   >= minHumanRatio
+//   humanRatio = agg.humanOrSmartLabelCount / agg.buyers.length >= minHumanRatio
+//     (humanOrSmartLabelCount = buyers whose labels include human_like OR
+//     smart_money, a union — NOT agg.humanLikeCount, which is human_like-only
+//     and undercounts scenarios whose smart cohort splits across both
+//     labels, e.g. NOVA's 18/17 smart_money/human_like split reading 53.7%
+//     on humanLikeCount alone vs. ~100% on the union).
 //   botRatio   = agg.possibleBotCount / agg.buyers.length <= maxBotRatio
 //   largestSingleBlockPct <= maxSingleBlockBuysPct
 //     where largestSingleBlockPct is the largest share of agg.buyers (by
@@ -26,7 +33,7 @@ export const ruleC: Rule = (agg, settings) => {
   const { C } = settings.rules;
   const totalBuyers = agg.buyers.length;
 
-  const humanRatio = totalBuyers > 0 ? agg.humanLikeCount / totalBuyers : 0;
+  const humanRatio = totalBuyers > 0 ? agg.humanOrSmartLabelCount / totalBuyers : 0;
   const botRatio = totalBuyers > 0 ? agg.possibleBotCount / totalBuyers : 0;
 
   let largestSingleBlockPct = 0;

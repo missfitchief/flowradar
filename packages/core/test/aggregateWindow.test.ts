@@ -259,6 +259,43 @@ describe('aggregateWindow', () => {
       expect(result.humanLikeCount).toBe(2);
       expect(result.possibleBotCount).toBe(1);
     });
+
+    it('humanOrSmartLabelCount is the UNION of human_like and smart_money label membership (Task 15 Fix A) — distinct from humanLikeCount', () => {
+      const now = min(30);
+      const trades: TradeRowInput[] = [
+        trade('human-only', 'BUY', min(1), 100),
+        trade('smart-only', 'BUY', min(2), 100), // smart_money but NOT human_like — must still count
+        trade('both-labels', 'BUY', min(3), 100),
+        trade('bot', 'BUY', min(4), 100),
+        trade('unlabeled', 'BUY', min(5), 100)
+      ];
+      const wallets: WalletInfoInput[] = [
+        wallet('human-only', { labels: ['human_like'] }),
+        wallet('smart-only', { labels: ['smart_money'] }),
+        wallet('both-labels', { labels: ['human_like', 'smart_money'] }),
+        wallet('bot', { labels: ['possible_bot'] }),
+        wallet('unlabeled', { labels: ['unknown'] })
+      ];
+      const result = aggregateWindow({ trades, wallets, clusters: [], market: [], windowMinutes: 30, now });
+
+      // humanLikeCount only sees the 2 buyers carrying 'human_like'.
+      expect(result.humanLikeCount).toBe(2);
+      // humanOrSmartLabelCount is the union: human-only + smart-only + both-labels = 3.
+      expect(result.humanOrSmartLabelCount).toBe(3);
+    });
+
+    it('humanOrSmartLabelCount is 0 for an empty buyer set (no div-by-zero downstream in ruleC)', () => {
+      const result = aggregateWindow({
+        trades: [],
+        wallets: [],
+        clusters: [],
+        market: [],
+        windowMinutes: 30,
+        now: min(0)
+      });
+
+      expect(result.humanOrSmartLabelCount).toBe(0);
+    });
   });
 
   describe('whaleBuys', () => {
@@ -666,17 +703,21 @@ describe('aggregateWindow', () => {
     });
   });
 
-  describe('exitedSmartPct / topHolderExits / newSmartBuyers', () => {
-    it('exitedSmartPct = % of smart buyers who sold >= 80% of their window buyUsd', () => {
-      const now = min(30);
+  describe('exitedSmartPct / topHolderExits (Task 15 Fix B — holder-based, not window-buyer-based)', () => {
+    it('exitedSmartPct = % of SMART holders-at-window-start whose IN-WINDOW sells reach >= 80% of their PRE-WINDOW net position', () => {
+      const now = min(60); // window [30, 60]
       const trades: TradeRowInput[] = [
+        // smart-exited: bought $1000 BEFORE the window (pre-window position), sold 85% of it INSIDE the window.
         trade('smart-exited', 'BUY', min(1), 1000),
-        trade('smart-exited', 'SELL', min(5), 850), // 85% of buy >= 80%
+        trade('smart-exited', 'SELL', min(45), 850), // 85% of pre-window position >= 80%
+        // smart-held: bought $1000 before the window, sold only 10% inside the window.
         trade('smart-held', 'BUY', min(2), 1000),
-        trade('smart-held', 'SELL', min(6), 100), // 10% of buy, below 80%
+        trade('smart-held', 'SELL', min(46), 100),
+        // smart-no-sell: pre-window position, no in-window activity at all.
         trade('smart-no-sell', 'BUY', min(3), 1000),
+        // not-smart: same shape as smart-exited but NOT smart -> excluded from the denominator.
         trade('not-smart', 'BUY', min(4), 1000),
-        trade('not-smart', 'SELL', min(7), 1000) // fully sold, but not smart -> excluded from denominator
+        trade('not-smart', 'SELL', min(47), 1000)
       ];
       const wallets: WalletInfoInput[] = [
         wallet('smart-exited', { isWatched: true }),
@@ -686,11 +727,37 @@ describe('aggregateWindow', () => {
       ];
       const result = aggregateWindow({ trades, wallets, clusters: [], market: [], windowMinutes: 30, now });
 
-      // 1 of 3 smart buyers exited (>=80% sold) = 33.33%
+      // 1 of 3 smart holders-at-window-start exited (>=80% sold) = 33.33%
       expect(result.exitedSmartPct).toBeCloseTo(33.333, 2);
     });
 
-    it('exitedSmartPct is 0 when there are no smart buyers (no div-by-zero)', () => {
+    it('exitedSmartPct UNIONS in smart buyers with NO pre-window position who buy-and-dump >= 80% WITHIN the same window (documented union addition)', () => {
+      const now = min(60); // window [30, 60]
+      const trades: TradeRowInput[] = [
+        // smart-holder-exited: pre-window position, exits in-window (holder-based population).
+        trade('smart-holder-exited', 'BUY', min(1), 1000),
+        trade('smart-holder-exited', 'SELL', min(45), 900),
+        // smart-window-only-exited: FIRST EVER trade is inside the window — zero pre-window
+        // position, so it can never be a "holder-at-window-start" — buys then dumps >= 80%
+        // entirely within the window. Must still count via the union addition.
+        trade('smart-window-only-exited', 'BUY', min(31), 500),
+        trade('smart-window-only-exited', 'SELL', min(50), 450), // 90% of the SAME window's buy
+        // smart-window-only-held: also no pre-window position, buys in-window, does not dump.
+        trade('smart-window-only-held', 'BUY', min(32), 500)
+      ];
+      const wallets: WalletInfoInput[] = [
+        wallet('smart-holder-exited', { isWatched: true }),
+        wallet('smart-window-only-exited', { isWatched: true }),
+        wallet('smart-window-only-held', { isWatched: true })
+      ];
+      const result = aggregateWindow({ trades, wallets, clusters: [], market: [], windowMinutes: 30, now });
+
+      // Denominator = 1 holder (smart-holder-exited) + 2 window-only smart buyers = 3.
+      // Numerator = smart-holder-exited (holder-based) + smart-window-only-exited (union) = 2.
+      expect(result.exitedSmartPct).toBeCloseTo((2 / 3) * 100, 5);
+    });
+
+    it('exitedSmartPct is 0 when there are no smart holders or smart window-only buyers (no div-by-zero)', () => {
       const now = min(30);
       const trades: TradeRowInput[] = [trade('not-smart', 'BUY', min(1), 100)];
       const result = aggregateWindow({
@@ -705,19 +772,20 @@ describe('aggregateWindow', () => {
       expect(result.exitedSmartPct).toBe(0);
     });
 
-    it('topHolderExits counts, among the top-5 buyers by buyUsd, how many sold >= 80% of their buyUsd', () => {
-      const now = min(30);
-      // 6 buyers by descending buyUsd: only top 5 considered.
+    it('topHolderExits counts, among the top-5 PRE-WINDOW holders by pre-window net USD position, how many sold >= 80% of that position in-window', () => {
+      const now = min(60); // window [30, 60]
+      // 6 wallets accumulate a pre-window position (all BUYs before `from`=30), only top 5 by
+      // that pre-window net position are considered; in-window SELLs determine the exit.
       const trades: TradeRowInput[] = [
         trade('top1', 'BUY', min(1), 5000),
-        trade('top1', 'SELL', min(10), 4500), // 90% -> exit
+        trade('top1', 'SELL', min(45), 4500), // 90% of pre-window position -> exit
         trade('top2', 'BUY', min(2), 4000),
-        trade('top2', 'SELL', min(11), 3600), // 90% -> exit
-        trade('top3', 'BUY', min(3), 3000), // no sell
-        trade('top4', 'BUY', min(4), 2000), // no sell
-        trade('top5', 'BUY', min(5), 1000), // no sell
+        trade('top2', 'SELL', min(46), 3600), // 90% -> exit
+        trade('top3', 'BUY', min(3), 3000), // no in-window sell
+        trade('top4', 'BUY', min(4), 2000), // no in-window sell
+        trade('top5', 'BUY', min(5), 1000), // no in-window sell
         trade('top6-smallest', 'BUY', min(6), 100),
-        trade('top6-smallest', 'SELL', min(12), 100) // 100% exit, but rank 6 -> NOT counted
+        trade('top6-smallest', 'SELL', min(47), 100) // 100% exit, but rank 6 by pre-window position -> NOT counted
       ];
       const wallets: WalletInfoInput[] = [
         wallet('top1'),
@@ -730,6 +798,57 @@ describe('aggregateWindow', () => {
       const result = aggregateWindow({ trades, wallets, clusters: [], market: [], windowMinutes: 30, now });
 
       expect(result.topHolderExits).toBe(2);
+    });
+
+    it('topHolderExits is 0 when nobody holds a pre-window position (buys inside the window don\'t count as "holders")', () => {
+      const now = min(30);
+      const trades: TradeRowInput[] = [
+        trade('window-only', 'BUY', min(1), 5000),
+        trade('window-only', 'SELL', min(20), 4900) // 98% exit, but zero PRE-window position -> not a holder
+      ];
+      const result = aggregateWindow({
+        trades,
+        wallets: [wallet('window-only')],
+        clusters: [],
+        market: [],
+        windowMinutes: 30,
+        now
+      });
+
+      expect(result.topHolderExits).toBe(0);
+    });
+
+    it('DUMP-shaped fixture: buys long before the window, >=40% of smart holders sell >= 80% inside the window -> exitedSmartPct >= 40 (regression for the exact bug Fix B closes)', () => {
+      // Mirrors $DUMP's real shape (packages/providers/src/mock/scenarios.ts
+      // buildDump): 20 smart holders accumulate ~60h before a 24h window that
+      // is anchored at the later sell burst; 10 of them (50%) dump >= 80% of
+      // their pre-window position inside that window. Under the OLD
+      // window-buyer-based definition this was structurally unmeasurable
+      // (zero window buyers, since every BUY sits before `from`) — this
+      // fixture pins that the NEW holder-based definition fixes it.
+      const now = new Date(WINDOW_START.getTime() + 70 * 60 * 60 * 1000); // hour 70, window = [46, 70]
+      const preWindowBuyHour = 5; // hour 5 -- ~41h before `from` (hour 46), comfortably pre-window
+      const inWindowSellHour = 66; // hour 66 -- inside [46, 70]
+      const trades: TradeRowInput[] = [];
+      const wallets: WalletInfoInput[] = [];
+      for (let i = 0; i < 20; i++) {
+        const walletId = `dump-holder-${i}`;
+        wallets.push(wallet(walletId, { isWatched: true }));
+        trades.push(
+          trade(walletId, 'BUY', new Date(WINDOW_START.getTime() + preWindowBuyHour * 60 * 60 * 1000), 1000)
+        );
+        if (i < 10) {
+          // 10 of 20 (50%) dump 85% of their pre-window position inside the window.
+          trades.push(
+            trade(walletId, 'SELL', new Date(WINDOW_START.getTime() + inWindowSellHour * 60 * 60 * 1000), 850)
+          );
+        }
+      }
+
+      const result = aggregateWindow({ trades, wallets, clusters: [], market: [], windowMinutes: 1440, now });
+
+      expect(result.exitedSmartPct).toBeGreaterThanOrEqual(40);
+      expect(result.exitedSmartPct).toBeCloseTo(50, 5);
     });
 
     it('newSmartBuyers counts smart buyers whose window firstBuyTs is also their first trade ever (in the full trades input)', () => {

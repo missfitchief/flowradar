@@ -107,30 +107,38 @@ describe('$QUIET scenario', () => {
   const quiet = tokenBySymbol('QUIET');
   const handle = world.meta.scenarios.quiet;
 
-  it('buyers grow from 22 (early) to >= 44 distinct buyers across 36h', () => {
+  it('buyers grow from 22 (early) to >= 44 distinct buyers across 20h (Task 15 Fix C: compressed from 36h so the full arc fits within Rule B\'s 24h window)', () => {
     const buys = legsForToken(quiet.address).filter((e) => e.leg.kind === 'swap_leg' && e.leg.to !== quiet.address);
     const start = handle.windowStart.getTime();
 
     const early = new Set(
       buys.filter((e) => e.tx.ts.getTime() >= start && e.tx.ts.getTime() < start + 2 * 60 * 60 * 1000).map((e) => e.leg.to)
     );
-    const full36h = new Set(
-      buys.filter((e) => e.tx.ts.getTime() >= start && e.tx.ts.getTime() < start + 36 * 60 * 60 * 1000).map((e) => e.leg.to)
+    const full20h = new Set(
+      buys.filter((e) => e.tx.ts.getTime() >= start && e.tx.ts.getTime() < start + 20 * 60 * 60 * 1000).map((e) => e.leg.to)
     );
 
     expect(early.size).toBe(22);
-    expect(full36h.size).toBeGreaterThanOrEqual(44);
+    expect(full20h.size).toBeGreaterThanOrEqual(44);
   });
 
-  it('mcap expansion across the 36h window is <= 1.8x', () => {
+  it('mcap expansion across the 20h window is <= 1.8x', () => {
     const series = world.marketSeries.get(quiet.address)!;
     const start = handle.windowStart.getTime();
     const startPoint = series.find((p) => p.ts.getTime() >= start)!;
-    const endPoint = [...series].reverse().find((p) => p.ts.getTime() <= start + 36 * 60 * 60 * 1000)!;
+    const endPoint = [...series].reverse().find((p) => p.ts.getTime() <= start + 20 * 60 * 60 * 1000)!;
 
     expect(startPoint.market.marketCapUsd).toBeTruthy();
     const expansion = endPoint.market.marketCapUsd! / startPoint.market.marketCapUsd!;
     expect(expansion).toBeLessThanOrEqual(1.8);
+  });
+
+  it('the full growth arc lands within 24h of windowStart (Rule B\'s window), so no straggler buyer can drag the anchor past the accumulation peak', () => {
+    const buys = legsForToken(quiet.address).filter((e) => e.leg.kind === 'swap_leg' && e.leg.to !== quiet.address);
+    const start = handle.windowStart.getTime();
+    const latestBuyTs = Math.max(...buys.map((e) => e.tx.ts.getTime()));
+
+    expect(latestBuyTs - start).toBeLessThan(24 * 60 * 60 * 1000);
   });
 });
 

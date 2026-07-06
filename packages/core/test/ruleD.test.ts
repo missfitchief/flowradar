@@ -8,6 +8,7 @@ import type { TokenWindowAggregate } from '../src/types';
 //   >= minWallets (15) profitable/smart wallets    [agg.smartWalletCount —
 //     the aggregate's only wallet-quality count field; see rules/ruleD.ts]
 //   buySellRatio > minBuySellRatio (3)
+//   Severity contract: fired => always HIGH (D is not tiered, unlike Rule A).
 
 function makeAggregate(overrides: Partial<TokenWindowAggregate> = {}): TokenWindowAggregate {
   const base: TokenWindowAggregate = {
@@ -22,6 +23,7 @@ function makeAggregate(overrides: Partial<TokenWindowAggregate> = {}): TokenWind
     buySellRatio: 0,
     smartWalletCount: 0,
     humanLikeCount: 0,
+    humanOrSmartLabelCount: 0,
     possibleBotCount: 0,
     whaleBuys: [],
     uniqueEntityCount: 0,
@@ -52,6 +54,20 @@ describe('ruleD', () => {
 
     expect(result.fired).toBe(true);
     expect(result.rule).toBe('D');
+    expect(result.severity).toBe('HIGH');
+  });
+
+  it('fired D is always HIGH severity (not tiered — no WATCH tier exists for D)', () => {
+    const agg = makeAggregate({
+      whaleBuys: [{ walletId: 'whale-1', usd: 50000 }],
+      smartWalletCount: 100,
+      buySellRatio: 20
+    });
+
+    const result = ruleD(agg, DEFAULT_SETTINGS);
+
+    expect(result.fired).toBe(true);
+    expect(result.severity).toBe('HIGH');
   });
 
   it('whale $9.9k (below minWhaleBuyUsd=10000) -> does not fire', () => {

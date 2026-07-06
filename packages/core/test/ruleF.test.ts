@@ -40,6 +40,7 @@ function makeAggregate(overrides: Partial<TokenWindowAggregate> = {}): TokenWind
     buySellRatio: 0,
     smartWalletCount: 0,
     humanLikeCount: 0,
+    humanOrSmartLabelCount: 0,
     possibleBotCount: 0,
     whaleBuys: [],
     uniqueEntityCount: 0,

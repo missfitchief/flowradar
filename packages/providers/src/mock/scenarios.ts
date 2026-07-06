@@ -278,16 +278,29 @@ function buildQuiet(builder: WorldBuilder, rng: Rng): QuietHandle {
     makeBuy(builder, token, wallet.address, ts, 300 + rng() * 700, priceUsd);
   }
 
-  // 24 additional distinct buyers trickling in over hours 2..36, bringing
-  // the 36h cumulative distinct-buyer count to 46 (>= 44 required).
+  // 24 additional distinct buyers trickling in over hours 2..20 (Task 15
+  // Fix C: compressed from the original (2h, 36h) spread), bringing the 20h
+  // cumulative distinct-buyer count to 46 (>= 44 required) — WITHIN a single
+  // 24h lookback. The original 36h-wide arc exceeded Rule B's 24h window:
+  // aggregateWindow anchors `to` at this token's own LATEST trade, so a
+  // handful of long-tail stragglers landing near the 36h ceiling dragged the
+  // anchor 11h past the point where the buyer count had already cleared
+  // both of Rule B's floors, leaving only 14 of 46 buyers inside the 24h
+  // window actually evaluated (see task-15-report.md's investigated root
+  // cause). Compressing the full arc to <= 20h means ANY anchor drawn from
+  // this scenario's own trades sits within 20h of `windowStart`, so a 24h
+  // lookback (from = anchor - 24h) always reaches back far enough to
+  // capture the complete 46-buyer set with 4h of margin to spare.
   for (let i = 0; i < 24; i++) {
     const wallet = makeWallet(builder, 'SOLANA', rng, ['human_like'], 55 + Math.floor(rng() * 20), `quiet-late-${i}`);
-    const hourOffset = 2 + rngFloat(rng, 0, 34); // spread across (2h, 36h)
+    const hourOffset = 2 + rngFloat(rng, 0, 18); // spread across (2h, 20h)
     const ts = new Date(windowStart.getTime() + hourOffset * HOUR_MS);
     makeBuy(builder, token, wallet.address, ts, 300 + rng() * 700, priceUsd);
   }
 
-  // Mcap expansion across the 36h window: 200k -> 300k = 1.5x (<= 1.8x).
+  // Mcap expansion across the (compressed) 20h window: 200k -> 300k = 1.5x
+  // (<= 1.8x maxMcapExpansion, unchanged invariant — only the timespan it's
+  // measured over shrank, matching the buyer-growth arc's own compression).
   const startMcap = 200_000;
   const endMcap = 300_000;
   const points = generateBaselineMarketSeries(builder, rng, token, {
@@ -298,8 +311,9 @@ function buildQuiet(builder: WorldBuilder, rng: Rng): QuietHandle {
   // Overwrite the scenario-relevant hours with a clean linear ramp so the
   // expansion assertion isn't at the mercy of the baseline's random drift.
   const startHourIdx = Math.floor((windowStart.getTime() - builder.genesis.getTime()) / HOUR_MS);
-  for (let h = 0; h <= 36 && startHourIdx + h < points.length; h++) {
-    const frac = h / 36;
+  const QUIET_ARC_HOURS = 20;
+  for (let h = 0; h <= QUIET_ARC_HOURS && startHourIdx + h < points.length; h++) {
+    const frac = h / QUIET_ARC_HOURS;
     const mcap = startMcap + (endMcap - startMcap) * frac;
     const point = points[startHourIdx + h]!;
     point.market.marketCapUsd = mcap;
@@ -433,13 +447,25 @@ function buildDump(builder: WorldBuilder, rng: Rng): DumpHandle {
   }
 
   // Final 6h of the 72h horizon: >= 40% (8 of 20) sell >= 80% of their position.
+  //
+  // Task 15 Fix B follow-up: the exit ratio Rule G / aggregateWindow measure
+  // is on a USD basis (agg.exitedSmartPct = in-window sellUsd / pre-window
+  // buyUsd), NOT a token-quantity basis. The original priceUsd * 0.6 dump
+  // discount meant 85% of the TOKEN quantity sold recovered only 85% * 60%
+  // = 51% of the buy's USD value — comfortably clearing the token-quantity
+  // invariant packages/providers/test/scenarios.test.ts checks (amountToken
+  // basis) but failing the USD-basis floor the aggregate/Rule G actually
+  // evaluate. Reduced the discount to 5% (priceUsd * 0.95) and raised the
+  // sold fraction to 90% of token quantity: 90% * 95% = 85.5% USD recovery,
+  // ~5.5 points of margin over the 80% floor, while the token-quantity
+  // invariant (>= 80% of position, by amountToken) still clears at 90%.
   const finalWindowStart = new Date(builder.horizon.getTime() - 6 * HOUR_MS);
   const exitCount = Math.ceil(20 * 0.5); // 10 of 20 = 50% > 40% bar, comfortable margin
   for (let i = 0; i < exitCount; i++) {
     const seller = smartBuyers[i]!;
     const ts = new Date(finalWindowStart.getTime() + i * 15 * MIN_MS);
-    const sellAmount = boughtAmountToken * 0.85; // 85% > 80% bar
-    makeSell(builder, token, seller, ts, sellAmount, priceUsd * 0.6); // dumping into a falling price
+    const sellAmount = boughtAmountToken * 0.9; // 90% > 80% bar (token-quantity basis)
+    makeSell(builder, token, seller, ts, sellAmount, priceUsd * 0.95); // modest dump discount; 90%*95% = 85.5% USD recovery, clears the 80% USD-basis floor Rule G/aggregateWindow evaluate
   }
 
   // Liquidity drop >= 35% into the final 6h.

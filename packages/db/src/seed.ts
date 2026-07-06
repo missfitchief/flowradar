@@ -375,16 +375,16 @@ interface SelfCheckRow {
   /**
    * True for a check whose numeric target is structurally unreachable given
    * ALREADY-COMMITTED, ALREADY-REVIEWED upstream work this task cannot touch
-   * (packages/providers's mock world, Task 4; packages/db/src/ingest.ts's
-   * general-purpose token-stub creation, Task 5) — not a defect in this
-   * task's own seed.ts. The printed table still shows the row's true
-   * PASS/FAIL against the brief's literal numeric target (never fudged);
-   * this flag only affects whether the row counts toward the process's exit
-   * code, mirroring the exact "still pass the self-check but report
-   * DONE_WITH_CONCERNS" treatment the brief explicitly specifies for NOVA's
-   * 60-70 band, extended here to the other checks that share the identical
-   * shape (a target that cannot be met without editing a different task's
-   * committed file) — see each concern's full evidence trail in `concerns`.
+   * — not a defect in this task's own seed.ts. The printed table still shows
+   * the row's true PASS/FAIL against the brief's literal numeric target
+   * (never fudged); this flag only affects whether the row counts toward
+   * the process's exit code, mirroring the "still pass but report
+   * DONE_WITH_CONCERNS" treatment the brief specifies for NOVA's 60-70
+   * flowScore band. As of the Task 15 semantic-gap fix pass, NO check
+   * currently sets this (the 4 signal self-checks that previously used it —
+   * NOVA/QUIET/SEED/DUMP — are now hard requirements; see the signal
+   * self-checks section below). Kept on the shape for a future check that
+   * may need the identical carve-out pattern again.
    */
   structurallyCapped?: boolean;
 }
@@ -492,10 +492,22 @@ async function runSelfCheck(
   });
 
   // ---------------------------------------------------------------------
-  // Signal self-checks (Task 15 brief): NOVA >= {A(HIGH), C, D}; QUIET >=
-  // {B}; SEED >= {E}; DUMP >= {G}; no F anywhere. A scenario's fired-rule
-  // set for its OWN token is looked up by symbol (perToken entries carry
-  // `symbol`, keyed by tokenId — cheaper than re-deriving tokenId from
+  // Signal self-checks (Task 15 brief; HARD requirements per the Task 15
+  // semantic-gap fix pass — see task-15-report.md's "Fix report" section):
+  // NOVA >= {A(HIGH), C, D(HIGH)}; QUIET >= {B}; SEED >= {E}; DUMP >= {G};
+  // no F anywhere. These were PREVIOUSLY marked structurallyCapped (excluded
+  // from hardFail) because the 3 scenario gaps (NOVA/C, QUIET/B, DUMP/G)
+  // were root-caused as unreachable without touching aggregateWindow/rule
+  // semantics or Task 4's scenario timing. Task 15's fix pass resolved all
+  // 3 root causes directly (Rule C's human-or-smart union ratio, holder-
+  // based exit metrics so DUMP's accumulate-then-dump-much-later shape is
+  // measurable, QUIET's growth arc compressed to fit a 24h lookback), so
+  // there is no longer any structural carve-out for any of these checks —
+  // every one below is now a genuine hard requirement whose failure fails
+  // the seed script's exit code, exactly like the market-snapshot/flow-
+  // snapshot/CSV-import/RUGZ checks above. A scenario's fired-rule set for
+  // its OWN token is looked up by symbol (perToken entries carry `symbol`,
+  // keyed by tokenId — cheaper than re-deriving tokenId from
   // world.meta.scenarios' addresses via another DB round trip).
   // ---------------------------------------------------------------------
   function firedRulesFor(symbol: string): { rule: string; severity: string }[] {
@@ -505,26 +517,7 @@ async function runSelfCheck(
     return [];
   }
 
-  /**
-   * `rootCause`, when provided, is a fully-investigated, exact-numbers
-   * explanation of why this scenario's expected rule set is structurally
-   * unreachable given an ALREADY-COMMITTED upstream file this task cannot
-   * edit (packages/providers/src/mock/scenarios.ts, Task 4) — NOT a defect
-   * in this task's own aggregateWindow/rule-evaluation code. Per the Task
-   * 15 brief's explicit instruction ("investigate the aggregate inputs
-   * first... report what you find rather than loosening thresholds;
-   * loosening ANY threshold requires marking DONE_WITH_CONCERNS with the
-   * exact numbers"), providing `rootCause` marks the row structurallyCapped
-   * (excluded from hardFail) — mirroring the identical carve-out shape
-   * already used for the NOVA 60-70 flowScore band and the wallets/tokens/
-   * trades counts above.
-   */
-  function checkSupersetOf(
-    label: string,
-    symbol: string,
-    expectedRules: { rule: string; severity?: string }[],
-    rootCause?: string
-  ): void {
+  function checkSupersetOf(label: string, symbol: string, expectedRules: { rule: string; severity?: string }[]): void {
     const fired = firedRulesFor(symbol);
     const missing = expectedRules.filter(
       (exp) => !fired.some((f) => f.rule === exp.rule && (exp.severity === undefined || f.severity === exp.severity))
@@ -536,75 +529,24 @@ async function runSelfCheck(
       check: label,
       expected: `>= {${expectedDesc}}`,
       actual: actualDesc,
-      pass,
-      structurallyCapped: !pass && rootCause !== undefined
+      pass
     });
     if (missing.length > 0) {
       const missingDesc = missing.map((m) => (m.severity ? `${m.rule}(${m.severity})` : m.rule)).join(',');
       concerns.push(
-        rootCause
-          ? `${label} — missing ${missingDesc}. ${symbol} actually fired: ${actualDesc}. ROOT CAUSE (investigated, not a code defect): ${rootCause}`
-          : `${label} — missing ${missingDesc}. ${symbol} actually fired: ${actualDesc}. Investigate aggregate inputs before loosening any rule threshold.`
+        `${label} — missing ${missingDesc}. ${symbol} actually fired: ${actualDesc}. This is now a HARD requirement (Task 15 fix pass resolved the prior root cause) — investigate before loosening any rule threshold.`
       );
     }
   }
 
-  checkSupersetOf(
-    'NOVA signals >= {A(HIGH), C, D}',
-    'NOVA',
-    [
-      { rule: 'A', severity: 'HIGH' },
-      { rule: 'C' },
-      { rule: 'D' }
-    ],
-    'Rule C needs humanRatio >= 0.7 (settings.rules.C.minHumanRatio) among window buyers. NOVA\'s ' +
-      '35-wallet smart cohort (packages/providers/src/mock/scenarios.ts buildNova) alternates labels ' +
-      '[smart_money, human_like][i%2] — an 18/17 split — plus 5 possible_bot buyers and 1 whale ' +
-      '(labeled [whale, smart_money], not human_like). Measured: 22 of 41 total buyers (53.7%) carry ' +
-      'human_like, ~16.3 points below the 70% floor. This ratio is fixed by the scenario\'s label ' +
-      'assignment and cannot be reached by any window/anchor choice — NOVA\'s own header comment calls ' +
-      'it a "Rule A/C/D fixture" but its buyer label mix was never tuned to also clear Rule C\'s ' +
-      'human-ratio floor. A(HIGH) and D(WATCH) both fire correctly.'
-  );
-  checkSupersetOf(
-    'QUIET signals >= {B}',
-    'QUIET',
-    [{ rule: 'B' }],
-    'Rule B needs earlyWindowBuyerCount >= 20 (baseWallets) AND smartWalletCount >= 40 (targetWallets) ' +
-      'within the SAME 24h (windowMinutes=1440) aggregate. QUIET\'s 46 buyers (buildQuiet) are scripted ' +
-      'to trickle in across hourOffset in (2h, 36h) from windowStart — a ~34-36h span. aggregateWindow\'s ' +
-      'binding anchoring rule (to = min(now, latest trade ts)) anchors this token\'s 24h window at its ' +
-      'ABSOLUTE LATEST trade; measured this run: latest buy landed ~11h AFTER the point where the 40-buyer ' +
-      'accumulation actually completes (verified by sliding a 24h window across every buy timestamp: the ' +
-      'best-possible 24h window reaches smartWalletCount=40/earlyCount=33, both clearing Rule B, at an ' +
-      'anchor ~11h before the true latest trade) — a handful of long-tail straggler buyers (the random ' +
-      'distribution\'s upper tail, near the 36h ceiling) drag the "latest trade" anchor past the real ' +
-      'accumulation peak, so the 24h window that actually gets evaluated only contains 14 of 46 buyers. ' +
-      'This is a general fragility of the "anchor to latest trade" heuristic against a small number of ' +
-      'sparse straggler trades landing well after a scenario\'s main signal has fully formed — not a bug ' +
-      'in Rule B\'s threshold math, and not something this task is authorized to fix by changing the ' +
-      'binding anchoring rule inherited from Task 5, or by editing Task 4\'s scenario timing.'
-  );
+  checkSupersetOf('NOVA signals >= {A(HIGH), C, D(HIGH)}', 'NOVA', [
+    { rule: 'A', severity: 'HIGH' },
+    { rule: 'C' },
+    { rule: 'D', severity: 'HIGH' }
+  ]);
+  checkSupersetOf('QUIET signals >= {B}', 'QUIET', [{ rule: 'B' }]);
   checkSupersetOf('SEED signals >= {E}', 'SEED', [{ rule: 'E' }]);
-  checkSupersetOf(
-    'DUMP signals >= {G}',
-    'DUMP',
-    [{ rule: 'G' }],
-    'All 4 of Rule G\'s disjuncts need buyers AND their later sells to fall inside the SAME 24h window. ' +
-      'DUMP (buildDump) scripts 20 accumulation buys at hours ~4-10.7 of the 72h horizon, then a 10-wallet ' +
-      'sell burst at hours ~66.3-68.6 (finalWindowStart = horizon-6h, but the sell loop only spans the ' +
-      'first ~2h15m of that 6h window) — buys and sells sit ~56-64h apart, far outside any 24h lookback. ' +
-      'Measured this run: agg24h anchored at DUMP\'s latest trade (hour ~68.6) has ZERO buyers in-window ' +
-      '(the accumulation is >24h earlier), so exitedSmartPct/topHolderExits/mcapExpansionFromAvgEntry are ' +
-      'all unevaluable (0/0/null) — disjuncts (a)/(b)/(d) cannot fire structurally. Disjunct (c) ' +
-      '(liquidityChangePct <= -30%) came closest: the scripted liquidity ramp reaches the full -50% only ' +
-      'by hour 72, but the sell burst (and therefore the latest-trade anchor) stops at hour ~68.6, so the ' +
-      'window only captures a partial ~-16.9% drop at that anchor. Same root class as QUIET\'s miss: the ' +
-      'scenario\'s designed accumulation-to-dump timespan (>60h) exceeds Rule G\'s configured 24h window, ' +
-      'and the binding "anchor to latest trade" rule cannot bridge that gap without either widening ' +
-      'Rule G\'s window (a Task 13/14 settings change) or re-scripting DUMP\'s timing (a Task 4 file this ' +
-      'task is not authorized to edit).'
-  );
+  checkSupersetOf('DUMP signals >= {G}', 'DUMP', [{ rule: 'G' }]);
 
   const anyFFired = [...signalsByToken.values()].some((entry) => entry.fired.some((f) => f.rule === 'F'));
   rows.push({
@@ -614,14 +556,17 @@ async function runSelfCheck(
     pass: !anyFFired
   });
 
-  // Hard-fail checks (brief: "exit code 1 if any fails") exclude both the
-  // NOVA 60-70 band (the brief's own explicit "still pass but flag" carve-out)
-  // AND the 3 rows marked structurallyCapped above (wallets/tokens/trades —
-  // extending the identical carve-out shape to targets that are mathematically
-  // unreachable given other already-committed tasks' files, per each row's own
-  // concern text). Every remaining row (market snapshots, flow snapshots, CSV
-  // import okRows, RUGZ risk flags) is a genuine hard requirement this seed
-  // script is fully responsible for meeting.
+  // Hard-fail checks (brief: "exit code 1 if any fails") exclude only the
+  // NOVA 60-70 flowScore band (the brief's own explicit "still pass but
+  // flag" carve-out, handled separately above via `concerns.push` while
+  // keeping `pass: true` — it never sets `structurallyCapped`). As of the
+  // Task 15 semantic-gap fix pass, NO row sets `structurallyCapped: true`
+  // anymore: the 4 signal self-checks (NOVA/QUIET/SEED/DUMP) that previously
+  // used that carve-out are now genuine hard requirements (see the signal
+  // self-checks section above), same as market snapshots, flow snapshots,
+  // CSV import okRows, and RUGZ risk flags. `structurallyCapped` stays on
+  // the SelfCheckRow shape/print-table handling in case a future task needs
+  // the identical carve-out pattern again, but nothing currently uses it.
   const hardFail = rows.some((r) => !r.pass && !r.structurallyCapped);
 
   return { rows, hardFail, concerns };
