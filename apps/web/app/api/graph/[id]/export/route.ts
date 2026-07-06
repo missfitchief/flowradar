@@ -3,8 +3,8 @@
 // `?format=nodes.csv|edges.csv|json`. Returns 400 for a missing/unrecognized
 // format, 404 if the search id doesn't exist.
 //
-// nodes.csv columns: address,chain,depth,nodeType,totalSentUsd,
-// totalReceivedUsd,netFlowUsd,interactionCount,firstSeen,lastSeen,tags,
+// nodes.csv columns: address,chain,depth,type,totalSent,
+// totalReceived,netFlow,interactions,firstSeen,lastSeen,tags,
 // confidence — tags pipe-joined, chain taken from the parent search row
 // (WalletGraphNode itself has no chain column). firstSeen/lastSeen are
 // ISO-8601 strings.
@@ -50,11 +50,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       'address',
       'chain',
       'depth',
-      'nodeType',
-      'totalSentUsd',
-      'totalReceivedUsd',
-      'netFlowUsd',
-      'interactionCount',
+      'type',
+      'totalSent',
+      'totalReceived',
+      'netFlow',
+      'interactions',
       'firstSeen',
       'lastSeen',
       'tags',

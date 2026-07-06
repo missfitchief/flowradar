@@ -1,13 +1,14 @@
 // FlowRadar — runGraphSearch: shared body for the wallet-graph search job
 // (Task 20 binding decision 2).
 //
-// Loads a WalletGraphSearch row, sets status running+startedAt, builds
-// GraphSearchParams from the row's params Json (deep-merged over
-// settings.graph defaults for any missing field — mirrors parseSettings'
-// own "merge over defaults" convention, just scoped to the graph-search
-// param shape instead of the whole Settings object), runs runBfs +
-// extractPaths from @flowradar/core, persists WalletGraphNode/WalletGraphEdge
-// rows (batched createMany), and writes back status done|truncated,
+// Loads a WalletGraphSearch row, sets status running+startedAt, reads the
+// Settings row through parseSettings (recursive deep-merge over
+// DEFAULT_SETTINGS plus Zod validation — same call as apps/worker's
+// readOrCreateSettings), builds GraphSearchParams from the row's params Json
+// (each field falls back to settings.graph via `??` when the stored params
+// omit it — a separate, shallower field-by-field fallback, not parseSettings
+// itself), runs runBfs + extractPaths from @flowradar/core, persists
+// WalletGraphNode/WalletGraphEdge rows (batched createMany), and writes back status done|truncated,
 // nodeCount/edgeCount, finishedAt, resultSummary. On any throw, status is
 // set to failed with the error message — this search row must NEVER be left
 // in `running` state, so the whole body after the initial "set running" write
@@ -22,7 +23,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { extractPaths, runBfs } from '@flowradar/core';
 import type { Chain, GraphMode, GraphSearchParams, Settings, TransactionPath } from '@flowradar/core';
-import { DEFAULT_SETTINGS } from '@flowradar/core';
+import { parseSettings } from '@flowradar/core';
 import { createDbEdgeFetcher, createRegistryLookup } from './edgeFetcher';
 
 /** Loose shape accepted from WalletGraphSearch.params (Json) — every field optional, filled from settings.graph defaults. */
@@ -101,7 +102,7 @@ export async function runGraphSearch(prisma: PrismaClient, searchId: string): Pr
 
   try {
     const settingsRow = await prisma.settings.findFirst();
-    const settings: Settings = settingsRow ? (settingsRow.values as unknown as Settings) : DEFAULT_SETTINGS;
+    const settings: Settings = parseSettings(settingsRow?.values);
 
     const params = buildParams(search, settings);
 

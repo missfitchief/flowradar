@@ -147,4 +147,74 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runGraphSearch', () => {
     // propagates rather than silently swallowing.
     await expect(runGraphSearch(prisma, 'nonexistent-search-id')).rejects.toThrow();
   });
+
+  it('applies the DEFAULT_SETTINGS perNodeTxCap (500) when the stored Settings row is missing graph.perNodeTxCap', async () => {
+    // Regression test (post-review Finding 2): runGraphSearch used to read
+    // Settings via a raw `as unknown as Settings` cast, so a partial row
+    // missing graph.perNodeTxCap left that field `undefined` — and
+    // Array.prototype.slice(0, undefined) returns the WHOLE array, silently
+    // disabling the per-node cap entirely. It must now go through
+    // parseSettings (deep-merge over DEFAULT_SETTINGS + Zod validation), so
+    // a partial row still yields the real default cap of 500.
+    const settingsRow = await prisma.settings.findFirst();
+    if (!settingsRow) throw new Error('expected a Settings row to exist from the outer beforeAll');
+    const originalValues = settingsRow.values;
+
+    const ROOT2 = `${ADDR_PREFIX}caproot`;
+    const NUM_COUNTERPARTIES = 505; // > DEFAULT_SETTINGS.graph.perNodeTxCap (500)
+    const baseTs = new Date('2026-07-04T00:00:00Z');
+
+    try {
+      // Partial settings: only graph.maxDepth is set: graph.perNodeTxCap is
+      // absent, which is exactly the shape that silently disabled the cap
+      // under the old raw-cast code path.
+      await prisma.settings.update({
+        where: { id: settingsRow.id },
+        data: { values: { graph: { maxDepth: 2 } } }
+      });
+
+      await prisma.moneyFlowEdge.createMany({
+        data: Array.from({ length: NUM_COUNTERPARTIES }, (_, i) => ({
+          sourceAddress: ROOT2,
+          destinationAddress: `${ADDR_PREFIX}capdest${i}`,
+          sourceChain: CHAIN,
+          destinationChain: CHAIN,
+          asset: 'SOL',
+          amountToken: 1,
+          amountUsd: 100 + i,
+          ts: baseTs,
+          txHash: `${ADDR_PREFIX}captx${i}`,
+          actionType: 'transfer',
+          confidence: 100,
+          providerSource: 'test',
+          metadata: {}
+        }))
+      });
+
+      const search = await prisma.walletGraphSearch.create({
+        data: {
+          rootAddress: ROOT2,
+          chain: CHAIN,
+          mode: 'CAPITAL_FLOW',
+          params: { maxDepth: 1 },
+          status: 'queued',
+          nodeCount: 0,
+          edgeCount: 0
+        }
+      });
+      createdSearchIds.push(search.id);
+
+      const result = await runGraphSearch(prisma, search.id);
+
+      // Uncapped, all 505 distinct-counterparty edges from ROOT2 would
+      // appear; capped at the default of 500, edgeCount must be exactly 500.
+      expect(result.edgeCount).toBe(500);
+
+      const persistedEdges = await prisma.walletGraphEdge.findMany({ where: { searchId: search.id } });
+      expect(persistedEdges.length).toBe(500);
+    } finally {
+      await prisma.settings.update({ where: { id: settingsRow.id }, data: { values: originalValues as object } });
+      await prisma.moneyFlowEdge.deleteMany({ where: { sourceAddress: ROOT2 } });
+    }
+  });
 });
