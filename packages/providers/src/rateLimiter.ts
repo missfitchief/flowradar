@@ -21,9 +21,18 @@ export interface RateLimiter {
 }
 
 /**
- * Token-bucket limiter: capacity equals `rps` (so a burst of up to `rps`
- * calls resolves immediately with a full bucket), refilling continuously at
- * `rps` tokens/sec (i.e. one token every `1000/rps` ms).
+ * Token-bucket limiter: capacity equals `Math.max(1, rps)` (so a burst of up
+ * to `rps` calls resolves immediately with a full bucket when `rps >= 1`),
+ * refilling continuously at `rps` tokens/sec (i.e. one token every
+ * `1000/rps` ms).
+ *
+ * Capacity is floored at 1 even when `rps < 1`: a request always consumes
+ * one *whole* token (see `acquire`'s `while (tokens < 1)` gate below), so a
+ * sub-1 capacity would cap `tokens` below the threshold the loop is waiting
+ * for and never release it — an infinite wait. With capacity = 1, a single
+ * full token still accumulates, just more slowly (one token every
+ * `1000/rps` ms, e.g. every 2s for rps=0.5). This does not change behavior
+ * for `rps >= 1`, where `Math.max(1, rps) === rps`.
  */
 export function createRateLimiter(options: RateLimiterOptions): RateLimiter {
   const { rps } = options;
@@ -31,7 +40,7 @@ export function createRateLimiter(options: RateLimiterOptions): RateLimiter {
     throw new Error(`createRateLimiter: rps must be > 0, got ${rps}`);
   }
 
-  const capacity = rps;
+  const capacity = Math.max(1, rps);
   const refillIntervalMs = 1000 / rps;
 
   let tokens = capacity;

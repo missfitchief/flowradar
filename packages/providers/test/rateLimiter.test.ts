@@ -65,4 +65,100 @@ describe('createRateLimiter', () => {
     const result = await limiter.acquire();
     expect(result).toBeUndefined();
   });
+
+  it('rps = 1: first acquire is immediate, second resolves only after ~1000ms', async () => {
+    const limiter = createRateLimiter({ rps: 1 });
+
+    await limiter.acquire();
+
+    let resolved = false;
+    limiter.acquire().then(() => {
+      resolved = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolved).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(900);
+    expect(resolved).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(resolved).toBe(true);
+  });
+
+  it('rps > 1 (5): a burst of 5 acquires resolves immediately, the 6th waits ~200ms', async () => {
+    const limiter = createRateLimiter({ rps: 5 });
+
+    const resolvedFlags = [false, false, false, false, false];
+    for (let i = 0; i < 5; i++) {
+      const idx = i;
+      // Don't await yet — just confirm each settles without any timer advance.
+      limiter.acquire().then(() => {
+        resolvedFlags[idx] = true;
+      });
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolvedFlags).toEqual([true, true, true, true, true]);
+
+    let sixthResolved = false;
+    limiter.acquire().then(() => {
+      sixthResolved = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sixthResolved).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(199);
+    expect(sixthResolved).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sixthResolved).toBe(true);
+  });
+
+  it('rps = 0.5: first acquire is immediate, second does NOT resolve at ~1000ms but DOES at ~2000ms (fractional regression)', async () => {
+    const limiter = createRateLimiter({ rps: 0.5 });
+
+    await limiter.acquire();
+
+    let resolved = false;
+    limiter.acquire().then(() => {
+      resolved = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolved).toBe(false);
+
+    // Halfway through the ~2000ms refill interval — must still be waiting,
+    // not deadlocked forever, but also not resolved early.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(resolved).toBe(false);
+
+    // Advancing to ~2000ms total completes the one token refill.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(resolved).toBe(true);
+  });
+
+  it('rps = 0.2: first acquire is immediate, second resolves only after ~5000ms', async () => {
+    const limiter = createRateLimiter({ rps: 0.2 });
+
+    await limiter.acquire();
+
+    let resolved = false;
+    limiter.acquire().then(() => {
+      resolved = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolved).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(4900);
+    expect(resolved).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(resolved).toBe(true);
+  });
+
+  it.each([0, -1, NaN])('throws a clear config error for rps <= 0 or NaN (rps=%p)', (badRps) => {
+    expect(() => createRateLimiter({ rps: badRps })).toThrow(/rps must be > 0/);
+  });
 });
