@@ -7,11 +7,16 @@
 -- window of each other across MULTIPLE distinct tokens — a signal of a coordinated group or
 -- copy-trading relationship, feeding entity-cluster research (see Spec §6 linkConfidence).
 --
--- Params:
---   {{token_1}}, {{token_2}}, {{token_3}} - token contract addresses to scope the search to
---   {{chain}}                            - chain scope, e.g. 'solana'
---   {{min_trade_usd}}                    - minimum trade size in USD (filters dust)
---   {{start_time}}, {{end_time}}         - time window bounds
+-- Params (must match FlowRadar's DuneClient query_parameters keys EXACTLY — see
+-- packages/db/src/dune/duneOverlap.ts's runTokenOverlapSearch, the source of truth for what
+-- this connector actually sends. If you rename a param here, update that file too):
+--   {{token_address_1}} .. {{token_address_5}} - token contract addresses to scope the search
+--                                                 to (2-5 sent; unused slots bound to null,
+--                                                 filtered by `in`)
+--   {{chain}}               - chain scope, e.g. 'solana'
+--   {{min_trade_usd}}       - minimum trade size in USD (filters dust)
+--   {{min_tokens_overlap}}  - minimum distinct shared-token count required to count as "recurring"
+--   {{start_time}}, {{end_time}} - time window bounds (optional; only sent when provided)
 
 with scoped_trades as (
     select
@@ -20,7 +25,10 @@ with scoped_trades as (
         t.block_time            as trade_time,
         t.amount_usd            as trade_usd
     from solana.dex.trades t          -- conceptual table name, verify against current schema
-    where t.token_bought_address in ({{token_1}}, {{token_2}}, {{token_3}})
+    where t.token_bought_address in (
+            {{token_address_1}}, {{token_address_2}}, {{token_address_3}},
+            {{token_address_4}}, {{token_address_5}}
+          )  -- unused slots should be bound to null in Dune's query editor
       and t.blockchain = {{chain}}
       and t.amount_usd >= {{min_trade_usd}}
       and t.block_time between {{start_time}} and {{end_time}}
@@ -50,7 +58,7 @@ recurring_pairs as (
         max(greatest(trade_time_a, trade_time_b)) as last_cotrade_time
     from cotrade_pairs
     group by wallet_a, wallet_b
-    having count(distinct token_address) >= 2   -- "recurring" = co-traded across at least 2 tokens
+    having count(distinct token_address) >= {{min_tokens_overlap}}
 )
 
 select

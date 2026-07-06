@@ -6,18 +6,25 @@
 -- Purpose: wallets that bought MULTIPLE of the selected tokens EARLY (within a configurable
 -- window of each token's first observed trade), not just at any point in the range.
 --
--- Params:
---   {{token_1}}, {{token_2}}, {{token_3}} - token contract addresses to check
---   {{chain}}                            - chain scope, e.g. 'solana'
---   {{min_trade_usd}}                    - minimum trade size in USD (filters dust)
---   {{start_time}}, {{end_time}}         - time window bounds
+-- Params (must match FlowRadar's DuneClient query_parameters keys EXACTLY — see
+-- packages/db/src/dune/duneOverlap.ts's runTokenOverlapSearch, the source of truth for what
+-- this connector actually sends. If you rename a param here, update that file too):
+--   {{token_address_1}} .. {{token_address_5}} - token contract addresses to check (2-5 sent;
+--                                                 unused slots bound to null, filtered by `in`)
+--   {{chain}}               - chain scope, e.g. 'solana'
+--   {{min_trade_usd}}       - minimum trade size in USD (filters dust)
+--   {{min_tokens_overlap}}  - minimum distinct-token count required to count as "multiple"
+--   {{start_time}}, {{end_time}} - time window bounds (optional; only sent when provided)
 
 with token_launch as (
     select
         t.token_bought_address as token_address,
         min(t.block_time)      as launch_time
     from solana.dex.trades t          -- conceptual table name, verify against current schema
-    where t.token_bought_address in ({{token_1}}, {{token_2}}, {{token_3}})
+    where t.token_bought_address in (
+            {{token_address_1}}, {{token_address_2}}, {{token_address_3}},
+            {{token_address_4}}, {{token_address_5}}
+          )  -- unused slots should be bound to null in Dune's query editor
       and t.blockchain = {{chain}}
       and t.block_time between {{start_time}} and {{end_time}}
     group by t.token_bought_address
@@ -45,7 +52,7 @@ wallet_early_overlap as (
         sum(trade_usd)                as total_early_buy_usd
     from early_trades
     group by wallet_address
-    having count(distinct token_address) >= 2   -- "multiple" = at least 2 of the selected tokens
+    having count(distinct token_address) >= {{min_tokens_overlap}}
 )
 
 select

@@ -57,10 +57,18 @@
 // Query params for the overlap use case (dune-feature-wave46.md, NOT
 // doc-verified against a specific saved query's own parameter names since no
 // real saved query exists in this repo — these are the query_parameters this
-// connector SENDS when DUNE_EXECUTE_FRESH=true; a real saved query must
-// define matching {{parameter}} placeholders, documented as a TODO for the
-// operator in docs/dune/ (Task 39)): chain, token_address_1..3, start_time,
-// end_time, min_trade_usd, min_tokens_overlap, max_results.
+// connector SENDS when DUNE_EXECUTE_FRESH=true): chain, token_address_1..5
+// (one key per token address actually searched, 2-5 of them — see
+// duneOverlap.ts's runTokenOverlapSearch, the source of truth for the exact
+// object built), start_time, end_time (only when provided), min_trade_usd,
+// min_tokens_overlap. NOTE: max_results is NOT one of these query_parameters
+// — it's passed as ExecuteQueryOpts.limit (client.ts), applied as the `limit`
+// URL query param on the results-fetch call, not a SQL {{...}} placeholder.
+// Operator setup guide (creating a real saved query + binding these
+// {{parameter}} names in Dune's UI): docs/dune/README.md — resolved by
+// Task 39, which also aligned docs/dune/*.sql's placeholder names to this
+// exact key set. If you rename a param here, update that saved query (and
+// docs/dune/README.md's §3 table) to match.
 
 import { z } from 'zod';
 import type { Chain } from '@flowradar/core';
