@@ -184,7 +184,7 @@ function renderSignal(data: SignalAlertData): string {
   lines.push(`Smart wallets buying: ${data.rawWalletCount}`);
   lines.push(`Estimated unique entities: ${data.uniqueEntityCount}`);
   lines.push(`Largest cluster: ${data.largestClusterSize} wallets`);
-  lines.push(`Cluster concentration: ${data.clusterConcentration}`);
+  lines.push(`Cluster concentration: ${escapeHtml(data.clusterConcentration)}`);
   lines.push('');
   lines.push(`Human-like wallets: ${data.humanLikePct.toFixed(0)}%`);
   lines.push(`Tracked buy volume: ${fmtUsdLocal(data.trackedBuyVolumeUsd)}`);
@@ -268,7 +268,7 @@ function renderWalletGraph(data: WalletGraphAlertData): string {
   lines.push('');
   lines.push(`Root address: <code>${escapeHtml(data.rootAddress)}</code>`);
   lines.push(`Chain: ${escapeHtml(data.chainName)}`);
-  lines.push(`Mode: ${data.mode}`);
+  lines.push(`Mode: ${escapeHtml(data.mode)}`);
   lines.push('');
   lines.push(`Nodes found: ${data.nodeCount}`);
   lines.push(`Edges found: ${data.edgeCount}`);

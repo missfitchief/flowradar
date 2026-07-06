@@ -179,6 +179,15 @@ describe('renderAlert(SIGNAL)', () => {
     const text = renderAlert('SIGNAL', novaFixture({ avgSmartEntryMcapUsd: null }));
     expect(text).toContain('Avg smart entry mcap: unknown');
   });
+
+  it('escapes a hostile clusterConcentration value', () => {
+    const text = renderAlert(
+      'SIGNAL',
+      novaFixture({ clusterConcentration: '<EVIL&>' as never })
+    );
+    expect(text).toContain('Cluster concentration: &lt;EVIL&amp;&gt;');
+    expect(text).not.toContain('Cluster concentration: <EVIL&>');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -327,6 +336,15 @@ describe('renderAlert(WALLET_GRAPH)', () => {
     const text = renderAlert('WALLET_GRAPH', walletGraphFixture({ rootAddress: '<EVIL&>' }));
     expect(text).toContain('Root address: <code>&lt;EVIL&amp;&gt;</code>');
     expect(text).not.toContain('<code><EVIL&></code>');
+  });
+
+  it('escapes a hostile mode value', () => {
+    const text = renderAlert(
+      'WALLET_GRAPH',
+      walletGraphFixture({ mode: '<EVIL&>' as never })
+    );
+    expect(text).toContain('Mode: &lt;EVIL&amp;&gt;');
+    expect(text).not.toContain('Mode: <EVIL&>');
   });
 });
 
