@@ -39,4 +39,6 @@ _To be filled in Task 32._
 
 ## What needs API keys
 
-_To be filled in Task 32._
+**Solana (Helius)** — set `HELIUS_API_KEY` (see `.env.example`) to enable the live Solana wallet-activity and token-risk adapters (`packages/providers/src/solana/{helius,risk}.ts`). Once set, `MOCK_MODE=false` resolves real Helius calls for SOLANA's `walletActivity` (Enhanced Transactions API, `GET /v0/addresses/{address}/transactions`, mapped to `NormalizedTx`) and `risk` (RPC `getTokenLargestAccounts` + `getTokenSupply` for top-holder concentration; mint/freeze-authority checks are a documented stub — see `TODO(provider)` in `risk.ts`) capabilities, rate-limited to ~9 requests/sec. Without a key, both capabilities report `missing_key` via `getProviderStatuses()` and gracefully fall back to the deterministic mock world rather than crashing. Everything else (BSC activity/risk, market data, token metadata, wallet discovery) remains Wave-4-pending; see the rest of `.env.example` for their env vars.
+
+_Remaining chains/capabilities to be filled in Task 32._

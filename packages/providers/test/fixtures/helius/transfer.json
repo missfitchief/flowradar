@@ -1,0 +1,52 @@
+{
+  "_docSource": "https://www.helius.dev/docs/api-reference/enhanced-transactions/gettransactionsbyaddress — response array element shape (type TRANSFER, nativeTransfers[] + tokenTransfers[] top-level arrays), synthesized to match the documented schema (field NAMEs/shape from docs; VALUEs synthetic).",
+  "description": "Wallet sent 0.5 SOL and 100 USDC to another wallet in one transaction",
+  "type": "TRANSFER",
+  "source": "SYSTEM_PROGRAM",
+  "fee": 5000,
+  "feePayer": "4kG9xRvW2sT6pL8mN3qZ1yB7cA5dF9eH2jK4lM6nP8oQ",
+  "signature": "3aB1cD2eF3gH4iJ5kL6mN7oP8qR9sT1uV2wX3yZ4aB5cD6eF7gH8iJ9kL1mN2oP3qR",
+  "slot": 148300010,
+  "timestamp": 1656500000,
+  "nativeTransfers": [
+    {
+      "fromUserAccount": "4kG9xRvW2sT6pL8mN3qZ1yB7cA5dF9eH2jK4lM6nP8oQ",
+      "toUserAccount": "8pQ7rS6tU5vW4xY3zA2bC1dE9fG8hJ7kL6mN5oP4qR3s",
+      "amount": 500000000
+    }
+  ],
+  "tokenTransfers": [
+    {
+      "fromUserAccount": "4kG9xRvW2sT6pL8mN3qZ1yB7cA5dF9eH2jK4lM6nP8oQ",
+      "toUserAccount": "8pQ7rS6tU5vW4xY3zA2bC1dE9fG8hJ7kL6mN5oP4qR3s",
+      "fromTokenAccount": "1uV2wX3yZ4aB5cD6eF7gH8iJ9kL1mN2oP3qR4sT5uV6w",
+      "toTokenAccount": "2wX3yZ4aB5cD6eF7gH8iJ9kL1mN2oP3qR4sT5uV6wX7y",
+      "tokenAmount": 100,
+      "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    }
+  ],
+  "accountData": [
+    {
+      "account": "4kG9xRvW2sT6pL8mN3qZ1yB7cA5dF9eH2jK4lM6nP8oQ",
+      "nativeBalanceChange": -500005000,
+      "tokenBalanceChanges": [
+        {
+          "userAccount": "4kG9xRvW2sT6pL8mN3qZ1yB7cA5dF9eH2jK4lM6nP8oQ",
+          "tokenAccount": "1uV2wX3yZ4aB5cD6eF7gH8iJ9kL1mN2oP3qR4sT5uV6w",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "rawTokenAmount": {
+            "tokenAmount": "-100000000",
+            "decimals": 6
+          }
+        }
+      ]
+    }
+  ],
+  "transactionError": null,
+  "instructions": [],
+  "events": {
+    "swap": null,
+    "nft": null,
+    "compressed": null
+  }
+}

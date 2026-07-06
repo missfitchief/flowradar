@@ -1,0 +1,14 @@
+{
+  "_docSource": "https://www.helius.dev/docs/api-reference/rpc/http/gettokensupply — full verbatim example response JSON shape confirmed by docs fetch (amount/decimals/uiAmount/uiAmountString fields); amount scaled to match rpc-token-largest-accounts.json's fixture (total supply 1,000,000 tokens @ 6 decimals) so top1/top5 concentration percentages are computable and deterministic in tests.",
+  "jsonrpc": "2.0",
+  "id": "1",
+  "result": {
+    "context": { "slot": 148300000 },
+    "value": {
+      "amount": "1000000000000",
+      "decimals": 6,
+      "uiAmount": 1000000,
+      "uiAmountString": "1000000"
+    }
+  }
+}

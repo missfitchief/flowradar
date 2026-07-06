@@ -11,12 +11,28 @@
 // until then MOCK_MODE="false" reports honest 'missing_key'/'stub' statuses
 // rather than crashing or silently mocking (Spec §5: "Missing keys => stub/
 // mock with documented TODO; never a crash").
+//
+// Task 27 (Wave 4, Solana): MOCK_MODE="false" + HELIUS_API_KEY present now
+// resolves real Helius adapters for SOLANA's walletActivity/risk
+// capabilities (createHeliusActivityProvider/createHeliusRiskProvider —
+// packages/providers/src/solana/{helius,risk}.ts). Every other
+// (chain, capability) pair (BSC's everything, SOLANA's marketData/
+// tokenMetadata/walletDiscovery) has no live adapter yet, and getProvider
+// still throws for those in live mode rather than silently mocking (same
+// "fail loudly, use getProviderStatuses() to check first" contract as
+// before). When HELIUS_API_KEY is absent, SOLANA walletActivity/risk fall
+// back to the shared MockProvider (graceful keyless fallback, binding
+// decision 5) while getProviderStatuses() still honestly reports
+// 'missing_key' for those rows — the boot/worker cycle never crashes just
+// because a key wasn't configured.
 
 import type { Chain, ProviderStatus } from '@flowradar/core';
 import type { ProviderCapability, ProviderCapabilityMap } from './types';
 import { createMockWorld } from './mock/world';
 import type { MockWorld } from './mock/world';
 import { MockProvider } from './mock/provider';
+import { createHeliusActivityProvider } from './solana/helius';
+import { createHeliusRiskProvider } from './solana/risk';
 
 const ALL_CAPABILITIES: ProviderCapability[] = [
   'walletActivity',
@@ -27,12 +43,24 @@ const ALL_CAPABILITIES: ProviderCapability[] = [
 ];
 const ALL_CHAINS: Chain[] = ['SOLANA', 'BSC'];
 
-/** Live-adapter env var each capability depends on, per Spec §5 (used only for status reporting — no live calls yet). */
+/**
+ * Live-adapter env var each capability depends on, per Spec §5 (used only for
+ * status reporting — no live calls yet), for SOLANA (the default chain this
+ * map covers directly). BSC uses different env vars for walletActivity/
+ * tokenMetadata (BSCSCAN_API_KEY) and risk (GOPLUS_API_KEY) — see
+ * liveKeyEnvVarFor's BSC-specific overrides below. Task 27 fix: `risk` used
+ * to default to GOPLUS_API_KEY here (correct for BSC, wrong for SOLANA —
+ * risk.ts's real Helius adapter reads HELIUS_API_KEY), which made
+ * getProviderStatuses report the wrong missing env var for SOLANA/risk;
+ * fixed by making HELIUS_API_KEY the default (matches SOLANA, since every
+ * other capability in this map is also HELIUS_API_KEY-keyed for SOLANA) and
+ * moving GOPLUS_API_KEY into the BSC-only override in liveKeyEnvVarFor.
+ */
 const LIVE_KEY_ENV_BY_CAPABILITY: Record<ProviderCapability, string> = {
   walletActivity: 'HELIUS_API_KEY', // + BSCSCAN_API_KEY for BSC — see per-chain note in getProviderStatuses
   marketData: 'BIRDEYE_API_KEY', // DexScreener is keyless-primary; Birdeye is the optional key-gated adapter
   tokenMetadata: 'HELIUS_API_KEY',
-  risk: 'GOPLUS_API_KEY', // Solana risk derives from Helius RPC; BSC risk from GoPlus
+  risk: 'HELIUS_API_KEY', // SOLANA risk derives from Helius RPC; BSC risk from GoPlus (see liveKeyEnvVarFor override)
   walletDiscovery: 'HELIUS_API_KEY'
 };
 
@@ -71,17 +99,47 @@ function getSharedMockProvider(): MockProvider {
 }
 
 /**
+ * Solana walletActivity/risk in live mode (Task 27): tries the real Helius
+ * adapter first; when HELIUS_API_KEY is absent, createHelius*Provider
+ * returns null and this falls back to the shared MockProvider rather than
+ * throwing (Task 27 binding decision 5's "graceful keyless fallback" — a
+ * misconfigured/keyless live deployment still boots and cycles, it just
+ * serves mock data for these two capabilities until a key is set).
+ * getProviderStatuses() independently reports 'missing_key' for this case so
+ * the gap is still visible in ops/Settings, even though getProvider() itself
+ * doesn't throw.
+ */
+function getSolanaHeliusOrMockFallback<C extends ProviderCapability>(capability: C): ProviderCapabilityMap[C] | null {
+  const env = { HELIUS_API_KEY: process.env.HELIUS_API_KEY };
+  if (capability === 'walletActivity') {
+    const live = createHeliusActivityProvider(env);
+    if (live) return live as unknown as ProviderCapabilityMap[C];
+    return getSharedMockProvider() as unknown as ProviderCapabilityMap[C];
+  }
+  if (capability === 'risk') {
+    const live = createHeliusRiskProvider(env);
+    if (live) return live as unknown as ProviderCapabilityMap[C];
+    return getSharedMockProvider() as unknown as ProviderCapabilityMap[C];
+  }
+  return null;
+}
+
+/**
  * Resolves a provider implementation for `capability` on `chain`. In
  * MOCK_MODE (default), every capability resolves to the shared MockProvider,
  * which implements all five capability interfaces against one MockWorld.
  *
- * Live mode (MOCK_MODE="false") is Wave 4 scope — until live adapters land,
- * this throws rather than silently mocking, so a misconfigured deployment
- * fails loudly instead of pretending to be live. Use `getProviderStatuses()`
- * to check `mode` before calling `getProvider` in live mode.
+ * Live mode (MOCK_MODE="false"): SOLANA's walletActivity/risk resolve to the
+ * real Helius adapter when HELIUS_API_KEY is set, or gracefully fall back to
+ * the shared MockProvider when it's missing (Task 27 — see
+ * getSolanaHeliusOrMockFallback above). Every other (chain, capability) pair
+ * has no live adapter yet and still throws rather than silently mocking, so
+ * a misconfigured deployment fails loudly instead of pretending to be live.
+ * Use `getProviderStatuses()` to check `mode` before calling `getProvider` in
+ * live mode.
  */
 export function getProvider<C extends ProviderCapability>(
-  _chain: Chain,
+  chain: Chain,
   capability: C
 ): ProviderCapabilityMap[C] {
   if (isMockMode()) {
@@ -91,8 +149,13 @@ export function getProvider<C extends ProviderCapability>(
     return getSharedMockProvider() as unknown as ProviderCapabilityMap[C];
   }
 
+  if (chain === 'SOLANA') {
+    const resolved = getSolanaHeliusOrMockFallback(capability);
+    if (resolved) return resolved;
+  }
+
   throw new Error(
-    `getProvider: live adapter for capability "${capability}" is not implemented yet (Wave 4). ` +
+    `getProvider: live adapter for capability "${capability}" on chain "${chain}" is not implemented yet (Wave 4). ` +
       `Set MOCK_MODE=true (or unset it) to use the deterministic mock world.`
   );
 }
@@ -122,6 +185,25 @@ export function getProviderStatuses(): ProviderStatus[] {
 
       const keyEnvVar = liveKeyEnvVarFor(chain, capability);
       const hasKey = Boolean(keyEnvVar && process.env[keyEnvVar]);
+
+      // Task 27: SOLANA walletActivity/risk have a real Helius adapter now —
+      // report 'live' when the key is present instead of the generic
+      // "not implemented yet" stub note every other (chain, capability) pair
+      // still gets.
+      const hasLiveAdapter = chain === 'SOLANA' && (capability === 'walletActivity' || capability === 'risk');
+      if (hasLiveAdapter) {
+        statuses.push({
+          name: liveAdapterNameFor(chain, capability),
+          chain,
+          capability,
+          mode: hasKey ? 'live' : 'missing_key',
+          note: hasKey
+            ? 'Live Helius adapter active (Enhanced Transactions API + RPC risk checks).'
+            : `Missing ${keyEnvVar ?? 'required env var'}; falling back to MockProvider (graceful keyless fallback).`
+        });
+        continue;
+      }
+
       statuses.push({
         name: liveAdapterNameFor(chain, capability),
         chain,
