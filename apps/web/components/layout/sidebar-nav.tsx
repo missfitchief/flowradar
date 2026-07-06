@@ -13,12 +13,19 @@ interface NavItem {
 // becomes the default landing page ('/'), the old Overview hot-table code is
 // merged into /tokens (now the single dense raw-table layer). Backtest +
 // Shadow (Task 42) remain reachable, placed after Alerts, before Settings.
+//
+// Task 36 (Wave 4.5): "Sources" (Source Health) is placed right after
+// Wallets — it's an ops/pipeline-health view over the same wallet-tracking
+// domain (candidate feeders that eventually become Wallet rows), so it reads
+// naturally as a sibling of Wallets rather than being buried next to Settings
+// (a general config page, not a wallet-pipeline concept).
 const NAV_ITEMS: NavItem[] = [
   { label: 'Signal Feed', href: '/' },
   { label: 'Tokens', href: '/tokens' },
   { label: 'Money Flow', href: '/flow' },
   { label: 'Wallet Graph', href: '/graph' },
   { label: 'Wallets', href: '/wallets' },
+  { label: 'Sources', href: '/sources' },
   { label: 'Alerts', href: '/alerts' },
   { label: 'Backtest', href: '/backtest' },
   { label: 'Shadow', href: '/shadow' },

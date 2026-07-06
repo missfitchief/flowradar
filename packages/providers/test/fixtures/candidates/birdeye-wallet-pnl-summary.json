@@ -1,0 +1,28 @@
+{
+  "success": true,
+  "data": {
+    "summary": {
+      "unique_tokens": 14,
+      "counts": {
+        "total_buy": 30,
+        "total_sell": 28,
+        "total_trade": 58,
+        "total_win": 40,
+        "total_loss": 18,
+        "win_rate": 0.69
+      },
+      "cashflow_usd": {
+        "total_invested": 42000,
+        "total_sold": 61000,
+        "current_value": 3000
+      },
+      "pnl": {
+        "realized_profit_usd": 19000,
+        "realized_profit_percent": 45.2,
+        "unrealized_usd": 500,
+        "total_usd": 19500,
+        "avg_profit_per_trade_usd": 327.5
+      }
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "tokenAddress": "TokenMintAddressAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "owner": "BirdeyeTopTrader1WalletXXXXXXXXXXXXXXXXXXXX",
+        "tags": [],
+        "type": "trader",
+        "volume": 120000,
+        "trade": 45,
+        "tradeBuy": 22,
+        "tradeSell": 23,
+        "volumeBuy": 60000,
+        "volumeSell": 60000,
+        "volumeUsd": 120000,
+        "volumeBuyUsd": 60000,
+        "volumeSellUsd": 60000,
+        "totalPnl": 18000,
+        "unrealizedPnl": 1000,
+        "realizedPnl": 17000
+      },
+      {
+        "tokenAddress": "TokenMintAddressAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "owner": "BirdeyeTopTrader2WalletYYYYYYYYYYYYYYYYYYYY",
+        "tags": [],
+        "type": "trader",
+        "volume": 40000,
+        "trade": 12,
+        "tradeBuy": 6,
+        "tradeSell": 6,
+        "volumeBuy": 20000,
+        "volumeSell": 20000,
+        "volumeUsd": 40000,
+        "volumeBuyUsd": 20000,
+        "volumeSellUsd": 20000,
+        "totalPnl": -500,
+        "unrealizedPnl": -500,
+        "realizedPnl": 0
+      }
+    ]
+  }
+}
