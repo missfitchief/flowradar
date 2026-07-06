@@ -46,6 +46,14 @@ export default defineConfig({
           include: ['test/**/*.test.ts'],
           passWithNoTests: true
         }
+      },
+      {
+        test: {
+          name: 'web',
+          root: './apps/web',
+          include: ['test/**/*.test.ts'],
+          passWithNoTests: true
+        }
       }
     ]
   }

@@ -9,8 +9,10 @@ interface NavItem {
   href: string;
 }
 
-// Order matches binding decision #5 exactly: Overview, Tokens, Wallets,
-// Money Flow, Wallet Graph, Alerts, Settings.
+// Order matches binding decision #5 (Task 17) plus Task 42's own nav
+// binding decision 5: Backtest + Shadow inserted after Alerts, before
+// Settings — full nav reorder (Signal Feed as default landing page etc.) is
+// Task 43's job, not this one.
 const NAV_ITEMS: NavItem[] = [
   { label: 'Overview', href: '/' },
   { label: 'Tokens', href: '/tokens' },
@@ -18,6 +20,8 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Money Flow', href: '/flow' },
   { label: 'Wallet Graph', href: '/graph' },
   { label: 'Alerts', href: '/alerts' },
+  { label: 'Backtest', href: '/backtest' },
+  { label: 'Shadow', href: '/shadow' },
   { label: 'Settings', href: '/settings' },
 ];
 

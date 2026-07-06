@@ -31,6 +31,7 @@ import { runEntityClustering } from './clustering';
 import { runSignalDetectionPass } from './signals';
 import { dispatchPendingAlerts } from './alerts';
 import { runBacktestPass } from './backtest';
+import { runHistoricalReplay } from './replayRunner';
 import { importWalletsCsv } from './csv/importWalletsCsv';
 import { runGraphSearch } from './graph/runSearch';
 
@@ -62,6 +63,11 @@ function log(message: string, meta?: Record<string, unknown>): void {
 
 async function wipeAllTables(): Promise<void> {
   log('wiping all app tables (FK-safe leaf-to-root order)...');
+  // BacktestRun carries no FK to any other app table (see schema.prisma's own
+  // "kind + params + summary Json" shape) — wiped here too (Task 42) so a
+  // rerun of this fully-rerunnable script doesn't leave a stale prior
+  // replay-run row sitting alongside the fresh one this run creates below.
+  await prisma.backtestRun.deleteMany();
   await prisma.backtestResult.deleteMany();
   await prisma.alert.deleteMany();
   await prisma.signal.deleteMany();
@@ -661,7 +667,8 @@ async function runSelfCheck(
   world: MockWorld,
   signalsByToken: SignalsByToken,
   graphDemoSearchId: string,
-  backtestResult: { signalsEvaluated: number; rowsUpserted: number; labelCounts: Record<string, number> }
+  backtestResult: { signalsEvaluated: number; rowsUpserted: number; labelCounts: Record<string, number> },
+  replayRunResult: Awaited<ReturnType<typeof runHistoricalReplay>>
 ): Promise<{ rows: SelfCheckRow[]; hardFail: boolean; concerns: string[] }> {
   const rows: SelfCheckRow[] = [];
   const concerns: string[] = [];
@@ -1074,6 +1081,56 @@ async function runSelfCheck(
     );
   }
 
+  // ---------------------------------------------------------------------
+  // BacktestRun self-check (Task 42 binding decision 6): "BacktestRun exists
+  // with summary.rulePerformance non-empty + syntheticEvidence true (mock
+  // world) + page-critical fields present." Reads the JUST-CREATED replay
+  // run's own persisted row back from the DB (rather than trusting the
+  // in-memory replayRunResult alone) so a bug in runHistoricalReplay's own
+  // persistence step (not just its pure-function pipeline) would surface
+  // here too — same "read the DB, don't just trust the in-memory summary"
+  // precedent the backtest self-checks above already follow.
+  // ---------------------------------------------------------------------
+  const persistedRun = await prisma.backtestRun.findUnique({ where: { id: replayRunResult.backtestRunId } });
+  const persistedRunExists = persistedRun !== null && persistedRun.status === 'complete';
+  rows.push({
+    check: 'BacktestRun row exists (status=complete) for the seed-time replay run',
+    expected: 'exists, status=complete',
+    actual: persistedRun ? `status=${persistedRun.status}` : 'missing',
+    pass: persistedRunExists
+  });
+
+  const persistedSummary = persistedRun?.summary as
+    | { rulePerformance?: Record<string, unknown>; walkForward?: unknown; thresholdTuning?: unknown; bucketPerformance?: unknown }
+    | null
+    | undefined;
+  const rulePerformanceKeys = persistedSummary?.rulePerformance ? Object.keys(persistedSummary.rulePerformance) : [];
+  const rulePerformanceNonEmpty = rulePerformanceKeys.length > 0;
+  rows.push({
+    check: 'BacktestRun.summary.rulePerformance is non-empty (all 7 rule keys present)',
+    expected: '7 rule keys (A-G)',
+    actual: `${rulePerformanceKeys.length} key(s): ${rulePerformanceKeys.join(',') || '(none)'}`,
+    pass: rulePerformanceNonEmpty
+  });
+
+  const pageCriticalFieldsPresent =
+    persistedSummary?.walkForward !== undefined &&
+    persistedSummary?.thresholdTuning !== undefined &&
+    persistedSummary?.bucketPerformance !== undefined;
+  rows.push({
+    check: 'BacktestRun.summary carries every /backtest page-critical field (walkForward, thresholdTuning, bucketPerformance)',
+    expected: 'all 3 present',
+    actual: `walkForward=${persistedSummary?.walkForward !== undefined}, thresholdTuning=${persistedSummary?.thresholdTuning !== undefined}, bucketPerformance=${persistedSummary?.bucketPerformance !== undefined}`,
+    pass: pageCriticalFieldsPresent
+  });
+
+  rows.push({
+    check: 'BacktestRun.syntheticEvidence is true (mock world — every seeded market series is synthetic)',
+    expected: 'true',
+    actual: String(persistedRun?.syntheticEvidence ?? 'missing'),
+    pass: persistedRun?.syntheticEvidence === true
+  });
+
   // Hard-fail checks (brief: "exit code 1 if any fails") exclude only the
   // NOVA 60-70 flowScore band (the brief's own explicit "still pass but
   // flag" carve-out, handled separately above via `concerns.push` while
@@ -1212,6 +1269,17 @@ function printBacktestSummary(result: { signalsConsidered: number; signalsEvalua
       console.log(`    ${label.padEnd(16)} ${count}`);
     }
   }
+  console.log('');
+}
+
+/** Prints the seed-time historical-replay run's own summary (Task 42 binding decision 6) so /backtest's expected content is visible directly in seed output. */
+function printReplayRunSummary(result: Awaited<ReturnType<typeof runHistoricalReplay>>): void {
+  console.log('Historical replay run summary (feeds /backtest page):');
+  console.log(`  BacktestRun id:          ${result.backtestRunId}`);
+  console.log(`  replayed signal count:   ${result.summary.replayedSignalCount}`);
+  console.log(`  synthetic evidence:      ${result.summary.syntheticEvidencePresent}`);
+  console.log(`  walk-forward verdict:    ${result.summary.walkForward.verdict}`);
+  console.log(`  overfitting warning:     ${result.summary.thresholdTuning.overfittingWarning.slice(0, 80)}...`);
   console.log('');
 }
 
@@ -1436,13 +1504,38 @@ async function main(): Promise<void> {
   });
   log('backtest pass complete.', { ...backtestResult, labelCounts: JSON.stringify(backtestResult.labelCounts) });
 
+  // Phase 7.96: ONE historical-replay run over the seeded 72h period (Task 42
+  // binding decision 6) — "after existing passes, run ONE runHistoricalReplay
+  // over the seeded period so /backtest renders content out of the box."
+  // Replays [genesis, world.meta.horizon] (the exact window every trade/
+  // market-snapshot/signal in this seed run was built against) at the
+  // default 30-minute step. This is a real (if seed-scoped) no-lookahead
+  // replay pass — NOT a second, different data source — so its own
+  // syntheticEvidence flag legitimately comes back true here (the mock
+  // world's TokenMarketSnapshot rows, plus seedBacktestContinuation's
+  // seed_synthetic_continuation rows above, are exactly what Task 41's
+  // evaluateReplay flags as synthetic evidence).
+  const replayRunResult = await runHistoricalReplay(prisma, { from: genesis, to: world.meta.horizon });
+  log('historical replay run complete (seeds /backtest page content).', {
+    backtestRunId: replayRunResult.backtestRunId,
+    replayedSignalCount: replayRunResult.summary.replayedSignalCount,
+    syntheticEvidencePresent: replayRunResult.summary.syntheticEvidencePresent
+  });
+
   // Phase 8: self-check.
-  const { rows: selfCheckRows, hardFail, concerns } = await runSelfCheck(world, signalsByToken, graphDemoResult.searchId, backtestResult);
+  const { rows: selfCheckRows, hardFail, concerns } = await runSelfCheck(
+    world,
+    signalsByToken,
+    graphDemoResult.searchId,
+    backtestResult,
+    replayRunResult
+  );
   printSelfCheckTable(selfCheckRows);
   printSignalSummaryTable(signalsByToken);
   await printGraphSummary(graphDemoResult.searchId);
   await printClusterSummary(world.meta.scenarios.nova.tokenAddress);
   printBacktestSummary(backtestResult);
+  printReplayRunSummary(replayRunResult);
 
   // Phase 9: summary table.
   await printSummaryTable();
