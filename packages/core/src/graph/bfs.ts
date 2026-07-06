@@ -239,7 +239,7 @@ export async function runBfs(
   }
 
   function edgeKey(e: { source: string; dest: string; relationship: WalletGraphRelationship }): string {
-    return `${e.source} ${e.dest} ${e.relationship}`;
+    return `${e.source}${e.dest}${e.relationship}`;
   }
 
   // Global candidate priority queue. Every Gate-1-passing edge discovered
