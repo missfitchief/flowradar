@@ -565,4 +565,66 @@ describe.skipIf(!(await probePort('localhost', 5439)))('ingestNormalizedTxs — 
     expect(edge).not.toBeNull();
     expect(edge!.actionType).toBe('bridge_deposit');
   });
+
+  // Task 26 review Critical fix: first-write-wins for the transfer family.
+  // A registry change between two ingests of the SAME leg must never
+  // duplicate the MoneyFlowEdge row (the plain DB unique key includes
+  // actionType, so a naive create would not collide once actionType
+  // changes — see ingest.ts's upsertMoneyFlowEdge doc comment).
+  it('re-ingesting the same transfer leg after a registry change does NOT duplicate the edge (first-write-wins)', async () => {
+    const counterparty = `${ADDR_PREFIX}wallet_registry_change_counterparty`;
+    const sender = `${ADDR_PREFIX}wallet_registry_change_sender`;
+    const txHash = `${ADDR_PREFIX}tx_registry_change_transfer`;
+
+    const tx: NormalizedTx = {
+      txHash,
+      blockOrSlot: 2004n,
+      ts: new Date('2026-07-02T00:20:00Z'),
+      legs: [
+        {
+          kind: 'token_transfer',
+          from: sender,
+          to: counterparty,
+          asset: { address: CEX_TOKEN_ADDR, symbol: 'T5CEX', decimals: 9 },
+          amountToken: '15',
+          amountUsd: 7.5
+        }
+      ]
+    };
+
+    // First ingest: counterparty is NOT yet in AddressRegistry -> 'transfer'.
+    await ingestNormalizedTxs(prisma, CHAIN, sender, [tx]);
+
+    const afterFirst = await prisma.moneyFlowEdge.findMany({
+      where: { txHash, sourceAddress: sender, destinationAddress: counterparty }
+    });
+    expect(afterFirst).toHaveLength(1);
+    expect(afterFirst[0]!.actionType).toBe('transfer');
+
+    // Registry changes: counterparty is now a known CEX address.
+    await prisma.addressRegistry.upsert({
+      where: { chain_address: { chain: CHAIN, address: counterparty } },
+      create: {
+        chain: CHAIN,
+        address: counterparty,
+        category: 'CEX',
+        label: 'T5TEST registry-change counterparty (became CEX after first ingest)',
+        source: 'test-fixture',
+        doNotExpand: true
+      },
+      update: {}
+    });
+
+    // Re-ingest the SAME leg. Without the fix, resolveCexAwareActionType now
+    // returns 'cex_deposit', which does not collide with the existing
+    // 'transfer' row under the plain (txHash, source, dest, actionType)
+    // unique key, so a naive create would insert a SECOND row.
+    await ingestNormalizedTxs(prisma, CHAIN, sender, [tx]);
+
+    const afterSecond = await prisma.moneyFlowEdge.findMany({
+      where: { txHash, sourceAddress: sender, destinationAddress: counterparty }
+    });
+    expect(afterSecond).toHaveLength(1);
+    expect(afterSecond[0]!.actionType).toBe('transfer'); // first write wins, not re-tagged
+  });
 });

@@ -15,7 +15,23 @@
 // (raw source/destination addresses, no Wallet FK) and are written once per
 // qualifying leg regardless of which wallet's stream triggered the call —
 // dedup on (txHash, sourceAddress, destinationAddress, actionType) makes
-// repeated writes from multiple wallets' perspectives idempotent.
+// repeated writes from multiple wallets' perspectives idempotent for
+// non-registry-derived actionTypes.
+//
+// Idempotency guarantee (Task 26 fix, first-write-wins): for the TRANSFER
+// FAMILY {transfer, cex_deposit, cex_withdrawal} — the three actionTypes
+// whose value depends on live AddressRegistry state at ingest time, not on
+// anything leg-intrinsic — dedup is first-write-wins on (txHash,
+// sourceAddress, destinationAddress) across the whole family, not the plain
+// DB unique. A registry change (a counterparty newly tagged/untagged as CEX)
+// re-tags only FUTURE edges; it never retroactively changes or duplicates a
+// row already written for that same leg. Historical rows are NOT
+// retroactively re-tagged — a future backfill job may do that deliberately,
+// as an explicit, auditable pass, rather than as a side effect of re-ingest.
+// All other actionTypes (bridge_*, dex_*, lp_*, contract_interaction) are
+// leg-intrinsic (fixed by the provider-typed leg kind, never by a registry
+// lookup) and keep the original create+P2002-swallow dedup on the full
+// (txHash, sourceAddress, destinationAddress, actionType) unique key.
 //
 // Decimal/Float coercion: several WalletTokenTrade/TokenMarketSnapshot columns
 // are non-nullable Decimal/Float/Int in schema.prisma (priceUsd,
@@ -396,11 +412,17 @@ interface EdgeWriteInput {
   actionType: MoneyFlowActionType;
 }
 
+const TRANSFER_FAMILY: readonly MoneyFlowActionType[] = ['transfer', 'cex_deposit', 'cex_withdrawal'];
+
 /**
- * MoneyFlowEdge dedup is now enforced by DB-level unique constraint
+ * MoneyFlowEdge dedup for non-transfer-family actionTypes (bridge_*, dex_*,
+ * lp_*, contract_interaction) is enforced by the DB-level unique constraint
  * (txHash, sourceAddress, destinationAddress, actionType). A direct create
  * wrapped in try/catch swallows P2002 (unique violation), making re-ingest
- * of the same edge a silent no-op.
+ * of the same edge a silent no-op. These actionTypes are leg-intrinsic
+ * (fixed by the provider-typed leg kind), so the (txHash, source, dest,
+ * actionType) key alone is a stable identity for the same leg across
+ * re-ingests.
  *
  * sourceChain/destinationChain are set to the same `chain` the caller passes
  * (the chain the leg's own NormalizedTx belongs to) — a bridge's two sides
@@ -424,6 +446,22 @@ interface EdgeWriteInput {
  * to tag correctly, and the two conditions are mutually exclusive in
  * practice (an edge does not have both a CEX source and CEX dest given how
  * registry addresses are curated).
+ *
+ * First-write-wins for the transfer family (Task 26 Critical fix): because
+ * the resolved actionType for {transfer, cex_deposit, cex_withdrawal} is a
+ * function of *live* AddressRegistry state, the same leg can legitimately
+ * resolve to a different actionType across two ingest calls (e.g. a
+ * counterparty gets registered as a CEX between the first and second
+ * ingest). The plain DB unique key includes actionType, so that second call
+ * would NOT collide with the first row and would insert a duplicate edge for
+ * the same (txHash, source, dest) pair — breaking the "re-ingest is a no-op"
+ * invariant the worker's cursor-overlap logic depends on (see file header).
+ * To prevent this, before creating a transfer-family edge we `findFirst` for
+ * an existing row with the same (txHash, sourceAddress, destinationAddress)
+ * and ANY transfer-family actionType; if one exists, we skip entirely (no
+ * create, no update) — the first-ever-ingested actionType for that leg wins
+ * permanently. A registry change therefore only affects edges for legs not
+ * yet seen; it never retroactively re-tags or duplicates a historical row.
  */
 async function upsertMoneyFlowEdge(prisma: PrismaClient, input: EdgeWriteInput): Promise<void> {
   const { chain, tx, leg, actionType } = input;
@@ -435,6 +473,22 @@ async function upsertMoneyFlowEdge(prisma: PrismaClient, input: EdgeWriteInput):
 
   const resolvedActionType =
     actionType === 'transfer' ? await resolveCexAwareActionType(prisma, chain, leg) : actionType;
+
+  if (TRANSFER_FAMILY.includes(resolvedActionType)) {
+    // First-write-wins: a prior ingest (under any transfer-family
+    // actionType) already recorded this leg — registry state has since
+    // possibly changed, but that must not retag or duplicate the row.
+    const existing = await prisma.moneyFlowEdge.findFirst({
+      where: {
+        txHash: tx.txHash,
+        sourceAddress: leg.from,
+        destinationAddress: leg.to,
+        actionType: { in: TRANSFER_FAMILY as MoneyFlowActionType[] }
+      },
+      select: { id: true }
+    });
+    if (existing) return;
+  }
 
   try {
     await prisma.moneyFlowEdge.create({
@@ -456,7 +510,16 @@ async function upsertMoneyFlowEdge(prisma: PrismaClient, input: EdgeWriteInput):
       }
     });
   } catch (error) {
-    // dedupe enforced by DB unique; P2002 = already ingested
+    // Backstop for exact-key races: the findFirst-then-create sequence above
+    // (transfer family) reintroduces a narrow TOCTOU window under concurrent
+    // ingest of the exact same leg, and even the untouched non-family path
+    // has always relied on this same swallow for its own create race. Both
+    // are bounded in practice by the worker's serialized runner (walletActivity
+    // job polls/ingests one wallet at a time in a single sequential loop —
+    // apps/worker/src/jobs/walletActivity.ts — the same "no concurrent ingest
+    // of one leg" assumption the rotation-signal dedupe in rotation.ts relies
+    // on). P2002 here still means "already ingested" and is a safe no-op; we
+    // deliberately do not add advisory locks to close this window further.
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       return;
     }
