@@ -19,11 +19,16 @@ interface NavItem {
 // domain (candidate feeders that eventually become Wallet rows), so it reads
 // naturally as a sibling of Wallets rather than being buried next to Settings
 // (a general config page, not a wallet-pipeline concept).
+// Task 38 (Wave 4.6): "Overlap" (Multi-token Wallet Overlap Finder) sits
+// right after Wallet Graph — both are ad-hoc wallet-discovery TOOLS (run a
+// search, inspect results) rather than always-on dashboards, so they read
+// naturally as a pair, ahead of the passive Wallets leaderboard.
 const NAV_ITEMS: NavItem[] = [
   { label: 'Signal Feed', href: '/' },
   { label: 'Tokens', href: '/tokens' },
   { label: 'Money Flow', href: '/flow' },
   { label: 'Wallet Graph', href: '/graph' },
+  { label: 'Overlap', href: '/overlap' },
   { label: 'Wallets', href: '/wallets' },
   { label: 'Sources', href: '/sources' },
   { label: 'Alerts', href: '/alerts' },

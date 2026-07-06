@@ -13,6 +13,7 @@ export * from './externalWalletSource';
 export * from './candidateValidation';
 export * from './tokenTopTraderBackfill';
 export * from './dune/duneOverlap';
+export * from './dune/localOverlap';
 export * from './signals';
 export * from './backtest';
 export * from './replayRunner';

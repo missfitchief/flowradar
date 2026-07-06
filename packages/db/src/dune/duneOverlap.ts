@@ -313,8 +313,24 @@ export interface DuneQuerySyncResult {
   sourcesConsidered: number;
   sourcesRefreshed: number;
   sourcesSkippedDisabled: number;
+  /**
+   * Task 38 fix (folded from Task 37 review): an ENABLED source for which
+   * resolveClient() returned null/undefined mid-loop (e.g. DUNE_API_KEY
+   * disappeared, or a MOCK_MODE resolver returning nothing) — distinct from
+   * sourcesSkippedDisabled (an operator's deliberate `enabled=false`) and
+   * from `errors` (the client resolved but its executeQuery call threw).
+   * Previously this case was silently `continue`d with only a log line — no
+   * counter incremented, no row updated — so a pass summary or the UI could
+   * not tell "0 errors, N refreshed" apart from "some enabled sources were
+   * quietly never even attempted". Counted here AND the row's status/
+   * lastError are set so it's visible in both the pass summary and any UI
+   * reading DuneQuerySource rows.
+   */
+  sourcesSkippedNoClient: number;
   errors: number;
 }
+
+const NO_CLIENT_ERROR = 'runDuneQuerySync: no DuneClient available (missing DUNE_API_KEY or unresolved mock)';
 
 /**
  * Refreshes every ENABLED DuneQuerySource row credit-safely: calls the
@@ -337,6 +353,7 @@ export async function runDuneQuerySync(
 
   let sourcesRefreshed = 0;
   let sourcesSkippedDisabled = 0;
+  let sourcesSkippedNoClient = 0;
   let errors = 0;
 
   for (const source of allSources) {
@@ -349,7 +366,14 @@ export async function runDuneQuerySync(
     try {
       const client = resolveClient();
       if (!client) {
-        log?.info('runDuneQuerySync: no DuneClient available, skipping', { source: source.name });
+        sourcesSkippedNoClient += 1;
+        await prisma.duneQuerySource
+          .update({
+            where: { id: source.id },
+            data: { status: 'no_client', lastError: NO_CLIENT_ERROR, lastRunAt: new Date() }
+          })
+          .catch(() => undefined);
+        log?.error('runDuneQuerySync: no DuneClient available, skipping', { source: source.name });
         continue;
       }
 
@@ -361,7 +385,8 @@ export async function runDuneQuerySync(
           lastRunAt: new Date(),
           lastSuccessAt: new Date(),
           lastExecutionId: resultSet.executionId ?? null,
-          status: 'ok'
+          status: 'ok',
+          lastError: null
         }
       });
       sourcesRefreshed += 1;
@@ -374,7 +399,7 @@ export async function runDuneQuerySync(
       errors += 1;
       const message = err instanceof Error ? err.message : String(err);
       await prisma.duneQuerySource
-        .update({ where: { id: source.id }, data: { status: 'error', lastRunAt: new Date() } })
+        .update({ where: { id: source.id }, data: { status: 'error', lastError: message, lastRunAt: new Date() } })
         .catch(() => undefined);
       log?.error(`runDuneQuerySync: refresh failed for source ${source.name}`, { source: source.name, error: message });
     }
@@ -384,6 +409,7 @@ export async function runDuneQuerySync(
     sourcesConsidered: allSources.length,
     sourcesRefreshed,
     sourcesSkippedDisabled,
+    sourcesSkippedNoClient,
     errors
   };
   log?.info('runDuneQuerySync cycle complete', { ...summary });

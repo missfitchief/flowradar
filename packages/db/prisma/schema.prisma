@@ -869,6 +869,13 @@ model DuneQuerySource {
   lastRunAt         DateTime?
   lastSuccessAt     DateTime?
   status            String            @default("idle")
+  /// Task 38 fix (folded from Task 37 review): last error message from a
+  /// failed refresh OR a "no DuneClient available" skip (status='no_client')
+  /// — same lastError convention as ExternalWalletSource.lastError, giving
+  /// runDuneQuerySync's pass summary + the UI observability into a
+  /// silently-skipped-until-now case (missing key mid-loop for an enabled
+  /// source).
+  lastError         String?
   creditsEstimate   Int?
   parametersJson    Json?
   outputSchemaJson  Json?

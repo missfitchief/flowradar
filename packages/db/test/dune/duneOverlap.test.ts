@@ -277,5 +277,29 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runDuneQuerySync', () =>
     expect(result.errors).toBeGreaterThanOrEqual(1);
     const row = await prisma.duneQuerySource.findUnique({ where: { name: sourceName } });
     expect(row?.status).toBe('error');
+    expect(row?.lastError).toContain('simulated Dune API failure');
+  });
+
+  // Folded fix (Task 37 review, done as part of Task 38): resolveClient()
+  // returning null/undefined for an ENABLED source mid-loop (e.g. the API
+  // key disappeared between sources) must be counted distinctly from both
+  // sourcesSkippedDisabled (a deliberate enabled=false) and errors (a client
+  // that resolved but threw) — and must leave the row's status/lastError set
+  // so the pass summary + any UI reading DuneQuerySource rows can see it,
+  // not just a log line that silently vanished.
+  it('enabled source with no resolvable client is counted (sourcesSkippedNoClient), not silently dropped', async () => {
+    const sourceName = `${ADDR_PREFIX}_source_no_client`;
+    await makeSourceRow(sourceName);
+
+    const result = await runDuneQuerySync(prisma, DEFAULT_SETTINGS, () => null);
+
+    expect(result.sourcesSkippedNoClient).toBeGreaterThanOrEqual(1);
+    expect(result.errors).toBe(0);
+    expect(result.sourcesRefreshed).toBe(0);
+
+    const row = await prisma.duneQuerySource.findUnique({ where: { name: sourceName } });
+    expect(row?.status).toBe('no_client');
+    expect(row?.lastError).toBeTruthy();
+    expect(row?.lastRunAt).not.toBeNull();
   });
 });
