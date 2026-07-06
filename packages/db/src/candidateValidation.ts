@@ -10,9 +10,11 @@
 //   - 'promote' => upsert a tracked Wallet row (isWatched=true, notes
 //     'promoted from <source>'), insert a WalletStats row (source 'computed'
 //     when the evidence came from local computeFifoPnl, 'provider' when it
-//     came from a provider wallet-PnL capability), set
-//     CandidateWallet.validationStatus='promoted' + promotedWalletId +
-//     validationConfidence.
+//     came from a provider wallet-PnL capability) — written from THE SAME
+//     computedPnl evaluateCandidate's verdict was computed from (never
+//     re-derived — see promoteCandidate's header for why that used to be a
+//     trust-boundary bug), set CandidateWallet.validationStatus='promoted' +
+//     promotedWalletId + validationConfidence.
 //   - 'reject' => validationStatus='rejected' + rejectionReason (the
 //     evaluateCandidate reason string verbatim — already human-readable and
 //     names the specific failing category, e.g. "excluded service address
@@ -46,8 +48,10 @@
 // per-source try/catch).
 
 import type { Prisma, PrismaClient } from '@prisma/client';
-import { computeFifoPnl, evaluateCandidate } from '@flowradar/core';
+import { computeFifoPnl, computeWalletScore, evaluateCandidate } from '@flowradar/core';
 import type { CandidateEvidence, Chain, ComputedPnlEvidence, RegistryCategory, Settings } from '@flowradar/core';
+
+const BOT_LABELS = new Set(['possible_bot', 'mev']);
 
 export interface CandidateValidationLogger {
   info(message: string, meta?: Record<string, unknown>): void;
@@ -146,7 +150,23 @@ export async function runCandidateValidation(
       });
 
       if (result.verdict === 'promote') {
-        const walletId = await promoteCandidate(prisma, candidate, evidence.evidenceSource);
+        // Evidence gate (evaluateCandidate step 3) guarantees computedPnl is
+        // present on any 'promote' verdict; evidenceSource is set alongside
+        // it in assembleEvidence. Both are asserted non-null below so
+        // promoteCandidate persists the SAME evidence the verdict was
+        // computed from, never a re-derivation (see promoteCandidate header).
+        if (!evidence.evidence.computedPnl || !evidence.evidenceSource) {
+          throw new Error(
+            `runCandidateValidation: 'promote' verdict with no computedPnl/evidenceSource for ${candidate.walletAddress} — programming error, evidence gate should have prevented this`
+          );
+        }
+        const walletId = await promoteCandidate(
+          prisma,
+          candidate,
+          evidence.evidence.computedPnl,
+          evidence.evidenceSource,
+          evidence.evidence.labels ?? []
+        );
         await prisma.candidateWallet.update({
           where: { id: candidate.id },
           data: {
@@ -361,8 +381,24 @@ async function computeLocalPnlEvidence(prisma: PrismaClient, walletId: string): 
 /**
  * Promotes a candidate to a real, tracked Wallet: upsert (isWatched=true,
  * notes 'promoted from <source>'), insert a fresh WalletStats row sourced
- * from whichever evidence path produced the passing computedPnl. Returns the
- * Wallet id for CandidateWallet.promotedWalletId.
+ * from THE EXACT evidence evaluateCandidate's verdict was computed from.
+ * Returns the Wallet id for CandidateWallet.promotedWalletId.
+ *
+ * Trust-boundary fix (Task 35 Critical): this function used to re-derive
+ * stats via computeLocalPnlEvidence(prisma, wallet.id) regardless of what
+ * evidence actually produced the 'promote' verdict. For a candidate promoted
+ * on PROVIDER evidence with no local WalletTokenTrade rows, that
+ * re-derivation returns undefined, so the persisted WalletStats row was
+ * written all-zero (via `?? 0`) yet tagged source='provider' — contradicting
+ * the real evaluated evidence, and causing fetchAggregateInputs to derive
+ * meetsProfitable=false from the zeroed row, so a provider-promoted wallet
+ * would never count toward smartWalletCount even though it just cleared
+ * every profitableWallet threshold. Fixed by requiring the caller
+ * (runCandidateValidation) to pass the SAME computedPnl + evidenceSource the
+ * verdict used — a 'promote' verdict guarantees both are present (evidence
+ * gate, evaluateCandidate step 3), so they are non-optional here; an absent
+ * computedPnl reaching this function is a programming error upstream, not a
+ * recoverable state, hence the throw rather than another `?? 0` fallback.
  *
  * Anti-clobber guard (same contract as walletStatsRefresh.ts's own "never
  * overwrite a CSV-authoritative wallet's latest stats row" rule — see that
@@ -378,8 +414,16 @@ async function computeLocalPnlEvidence(prisma: PrismaClient, walletId: string): 
 async function promoteCandidate(
   prisma: PrismaClient,
   candidate: { walletAddress: string; chain: Chain; source: string },
-  evidenceSource?: 'provider' | 'computed'
+  computedPnl: ComputedPnlEvidence,
+  evidenceSource: 'provider' | 'computed',
+  labels: string[]
 ): Promise<string> {
+  if (!computedPnl) {
+    // Defensive — see header. evaluateCandidate's evidence gate should make
+    // this unreachable for any 'promote' verdict.
+    throw new Error('promoteCandidate: computedPnl is required for a promote verdict — programming error');
+  }
+
   const now = new Date();
 
   const wallet = await prisma.wallet.upsert({
@@ -408,28 +452,45 @@ async function promoteCandidate(
     return wallet.id; // CSV is Layer-1 authoritative — never write a new stats row over it
   }
 
-  // Re-derive the same evidence used for the verdict so the persisted
-  // WalletStats row matches what was actually evaluated (rather than
-  // re-querying computeFifoPnl a second time with different inputs — cheap
-  // enough at this scale, and keeps promoteCandidate a pure "given a verdict,
-  // persist it" step without threading the full ComputedPnlEvidence object
-  // through an extra parameter).
-  const computedPnl = await computeLocalPnlEvidence(prisma, wallet.id);
+  // unrealizedPnlUsd: the evidence shape (ComputedPnlEvidence, shared with
+  // evaluateCandidate) doesn't carry unrealized separately — only the
+  // combined pnl30d and the realized figure — so it's derived the same way
+  // computeLocalPnlEvidence's own callers would read it: pnl30d - realized
+  // (documented here since it's a derivation, not a re-fetch).
+  const unrealizedPnlUsd = computedPnl.pnl30d - computedPnl.realizedPnlUsd;
+
+  const looksLikeBot = labels.some((l) => BOT_LABELS.has(l));
+  const scoreResult = computeWalletScore({
+    pnl30d: computedPnl.pnl30d,
+    winRate: computedPnl.winRate,
+    tradeCount: computedPnl.tradeCount,
+    humanLikelihood: looksLikeBot ? 0.2 : 0.6,
+    entryQuality: 0.6,
+    holdingQuality: 0.6,
+    recentPerf: 0.6,
+    botLikelihood: looksLikeBot ? 0.5 : 0,
+    pnlConfidence: computedPnl.confidence
+  });
 
   await prisma.walletStats.create({
     data: {
       walletId: wallet.id,
       window: '30d',
-      pnlUsd: computedPnl?.pnl30d ?? 0,
-      realizedPnlUsd: computedPnl?.realizedPnlUsd ?? 0,
-      unrealizedPnlUsd: computedPnl ? computedPnl.pnl30d - computedPnl.realizedPnlUsd : 0,
-      winRate: computedPnl?.winRate ?? 0,
-      tradeCount: computedPnl?.tradeCount ?? 0,
-      avgTradeSizeUsd: computedPnl?.avgTradeSizeUsd ?? 0,
-      walletScore: 0,
-      scoreComponents: { source: 'candidate_promotion', evidenceSource: evidenceSource ?? 'computed', note: 'promoted via Task 35 candidate validation pipeline' },
-      pnlConfidence: computedPnl?.confidence ?? 20,
-      source: evidenceSource === 'provider' ? 'provider' : 'computed',
+      pnlUsd: computedPnl.pnl30d,
+      realizedPnlUsd: computedPnl.realizedPnlUsd,
+      unrealizedPnlUsd,
+      winRate: computedPnl.winRate,
+      tradeCount: computedPnl.tradeCount,
+      avgTradeSizeUsd: computedPnl.avgTradeSizeUsd,
+      walletScore: scoreResult.score,
+      scoreComponents: {
+        ...scoreResult.components,
+        source: 'candidate_promotion',
+        evidenceSource,
+        note: 'promoted via Task 35 candidate validation pipeline'
+      },
+      pnlConfidence: computedPnl.confidence,
+      source: evidenceSource,
       computedAt: now
     }
   });

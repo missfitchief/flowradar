@@ -9,7 +9,7 @@
 
 import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import net from 'node:net';
-import { DEFAULT_SETTINGS, aggregateWindow } from '@flowradar/core';
+import { DEFAULT_SETTINGS, aggregateWindow, isProfitableWallet } from '@flowradar/core';
 import { prisma } from '../src/client';
 import { runCandidateValidation } from '../src/candidateValidation';
 import { fetchAggregateInputs } from '../src/fetchAggregateInputs';
@@ -265,6 +265,141 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runCandidateValidation',
     const stats = await prisma.walletStats.findFirst({ where: { walletId: row!.promotedWalletId! } });
     expect(stats!.source).toBe('provider');
     void now;
+  });
+
+  // ---------------------------------------------------------------------------
+  // Task 35 Critical fix: promoteCandidate must persist the SAME evidence the
+  // verdict was computed from, not re-derive via computeLocalPnlEvidence.
+  // A candidate with NO local WalletTokenTrade rows, promoted purely on
+  // PROVIDER evidence, used to get its WalletStats row written all-zero
+  // (source='provider' but pnl/realized/winRate/tradeCount/avgTradeSize all
+  // 0) because the re-derivation found no local trades to FIFO over. That
+  // zeroed row then made fetchAggregateInputs derive meetsProfitable=false,
+  // so a provider-promoted wallet with no local trades would never count
+  // toward smartWalletCount — a self-inflicted trust-boundary breach.
+  // ---------------------------------------------------------------------------
+  it('PROVIDER-evidence promotion (no local trades) writes CORRECT (non-zeroed) stats, and meetsProfitable is true', async () => {
+    const address = `${ADDR_PREFIX}_providercorrect`;
+    await makeCandidate({ walletAddress: address, claimedPnlUsd: 9500, claimedWinRate: 0.6, claimedTradeCount: 20 });
+
+    // No Wallet row, no WalletTokenTrade rows at all for this address —
+    // computeLocalPnlEvidence would find nothing. The only evidence is what
+    // the provider resolver returns.
+    const result = await runCandidateValidation(prisma, DEFAULT_SETTINGS, async (chain, walletAddress) => {
+      if (walletAddress !== address) return null;
+      return { pnl30d: 9500, realizedPnlUsd: 6000, winRate: 0.6, tradeCount: 20, avgTradeSizeUsd: 500, confidence: 80 };
+    });
+
+    expect(result.promoted).toBeGreaterThanOrEqual(1);
+    const row = await prisma.candidateWallet.findFirst({ where: { walletAddress: address } });
+    expect(row!.validationStatus).toBe('promoted');
+    expect(row!.promotedWalletId).not.toBeNull();
+
+    const stats = await prisma.walletStats.findFirst({ where: { walletId: row!.promotedWalletId! } });
+    expect(stats).not.toBeNull();
+    expect(stats!.source).toBe('provider');
+    // THE numeric assertions — not zeroed, matches the provider evidence.
+    expect(Number(stats!.pnlUsd)).toBeCloseTo(9500, 5);
+    expect(Number(stats!.realizedPnlUsd)).toBeCloseTo(6000, 5);
+    expect(stats!.winRate).toBeCloseTo(0.6, 5);
+    expect(stats!.tradeCount).toBe(20);
+    expect(Number(stats!.avgTradeSizeUsd)).toBeCloseTo(500, 5);
+
+    // THE trust-boundary tie-in: this stats row must actually clear
+    // isProfitableWallet, so it WILL count in the aggregate.
+    expect(
+      isProfitableWallet(
+        {
+          pnlUsd: Number(stats!.pnlUsd),
+          realizedPnlUsd: Number(stats!.realizedPnlUsd),
+          winRate: stats!.winRate,
+          tradeCount: stats!.tradeCount,
+          avgTradeSizeUsd: Number(stats!.avgTradeSizeUsd)
+        },
+        DEFAULT_SETTINGS.profitableWallet
+      )
+    ).toBe(true);
+  });
+
+  it('LOCAL-evidence promotion still writes source="computed" from FIFO over injected trades', async () => {
+    const now = new Date();
+    const address = `${ADDR_PREFIX}_localcomputed`;
+    const token = await makeToken('localcomputed');
+    const wallet = await prisma.wallet.create({
+      data: { address, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: false }
+    });
+    await seedQualifyingTrades(wallet.id, token.id, now);
+    await makeCandidate({ walletAddress: address, claimedPnlUsd: 9000, claimedWinRate: 0.5, claimedTradeCount: 20 });
+
+    const result = await runCandidateValidation(prisma, DEFAULT_SETTINGS);
+    expect(result.promoted).toBeGreaterThanOrEqual(1);
+
+    const row = await prisma.candidateWallet.findFirst({ where: { walletAddress: address } });
+    expect(row!.validationStatus).toBe('promoted');
+
+    const stats = await prisma.walletStats.findFirst({ where: { walletId: row!.promotedWalletId! } });
+    expect(stats).not.toBeNull();
+    expect(stats!.source).toBe('computed');
+    expect(Number(stats!.pnlUsd)).toBeGreaterThan(0);
+    expect(stats!.tradeCount).toBeGreaterThan(0);
+  });
+
+  it('re-aggregate after a provider-evidence promotion: the provider-promoted wallet CONTRIBUTES to smartWalletCount', async () => {
+    const now = new Date();
+    const address = `${ADDR_PREFIX}_provideraggregate`;
+    const token = await makeToken('provideraggregate');
+
+    // A real Wallet + a BUY trade so it appears as a raw buyer in the
+    // aggregate — but deliberately NO local trade history rich enough to
+    // clear thresholds via FIFO (mirrors the trust-boundary test's fresh
+    // wallet setup): the ONLY qualifying evidence is provider-sourced.
+    const wallet = await prisma.wallet.create({
+      data: { address, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: false }
+    });
+    await prisma.walletTokenTrade.create({
+      data: {
+        walletId: wallet.id,
+        tokenId: token.id,
+        chain: CHAIN,
+        action: 'BUY',
+        amountToken: 100,
+        amountUsd: 5000,
+        txHash: `${ADDR_PREFIX}_tx_provideraggregate_1`,
+        blockOrSlot: 1n,
+        ts: now,
+        priceUsd: 50,
+        marketCapAtTrade: 500_000,
+        walletScoreAtTime: 0,
+        provider: 'test'
+      }
+    });
+    await makeCandidate({ walletAddress: address, claimedPnlUsd: 9500, claimedWinRate: 0.6, claimedTradeCount: 20 });
+
+    const inputsBefore = await fetchAggregateInputs(prisma, token.id, DEFAULT_SETTINGS);
+    const aggregateBefore = aggregateWindow({ ...inputsBefore, windowMinutes: 1440, now });
+    expect(aggregateBefore.smartWalletCount).toBe(0);
+
+    const result = await runCandidateValidation(prisma, DEFAULT_SETTINGS, async (chain, walletAddress) => {
+      if (walletAddress !== address) return null;
+      return { pnl30d: 9500, realizedPnlUsd: 6000, winRate: 0.6, tradeCount: 20, avgTradeSizeUsd: 500, confidence: 80 };
+    });
+    expect(result.promoted).toBeGreaterThanOrEqual(1);
+
+    const row = await prisma.candidateWallet.findFirst({ where: { walletAddress: address } });
+    expect(row!.validationStatus).toBe('promoted');
+    const walletAfter = await prisma.wallet.findUnique({ where: { id: wallet.id } });
+    expect(walletAfter!.isWatched).toBe(true);
+
+    const inputsAfter = await fetchAggregateInputs(prisma, token.id, DEFAULT_SETTINGS);
+    const aggregateAfter = aggregateWindow({ ...inputsAfter, windowMinutes: 1440, now });
+
+    const buyerAfter = aggregateAfter.buyers.find((b) => b.walletId === wallet.id);
+    expect(buyerAfter).toBeDefined();
+    expect(buyerAfter!.isWatched).toBe(true);
+    // THE proof the zeroed-stats breach is gone: a provider-promoted wallet
+    // with no local FIFO-qualifying trades still contributes, because its
+    // WalletStats row now carries the real provider figures.
+    expect(aggregateAfter.smartWalletCount).toBeGreaterThanOrEqual(1);
   });
 
   it('one candidate throwing never aborts the batch (per-candidate try/catch)', async () => {
