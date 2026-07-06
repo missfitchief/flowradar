@@ -13,6 +13,7 @@
     "db:migrate": "npm run db:migrate -w packages/db",
     "db:seed": "npm run db:seed -w packages/db",
     "db:studio": "npm run db:studio -w packages/db",
+    "backtest:replay": "npm run backtest:replay -w packages/db",
     "test": "vitest run",
     "typecheck": "tsc -b apps/worker packages/core packages/db packages/providers && npm run typecheck -w apps/web",
     "build": "npm run build -w apps/web",

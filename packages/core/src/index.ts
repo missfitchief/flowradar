@@ -28,6 +28,10 @@ export * from './rotation/matcher';
 export * from './flow/sankeyBuilder';
 export * from './backtest/evaluate';
 export * from './backtest/summarize';
+export * from './backtest/replay';
+export * from './backtest/rulePerf';
+export * from './backtest/thresholdTuning';
+export * from './backtest/walkForward';
 
 // Graph module: the unused sketch GraphNode/GraphEdge/RawGraphEdge that used
 // to live in ./types (never implemented or consumed — confirmed by repo-wide

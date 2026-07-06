@@ -741,3 +741,37 @@ model AddressRegistry {
   @@unique([chain, address])
   @@map("address_registry")
 }
+
+// ---------------------------------------------------------------------------
+// 23. BacktestRun (Task 41 binding decision 5)
+// ---------------------------------------------------------------------------
+
+/// One row per runHistoricalReplay() invocation (packages/db/src/replayRunner.ts)
+/// — persists the full no-lookahead replay + rule/combo performance +
+/// threshold tuning + walk-forward summary as one Json blob, so the CLI/UI
+/// (Task 42) can list/inspect past replay runs without re-running them.
+model BacktestRun {
+  id                String   @id @default(cuid())
+  /// Always 'replay' for Task 41's historical-replay runner — a distinct
+  /// string (not an enum) so a later run kind (e.g. shadow-mode summaries,
+  /// Task 42) can reuse this same table without a schema migration.
+  kind              String
+  params            Json
+  periodFrom        DateTime
+  periodTo          DateTime
+  startedAt         DateTime
+  finishedAt        DateTime?
+  status            String
+  /// Full replay + rulePerformance + comboPerformance + tuneThresholds +
+  /// walkForward output, JSON-serialized (see replayRunner.ts's own
+  /// BacktestRunSummary shape).
+  summary           Json
+  /// True when ANY signal outcome folded into `summary` carried
+  /// syntheticEvidence (i.e. was evaluated against a
+  /// TokenMarketSnapshot.source='seed_synthetic_continuation' point) — a
+  /// row-level flag so a consumer can filter/warn without parsing `summary`.
+  syntheticEvidence Boolean  @default(false)
+
+  @@index([kind, startedAt])
+  @@map("backtest_runs")
+}
