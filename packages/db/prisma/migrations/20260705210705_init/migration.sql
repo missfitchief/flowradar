@@ -1,0 +1,2 @@
+-- RenameIndex
+ALTER INDEX "money_flow_edges_txHash_sourceAddress_destinationAddress_action" RENAME TO "money_flow_edges_txHash_sourceAddress_destinationAddress_ac_key";

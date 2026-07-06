@@ -1,0 +1,86 @@
+{
+  "_docSource": "https://www.helius.dev/docs/api-reference/enhanced-transactions/gettransactionsbyaddress — response array element shape (type SWAP, events.swap.tokenInputs/tokenOutputs/nativeInput/nativeOutput), synthesized to match the documented schema (docs page does not publish one full verbatim example combining every field, so field VALUES below are synthetic but every field NAME/shape is from the documented schema).",
+  "description": "Wallet swapped 1 SOL for 950000 BONK using Jupiter",
+  "type": "SWAP",
+  "source": "JUPITER",
+  "fee": 5000,
+  "feePayer": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+  "signature": "5wHu1qwD4kX1Y7CqR8pT3nZ6vB2sJ4mK9eF7oL1cA6dE8xNqW3rT5yU2iP4hG6bV1sM7nQ9wZ3xR8kL2vC5jH4d",
+  "slot": 148277128,
+  "timestamp": 1656442333,
+  "nativeTransfers": [
+    {
+      "fromUserAccount": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+      "toUserAccount": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      "amount": 1000000000
+    }
+  ],
+  "tokenTransfers": [
+    {
+      "fromUserAccount": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      "toUserAccount": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+      "fromTokenAccount": "6Y1z2r3s4t5u6v7w8x9yABCDEFGHJKLMNPQRSTUVWXY",
+      "toTokenAccount": "7Z2a3b4c5d6e7f8g9hABCDEFGHJKLMNPQRSTUVWXYZa",
+      "tokenAmount": 950000,
+      "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+    }
+  ],
+  "accountData": [
+    {
+      "account": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+      "nativeBalanceChange": -1000005000,
+      "tokenBalanceChanges": [
+        {
+          "userAccount": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+          "tokenAccount": "7Z2a3b4c5d6e7f8g9hABCDEFGHJKLMNPQRSTUVWXYZa",
+          "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+          "rawTokenAmount": {
+            "tokenAmount": "950000000",
+            "decimals": 5
+          }
+        }
+      ]
+    }
+  ],
+  "transactionError": null,
+  "instructions": [],
+  "events": {
+    "swap": {
+      "nativeInput": {
+        "account": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+        "amount": "1000000000"
+      },
+      "nativeOutput": null,
+      "tokenInputs": [],
+      "tokenOutputs": [
+        {
+          "userAccount": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+          "tokenAccount": "7Z2a3b4c5d6e7f8g9hABCDEFGHJKLMNPQRSTUVWXYZa",
+          "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+          "rawTokenAmount": {
+            "tokenAmount": "950000000",
+            "decimals": 5
+          }
+        }
+      ],
+      "tokenFees": [],
+      "nativeFees": [],
+      "innerSwaps": [
+        {
+          "tokenInputs": [],
+          "tokenOutputs": [],
+          "tokenFees": [],
+          "nativeFees": [],
+          "programInfo": {
+            "source": "JUPITER",
+            "account": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+            "programName": "JUPITER_V6",
+            "instructionName": "route"
+          }
+        }
+      ]
+    },
+    "nft": null,
+    "compressed": null
+  }
+}

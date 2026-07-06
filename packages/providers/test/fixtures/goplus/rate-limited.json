@@ -1,0 +1,5 @@
+{
+  "_docSource": "LIVE-FETCHED this session (2026-07-06): a burst of back-to-back GET https://api.gopluslabs.io/api/v1/token_security/56?contract_addresses=... calls with no spacing (observed during a worker smoke test) returned this exact body verbatim — HTTP 200, code=4029, message=\"too many requests\", and NO `result` field at all (not an empty object, the key is fully absent). This is not documented in docs.gopluslabs.io's schema (only code=1 \"Success\" is documented) but is a real, live-verified failure mode this adapter must not crash on.",
+  "code": 4029,
+  "message": "too many requests"
+}

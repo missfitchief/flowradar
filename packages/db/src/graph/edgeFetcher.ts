@@ -1,0 +1,226 @@
+// FlowRadar — DB-backed EdgeFetcher + RegistryLookup for the wallet-graph BFS
+// engine (Task 20 binding decision 1; Module 6 bidirectional-discovery fix).
+//
+// createDbEdgeFetcher reads MoneyFlowEdge rows touching a given address (as
+// EITHER source or destination — the fetcher contract in
+// packages/core/src/graph/types.ts requires every returned edge to touch
+// `address` as either its true source or true dest, NEVER flipped/
+// normalized) and aggregates them per (true-source, true-dest, relationship,
+// asset) into RawGraphEdge rows, capped to the perNodeTxCap highest-value
+// aggregated edges for that node. Both the address's outbound rows (address
+// is sourceAddress) AND inbound rows (address is destinationAddress) are
+// mapped and returned — bfs.ts's expandNode is responsible for computing the
+// counterparty as whichever side of the edge isn't `address`.
+//
+// actionType -> WalletGraphRelationship mapping (brief decision 1):
+//   transfer            -> native_transfer (asset is a chain-native symbol,
+//                           SOL/BNB) | stablecoin_transfer (asset in the known
+//                           stablecoin symbol set, USDC/USDT) | token_transfer
+//                           (anything else)
+//   bridge_deposit       -> bridge_deposit
+//   bridge_withdrawal    -> bridge_withdrawal
+//   cex_deposit          -> cex_deposit
+//   cex_withdrawal       -> cex_withdrawal
+//   swap                 -> swap_router_interaction
+//   dex_buy / dex_sell   -> swap_router_interaction
+//   lp_add / lp_remove   -> lp_interaction
+//   contract_interaction -> contract_interaction
+//
+// createRegistryLookup preloads every AddressRegistry row into a
+// chain-scoped Map so the returned RegistryLookup closure is a pure
+// synchronous function (RegistryLookup's own contract in graph/types.ts is
+// synchronous, so all I/O for it must happen up front, not per-call).
+
+import type { PrismaClient } from '@prisma/client';
+import type { Chain, EdgeFetcher, GraphSearchParams, RawGraphEdge, RegistryLookup } from '@flowradar/core';
+
+const NATIVE_SYMBOLS: ReadonlySet<string> = new Set(['SOL', 'BNB']);
+const STABLECOIN_SYMBOLS: ReadonlySet<string> = new Set(['USDC', 'USDT']);
+
+const SAMPLE_TX_HASH_CAP = 5;
+
+/**
+ * Maps a MoneyFlowEdge's (actionType, asset symbol) to a WalletGraphRelationship.
+ * `asset` is the raw symbol string stored on MoneyFlowEdge.asset.
+ */
+function mapActionTypeToRelationship(
+  actionType: string,
+  asset: string
+): RawGraphEdge['relationship'] {
+  switch (actionType) {
+    case 'transfer':
+      if (NATIVE_SYMBOLS.has(asset)) return 'native_transfer';
+      if (STABLECOIN_SYMBOLS.has(asset)) return 'stablecoin_transfer';
+      return 'token_transfer';
+    case 'bridge_deposit':
+      return 'bridge_deposit';
+    case 'bridge_withdrawal':
+      return 'bridge_withdrawal';
+    case 'cex_deposit':
+      return 'cex_deposit';
+    case 'cex_withdrawal':
+      return 'cex_withdrawal';
+    case 'swap':
+    case 'dex_buy':
+    case 'dex_sell':
+      return 'swap_router_interaction';
+    case 'lp_add':
+    case 'lp_remove':
+      return 'lp_interaction';
+    case 'contract_interaction':
+      return 'contract_interaction';
+    default:
+      return 'unknown';
+  }
+}
+
+interface AggKey {
+  trueSource: string;
+  trueDest: string;
+  relationship: RawGraphEdge['relationship'];
+  asset: string;
+}
+
+interface AggValue {
+  trueSource: string;
+  trueDest: string;
+  relationship: RawGraphEdge['relationship'];
+  asset: string;
+  amountUsd: number;
+  txCount: number;
+  firstTs: Date;
+  lastTs: Date;
+  sampleTxHashes: string[];
+}
+
+function aggKeyString(k: AggKey): string {
+  return `${k.trueSource} ${k.trueDest} ${k.relationship} ${k.asset}`;
+}
+
+export interface CreateDbEdgeFetcherOptions {
+  perNodeTxCap: number;
+}
+
+/**
+ * Builds an EdgeFetcher backed by MoneyFlowEdge rows. `perNodeTxCap` bounds
+ * the number of AGGREGATED edges returned per node (not raw rows) — the
+ * fetcher slices to the `perNodeTxCap` highest-amountUsd aggregated edges
+ * after aggregation, matching bfs.ts's own "fetcher's concern" documentation.
+ *
+ * Bidirectional discovery (Module 6 fix): every row touching `address` —
+ * whether `address` is sourceAddress OR destinationAddress — is mapped and
+ * aggregated, preserving the row's TRUE direction (trueSource/trueDest are
+ * never flipped to put `address` on a particular side). This lets bfs.ts
+ * discover a node's counterparties in both directions (sent-to AND
+ * received-from) while every edge still carries the real fund-flow
+ * direction for display/aggregation.
+ */
+export function createDbEdgeFetcher(prisma: PrismaClient, options: CreateDbEdgeFetcherOptions): EdgeFetcher {
+  const { perNodeTxCap } = options;
+
+  return async function dbEdgeFetcher(address: string, _chain: Chain, _params: GraphSearchParams): Promise<RawGraphEdge[]> {
+    const rows = await prisma.moneyFlowEdge.findMany({
+      where: {
+        OR: [{ sourceAddress: address }, { destinationAddress: address }]
+      }
+    });
+
+    const agg = new Map<string, AggValue>();
+
+    for (const row of rows) {
+      // Every row touching `address` (as either side) contributes — the
+      // query itself already filtered to rows where address is source OR
+      // dest, so both legs are aggregated here, each keeping its own true
+      // source/dest untouched (bidirectional discovery, Module 6 fix).
+      const trueSource = row.sourceAddress;
+      const trueDest = row.destinationAddress;
+      if (trueSource === trueDest) continue; // self-loop row: no counterparty, skip (mirrors bfs.ts's guard)
+
+      const asset = row.asset;
+      const relationship = mapActionTypeToRelationship(row.actionType, asset);
+      const key: AggKey = { trueSource, trueDest, relationship, asset };
+      const keyStr = aggKeyString(key);
+
+      const amountUsd = Number(row.amountUsd);
+      const existing = agg.get(keyStr);
+      if (existing) {
+        existing.amountUsd += amountUsd;
+        existing.txCount += 1;
+        if (row.ts < existing.firstTs) existing.firstTs = row.ts;
+        if (row.ts > existing.lastTs) existing.lastTs = row.ts;
+        if (existing.sampleTxHashes.length < SAMPLE_TX_HASH_CAP && !existing.sampleTxHashes.includes(row.txHash)) {
+          existing.sampleTxHashes.push(row.txHash);
+        }
+      } else {
+        agg.set(keyStr, {
+          trueSource,
+          trueDest,
+          relationship,
+          asset,
+          amountUsd,
+          txCount: 1,
+          firstTs: row.ts,
+          lastTs: row.ts,
+          sampleTxHashes: [row.txHash]
+        });
+      }
+    }
+
+    const aggregated = [...agg.values()].sort((a, b) => b.amountUsd - a.amountUsd);
+    const capped = aggregated.slice(0, perNodeTxCap);
+
+    return capped.map((a) => ({
+      source: a.trueSource,
+      dest: a.trueDest,
+      relationship: a.relationship,
+      asset: a.asset,
+      amountUsd: a.amountUsd,
+      txCount: a.txCount,
+      firstTs: a.firstTs,
+      lastTs: a.lastTs,
+      sampleTxHashes: a.sampleTxHashes
+    }));
+  };
+}
+
+// ---------------------------------------------------------------------------
+// RegistryLookup
+// ---------------------------------------------------------------------------
+
+interface RegistryEntry {
+  category: 'CEX' | 'BRIDGE' | 'ROUTER' | 'POOL' | 'DEPLOYER' | 'MIXER' | 'TOKEN_CONTRACT';
+  label: string;
+  doNotExpand: boolean;
+}
+
+/**
+ * Preloads every AddressRegistry row into a chain-scoped Map and returns a
+ * synchronous RegistryLookup closure over it. Chain-scoped key (`chain:address`)
+ * because AddressRegistry.@@unique is [chain, address] — the same address
+ * string could in principle be registered differently per chain.
+ */
+export async function createRegistryLookup(prisma: PrismaClient): Promise<RegistryLookup> {
+  const rows = await prisma.addressRegistry.findMany();
+  const byChainAddress = new Map<string, RegistryEntry>();
+  for (const row of rows) {
+    byChainAddress.set(`${row.chain}:${row.address}`, {
+      category: row.category,
+      label: row.label,
+      doNotExpand: row.doNotExpand
+    });
+  }
+
+  // RegistryLookup's own signature (packages/core/src/graph/types.ts) takes
+  // only `address`, no chain — the BFS engine calls it without a chain
+  // parameter. Since this search always runs against ONE chain end-to-end
+  // (GraphSearchParams.chain), we resolve entries against every chain key for
+  // that address and return the first hit; in practice each address only
+  // ever has a registry row for its own real chain.
+  return (address: string) => {
+    for (const chain of ['SOLANA', 'BSC'] as const) {
+      const hit = byChainAddress.get(`${chain}:${address}`);
+      if (hit) return hit;
+    }
+    return null;
+  };
+}

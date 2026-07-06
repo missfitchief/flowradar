@@ -1,0 +1,28 @@
+{
+  "_docSource": "STUB — TODO(provider): the jsonParsed getAccountInfo response shape for an SPL Token mint account (result.value.data.parsed.info.{mintAuthority,freezeAuthority,decimals,supply,isInitialized}) could NOT be verified against a full verbatim example on any official docs page reachable this session (checked: https://www.helius.dev/docs/api-reference/rpc/http/getaccountinfo, https://solana.com/docs/rpc/http/getaccountinfo, https://www.solana-program.com/docs/token — none published a complete jsonParsed mint example, only base64/base58 examples or prose describing the {program,parsed,space} envelope). Field names below (mintAuthority/freezeAuthority/nullable-when-revoked) are corroborated by secondary sources (SPL Token program conventions) but NOT doc-verified per the binding standing rule, so risk.ts's mint-authority check is a typed stub (mode:'stub') rather than a real parse against this shape. This fixture exists only so the stub's shape/typing can be exercised in a test — it is NOT wired into a real parser.",
+  "jsonrpc": "2.0",
+  "id": "1",
+  "result": {
+    "context": { "slot": 148300000 },
+    "value": {
+      "data": {
+        "program": "spl-token",
+        "parsed": {
+          "info": {
+            "decimals": 6,
+            "freezeAuthority": "FreezeAuthAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "isInitialized": true,
+            "mintAuthority": "MintAuthBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            "supply": "1000000000000"
+          },
+          "type": "mint"
+        },
+        "space": 82
+      },
+      "executable": false,
+      "lamports": 1461600,
+      "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "rentEpoch": 361
+    }
+  }
+}

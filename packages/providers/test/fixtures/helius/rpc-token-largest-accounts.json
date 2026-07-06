@@ -1,0 +1,16 @@
+{
+  "_docSource": "https://www.helius.dev/docs/api-reference/rpc/http/gettokenlargestaccounts — full verbatim example response JSON shape confirmed by docs fetch (address/amount/decimals/uiAmount/uiAmountString fields, 'Returns the 20 largest accounts' sorted descending); values below extended to model a concentrated top-holder scenario (top1 ~40%, top5 ~70% of a 1,000,000-supply token) for risk.ts threshold testing.",
+  "jsonrpc": "2.0",
+  "id": "1",
+  "result": {
+    "context": { "slot": 148300000 },
+    "value": [
+      { "address": "Holder1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "amount": "400000000000", "decimals": 6, "uiAmount": 400000, "uiAmountString": "400000" },
+      { "address": "Holder2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "amount": "100000000000", "decimals": 6, "uiAmount": 100000, "uiAmountString": "100000" },
+      { "address": "Holder3CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "amount": "80000000000", "decimals": 6, "uiAmount": 80000, "uiAmountString": "80000" },
+      { "address": "Holder4DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", "amount": "70000000000", "decimals": 6, "uiAmount": 70000, "uiAmountString": "70000" },
+      { "address": "Holder5EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", "amount": "50000000000", "decimals": 6, "uiAmount": 50000, "uiAmountString": "50000" },
+      { "address": "Holder6FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", "amount": "10000000000", "decimals": 6, "uiAmount": 10000, "uiAmountString": "10000" }
+    ]
+  }
+}

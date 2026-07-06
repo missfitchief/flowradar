@@ -1,0 +1,36 @@
+{
+  "_docSource": "https://www.helius.dev/docs/api-reference/enhanced-transactions/gettransactionsbyaddress — response array element shape (an UNKNOWN-type/complex program-interaction tx with no nativeTransfers/tokenTransfers/events.swap payload, only accountData + instructions), synthesized to match the documented schema (field NAMEs/shape from docs; VALUEs synthetic, plus one extra unmodeled field to exercise schema-lenient passthrough parsing).",
+  "description": "Wallet interacted with an unrecognized/complex program (e.g. governance vote or unparsed custom instruction)",
+  "type": "UNKNOWN",
+  "source": "UNKNOWN",
+  "fee": 5000,
+  "feePayer": "6mN5oP4qR3sT2uV1wX9yZ8aB7cD6eF5gH4iJ3kL2mN1o",
+  "signature": "7gH8iJ9kL1mN2oP3qR4sT5uV6wX7yZ8aB9cD1eF2gH3iJ4kL5mN6oP7qR8sT9uV1w",
+  "slot": 148310555,
+  "timestamp": 1656510000,
+  "nativeTransfers": [],
+  "tokenTransfers": [],
+  "accountData": [
+    {
+      "account": "6mN5oP4qR3sT2uV1wX9yZ8aB7cD6eF5gH4iJ3kL2mN1o",
+      "nativeBalanceChange": -5000,
+      "tokenBalanceChanges": []
+    }
+  ],
+  "transactionError": null,
+  "instructions": [
+    {
+      "programId": "Vote111111111111111111111111111111111111",
+      "accounts": [],
+      "data": "unparsed-instruction-data"
+    }
+  ],
+  "events": {
+    "swap": null,
+    "nft": null,
+    "compressed": null
+  },
+  "someFutureFieldNotYetModeled": {
+    "note": "exercises passthrough/lenient parsing — mapper must not crash on unrecognized extra fields"
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "traders": [
+    {
+      "wallet": "So1anaTrackerTop1WalletAddressXXXXXXXXXXXXX",
+      "period": {
+        "realized": 82000.5,
+        "realizedRaw": 82000.5,
+        "volume": 500000,
+        "tradingDays": 40,
+        "roi": 3.4,
+        "days": {
+          "profitable": 30,
+          "losing": 10,
+          "maxSinglePnl": 12000,
+          "winRate": 72.5
+        }
+      },
+      "pnlAdjustments": {
+        "mode": "strict",
+        "invalidPnl": null,
+        "adjustedCorrection": null
+      },
+      "ending": {
+        "pnl": {
+          "realized": 84500.25,
+          "total": 90000.75
+        }
+      },
+      "invested": 25000,
+      "proceeds": 109500.25,
+      "counts": {
+        "buys": 60,
+        "sells": 58,
+        "trades": 118,
+        "tokensTraded": 22
+      },
+      "averages": {
+        "buy": 416.66,
+        "sell": 434.5
+      },
+      "tokens": {
+        "profitable": 18,
+        "losing": 4,
+        "closed": 22
+      },
+      "winRate": 72.5,
+      "timing": {
+        "firstTrade": 1751000000,
+        "lastTrade": 1751600000
+      },
+      "lastSnapshotDate": "2026-07-05",
+      "updatedAt": "2026-07-05T12:00:00Z",
+      "identity": {
+        "name": null,
+        "twitter": null,
+        "avatar": null,
+        "type": null,
+        "tags": [],
+        "platforms": ["axiom"]
+      }
+    },
+    {
+      "wallet": "So1anaTrackerTop2WalletAddressYYYYYYYYYYYYY",
+      "period": {
+        "realized": 15000,
+        "roi": 1.1,
+        "days": { "winRate": 55.0 }
+      },
+      "ending": {
+        "pnl": { "realized": 15200, "total": 15800 }
+      },
+      "counts": { "buys": 20, "sells": 18, "trades": 38, "tokensTraded": 10 },
+      "winRate": 55.0
+    },
+    {
+      "wallet": "So1anaTrackerTop3WalletAddressZZZZZZZZZZZZZ",
+      "period": {
+        "realized": null,
+        "roi": null
+      },
+      "ending": {},
+      "counts": {}
+    }
+  ],
+  "pagination": {
+    "hasMore": true,
+    "nextCursor": "cursor-abc123",
+    "count": 3,
+    "total": 500,
+    "pnlMode": "strict",
+    "enrich": []
+  }
+}

@@ -1,0 +1,1002 @@
+// FlowRadar — Prisma schema
+//
+// Normative source: docs/superpowers/specs/2026-07-05-flowradar-design.md §4 "Data model".
+// 22 models, ordered exactly as spec §4 (section comments below carry the spec numbering).
+//
+// Precision policy (spec §4):
+//   - USD amounts:        Decimal(20,4)
+//   - Token amounts:      Decimal(38,18)
+//   - Prices:             Decimal(24,12)
+//   - Rates/percentages:  Float
+//   - Block/slot numbers: BigInt
+//   - Enums for chain/action/rule/severity/status/label/node/relationship types.
+//   - BSC addresses stored lowercase, rendered checksummed at the UI layer; Solana
+//     base58 addresses stored as-is (both are plain String columns here).
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ---------------------------------------------------------------------------
+// Shared enums
+// ---------------------------------------------------------------------------
+
+enum ChainId {
+  SOLANA
+  BSC
+}
+
+/// WalletStats.source — where a stats window's numbers ultimately came from.
+enum StatsSource {
+  csv
+  computed
+  provider
+}
+
+/// WalletClassification.label — 11 values.
+/// vocabulary fixed by product brief (Modules 1/5/6)
+enum WalletLabel {
+  human_like
+  smart_money
+  whale
+  possible_bot
+  sniper
+  mev
+  deployer_related
+  copy_trader
+  cex_related
+  bridge_related
+  unknown
+}
+
+/// WalletTokenTrade.action
+enum TradeAction {
+  BUY
+  SELL
+  TRANSFER_IN
+  TRANSFER_OUT
+  LP_ADD
+  LP_REMOVE
+}
+
+/// TokenFlowSnapshot.signalStatus
+enum FlowSignalStatus {
+  watching
+  hot
+  profit_rotation
+  exit_warning
+  dead
+}
+
+/// Signal.rule — rules A-G (spec §6 signal rules table).
+enum SignalRule {
+  A
+  B
+  C
+  D
+  E
+  F
+  G
+}
+
+/// Signal.severity / used by BacktestResult context via Signal
+enum SignalSeverity {
+  INFO
+  WATCH
+  HIGH
+  CRITICAL
+}
+
+/// Alert.type
+enum AlertType {
+  SIGNAL
+  ROTATION
+  WALLET_GRAPH
+  TEST
+}
+
+/// Alert.channel
+enum AlertChannel {
+  TELEGRAM
+  DISCORD
+}
+
+/// MoneyFlowEdge.actionType — 11 values.
+/// vocabulary fixed by product brief (Modules 1/5/6)
+enum MoneyFlowActionType {
+  transfer
+  swap
+  bridge_deposit
+  bridge_withdrawal
+  cex_deposit
+  cex_withdrawal
+  dex_buy
+  dex_sell
+  lp_add
+  lp_remove
+  contract_interaction
+}
+
+/// WalletGraphSearch.mode
+enum WalletGraphMode {
+  DIRECT
+  CAPITAL_FLOW
+  ENTITY_DISCOVERY
+  FULL_RAW
+}
+
+/// WalletGraphSearch.status
+enum WalletGraphSearchStatus {
+  queued
+  running
+  done
+  failed
+  truncated
+}
+
+/// WalletGraphNode.nodeType
+enum WalletGraphNodeType {
+  WALLET
+  BRIDGE
+  CEX
+  ROUTER
+  POOL
+  TOKEN_CONTRACT
+  CONTRACT
+  UNKNOWN
+}
+
+/// WalletGraphEdge.relationship — 13 values.
+/// vocabulary fixed by product brief (Modules 1/5/6)
+enum WalletGraphRelationship {
+  direct_transfer
+  native_transfer
+  token_transfer
+  stablecoin_transfer
+  bridge_deposit
+  bridge_withdrawal
+  cex_deposit
+  cex_withdrawal
+  swap_router_interaction
+  lp_interaction
+  contract_interaction
+  deployer_interaction
+  unknown
+}
+
+/// BacktestResult.horizon
+enum BacktestHorizon {
+  M15
+  H1
+  H6
+  H24
+  D3
+  D7
+}
+
+/// AddressRegistry.category
+enum AddressCategory {
+  CEX
+  BRIDGE
+  ROUTER
+  POOL
+  DEPLOYER
+  MIXER
+  TOKEN_CONTRACT
+}
+
+/// CandidateWallet.validationStatus — Wave 4.5 connector framework (Task 34/35).
+enum CandidateValidationStatus {
+  pending
+  validating
+  promoted
+  rejected
+}
+
+// ---------------------------------------------------------------------------
+// 1. Chain
+// ---------------------------------------------------------------------------
+
+model Chain {
+  id                  ChainId @id
+  name                String
+  nativeSymbol        String
+  explorerTxUrl       String
+  explorerAddressUrl  String
+
+  @@map("chains")
+}
+
+// ---------------------------------------------------------------------------
+// 2. Wallet
+// ---------------------------------------------------------------------------
+
+model Wallet {
+  id              String    @id @default(cuid())
+  address         String
+  chain           ChainId
+  firstSeenAt     DateTime
+  lastActiveAt    DateTime
+  isWatched       Boolean   @default(false)
+  isExcluded      Boolean   @default(false)
+  exclusionReason String?
+  notes           String?
+
+  stats           WalletStats[]
+  classifications WalletClassification[]
+  trades          WalletTokenTrade[]
+  clusterLinks    EntityClusterWallet[]
+  rotationsAsSource ProfitRotationSignal[] @relation("ProfitRotationSource")
+  rotationsAsDest   ProfitRotationSignal[] @relation("ProfitRotationDest")
+  /// Reverse side of CandidateWallet.promotedWalletId (Task 34/35 — Wave 4.5).
+  promotedFromCandidates CandidateWallet[]
+
+  @@unique([address, chain])
+  @@map("wallets")
+}
+
+// ---------------------------------------------------------------------------
+// 3. WalletStats
+// ---------------------------------------------------------------------------
+
+model WalletStats {
+  id                String      @id @default(cuid())
+  walletId          String
+  window            String // e.g. "30d" — fixed rolling-window label, not a bounded enum per spec §4.
+  pnlUsd            Decimal     @db.Decimal(20, 4)
+  realizedPnlUsd    Decimal     @db.Decimal(20, 4)
+  unrealizedPnlUsd  Decimal     @db.Decimal(20, 4)
+  winRate           Float
+  tradeCount        Int
+  avgTradeSizeUsd   Decimal     @db.Decimal(20, 4)
+  walletScore       Float
+  scoreComponents   Json
+  pnlConfidence     Float // 0-100
+  source            StatsSource
+  computedAt        DateTime
+
+  wallet            Wallet      @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
+  @@map("wallet_stats")
+}
+
+// ---------------------------------------------------------------------------
+// 4. WalletClassification
+// ---------------------------------------------------------------------------
+
+model WalletClassification {
+  id         String      @id @default(cuid())
+  walletId   String
+  label      WalletLabel
+  confidence Float
+  evidence   Json
+
+  wallet     Wallet      @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
+  @@map("wallet_classifications")
+}
+
+// ---------------------------------------------------------------------------
+// 5. Token
+// ---------------------------------------------------------------------------
+
+model Token {
+  id             String   @id @default(cuid())
+  chain          ChainId
+  address        String
+  symbol         String
+  name           String
+  decimals       Int
+  pairAddress    String?
+  dex            String?
+  firstSeenAt    DateTime
+  tokenCreatedAt DateTime?
+  website        String?
+  twitter        String?
+  telegram       String?
+  riskFlags      Json
+
+  marketSnapshots   TokenMarketSnapshot[]
+  trades            WalletTokenTrade[]
+  flowSnapshots     TokenFlowSnapshot[]
+  signals           Signal[]
+  alerts            Alert[]
+  sourceRotations   ProfitRotationSignal[] @relation("ProfitRotationSourceToken")
+  destRotations     ProfitRotationSignal[] @relation("ProfitRotationDestToken")
+
+  @@unique([chain, address])
+  @@map("tokens")
+}
+
+// ---------------------------------------------------------------------------
+// 6. TokenMarketSnapshot
+// ---------------------------------------------------------------------------
+
+model TokenMarketSnapshot {
+  id             String   @id @default(cuid())
+  tokenId        String
+  ts             DateTime
+  priceUsd       Decimal  @db.Decimal(24, 12)
+  marketCapUsd   Decimal  @db.Decimal(20, 4)
+  fdvUsd         Decimal  @db.Decimal(20, 4)
+  liquidityUsd   Decimal  @db.Decimal(20, 4)
+  vol5m          Decimal  @db.Decimal(20, 4)
+  vol1h          Decimal  @db.Decimal(20, 4)
+  vol6h          Decimal  @db.Decimal(20, 4)
+  vol24h         Decimal  @db.Decimal(20, 4)
+  holderCount    Int
+  /// Task 40 fix pass — machine-detectable synthetic provenance. 'ingest'
+  /// (default) for every real provider-sourced snapshot; snapshotMarket's
+  /// callers can pass an explicit override — currently only
+  /// seed.ts's seedBacktestContinuation, which writes
+  /// 'seed_synthetic_continuation' on every row it creates. runBacktestPass
+  /// checks this column to flag BacktestResult rows evaluated over a
+  /// synthetic-containing series (see backtest.ts).
+  source         String   @default("ingest")
+
+  token          Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([tokenId, ts])
+  @@map("token_market_snapshots")
+}
+
+// ---------------------------------------------------------------------------
+// 7. WalletTokenTrade
+// ---------------------------------------------------------------------------
+
+model WalletTokenTrade {
+  id                 String      @id @default(cuid())
+  walletId           String
+  tokenId            String
+  chain              ChainId
+  action             TradeAction
+  amountToken        Decimal     @db.Decimal(38, 18)
+  amountUsd          Decimal     @db.Decimal(20, 4)
+  txHash             String
+  blockOrSlot        BigInt
+  ts                 DateTime
+  priceUsd           Decimal     @db.Decimal(24, 12)
+  marketCapAtTrade   Decimal     @db.Decimal(20, 4)
+  walletScoreAtTime  Float
+  entityClusterId    String?
+  provider           String
+
+  wallet             Wallet         @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  token              Token          @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  entityCluster      EntityCluster? @relation(fields: [entityClusterId], references: [id])
+
+  @@unique([chain, txHash, walletId, tokenId, action])
+  @@index([walletId])
+  @@index([tokenId])
+  @@index([entityClusterId])
+  @@map("wallet_token_trades")
+}
+
+// ---------------------------------------------------------------------------
+// 8. TokenFlowSnapshot
+// ---------------------------------------------------------------------------
+
+model TokenFlowSnapshot {
+  id                          String           @id @default(cuid())
+  tokenId                     String
+  ts                          DateTime
+  windowMinutes               Int
+  flowScore                   Float
+  smartWalletCount            Int
+  humanLikeCount              Int
+  possibleBotCount            Int
+  uniqueEntityCount           Int
+  clusterAdjustedWalletCount  Int
+  entityConcentrationRisk     Float
+  trackedBuyVolumeUsd         Decimal          @db.Decimal(20, 4)
+  trackedSellVolumeUsd        Decimal          @db.Decimal(20, 4)
+  netFlowUsd                  Decimal          @db.Decimal(20, 4)
+  buySellRatio                Float
+  avgEntryMcap                Decimal          @db.Decimal(20, 4)
+  currentMcap                 Decimal          @db.Decimal(20, 4)
+  mcapExpansionFromAvgEntry   Float
+  holdersGrowth                Float
+  liquidityChange              Float
+  signalStatus                FlowSignalStatus
+  componentBreakdown           Json
+
+  token                        Token            @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([tokenId, ts])
+  @@index([flowScore])
+  @@map("token_flow_snapshots")
+}
+
+// ---------------------------------------------------------------------------
+// 9. Signal
+// ---------------------------------------------------------------------------
+
+model Signal {
+  id                String         @id @default(cuid())
+  tokenId           String
+  rule              SignalRule
+  severity          SignalSeverity
+  triggeredAt       DateTime
+  reasons           Json
+  walletCount       Int
+  uniqueEntityCount Int
+  netFlowUsd        Decimal        @db.Decimal(20, 4)
+  mcapAtTrigger     Decimal        @db.Decimal(20, 4)
+  status            String
+  /// Task 15 addition: rawWalletCount/uniqueEntityCount/largestClusterSize/
+  /// entityConcentrationRisk snapshot at trigger time (entityConcentrationRisk
+  /// degrades to 'unknown' until Task 22's clustering lands — see
+  /// packages/db/src/signals.ts).
+  metrics           Json           @default("{}")
+
+  token             Token            @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  alerts            Alert[]
+  backtestResults   BacktestResult[]
+
+  @@index([severity, triggeredAt])
+  @@index([tokenId])
+  @@map("signals")
+}
+
+// ---------------------------------------------------------------------------
+// 10. Alert
+// ---------------------------------------------------------------------------
+
+model Alert {
+  id               String                @id @default(cuid())
+  signalId         String?
+  /// Task 23: FK to the ProfitRotationSignal a ROTATION-type Alert renders
+  /// (mirrors signalId's role for SIGNAL-type alerts) — lets
+  /// dispatchPendingAlerts find "every ProfitRotationSignal with NO Alert
+  /// row yet" the same way it already finds pending Signal rows
+  /// (`rotationSignal: { alerts: { none: {} } }`), rather than needing an
+  /// ad-hoc Json-payload dedupe check.
+  rotationSignalId String?
+  type             AlertType
+  channel          AlertChannel
+  tokenId          String?
+  rule             SignalRule?
+  sentAt           DateTime
+  payload          Json
+  deliveryStatus   String
+  error            String?
+
+  signal           Signal?               @relation(fields: [signalId], references: [id])
+  rotationSignal   ProfitRotationSignal? @relation(fields: [rotationSignalId], references: [id])
+  token            Token?                @relation(fields: [tokenId], references: [id])
+
+  @@index([tokenId, rule, sentAt])
+  @@map("alerts")
+}
+
+// ---------------------------------------------------------------------------
+// 11. ProviderSyncState
+// ---------------------------------------------------------------------------
+
+model ProviderSyncState {
+  id           String   @id @default(cuid())
+  provider     String
+  chain        ChainId
+  scope        String // wallet address | "market" | token identifier
+  cursor       String?
+  lastSyncAt   DateTime?
+  lastError    String?
+  failCount    Int      @default(0)
+
+  @@unique([provider, chain, scope])
+  @@map("provider_sync_states")
+}
+
+// ---------------------------------------------------------------------------
+// 12. Settings
+// ---------------------------------------------------------------------------
+
+model Settings {
+  id        String   @id @default(cuid())
+  values    Json // Zod-validated Json of all thresholds (spec §7 defaults)
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+// ---------------------------------------------------------------------------
+// 13. ImportJob
+// ---------------------------------------------------------------------------
+
+model ImportJob {
+  id         String    @id @default(cuid())
+  filename   String
+  status     String
+  totalRows  Int
+  okRows     Int
+  errorRows  Int
+  errors     Json
+  createdAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@map("import_jobs")
+}
+
+// ---------------------------------------------------------------------------
+// 14. MoneyFlowEdge
+// ---------------------------------------------------------------------------
+
+model MoneyFlowEdge {
+  id                 String              @id @default(cuid())
+  sourceAddress      String
+  destinationAddress String
+  sourceChain        ChainId
+  destinationChain   ChainId
+  asset              String
+  amountToken        Decimal             @db.Decimal(38, 18)
+  amountUsd          Decimal             @db.Decimal(20, 4)
+  ts                 DateTime
+  txHash             String
+  actionType         MoneyFlowActionType
+  bridgeProtocol     String?
+  confidence         Float
+  providerSource     String
+  metadata           Json
+
+  @@unique([txHash, sourceAddress, destinationAddress, actionType])
+  @@index([sourceAddress, ts])
+  @@index([destinationAddress, ts])
+  @@index([txHash])
+  @@index([sourceChain, ts])
+  @@map("money_flow_edges")
+}
+
+// ---------------------------------------------------------------------------
+// 15. EntityCluster
+// ---------------------------------------------------------------------------
+
+model EntityCluster {
+  id                String   @id @default(cuid())
+  confidence        Float
+  walletCount       Int
+  total30dPnlUsd    Decimal  @db.Decimal(20, 4)
+  chains            ChainId[]
+  evidence          Json
+  mainFundingSource String?
+  updatedAt         DateTime @updatedAt
+
+  wallets           EntityClusterWallet[]
+  trades            WalletTokenTrade[]
+
+  @@map("entity_clusters")
+}
+
+// ---------------------------------------------------------------------------
+// 16. EntityClusterWallet
+// ---------------------------------------------------------------------------
+
+model EntityClusterWallet {
+  id             String        @id @default(cuid())
+  clusterId      String
+  walletId       String
+  linkConfidence Float
+  evidence       Json
+
+  cluster        EntityCluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  wallet         Wallet        @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([clusterId, walletId])
+  @@map("entity_cluster_wallets")
+}
+
+// ---------------------------------------------------------------------------
+// 17. ProfitRotationSignal
+// ---------------------------------------------------------------------------
+
+model ProfitRotationSignal {
+  id                    String   @id @default(cuid())
+  sourceWalletId        String
+  destWalletId          String
+  sourceTokenId         String
+  destTokenId           String
+  realizedProfitUsd     Decimal  @db.Decimal(20, 4)
+  transferredValueUsd   Decimal  @db.Decimal(20, 4)
+  chainPath             ChainId[]
+  timeGapMin            Float
+  confidence            Float
+  detectedAt            DateTime
+  destTokenMcapAtBuy    Decimal  @db.Decimal(20, 4)
+  currentDestPerfPct    Float
+  /// The matched candidate's ACTUAL received-value (RotationCandidate.receivedValueUsd,
+  /// packages/core/src/rotation/matcher.ts), persisted so the real
+  /// receivedValueUsd/transferredValueUsd match% can be displayed later
+  /// instead of only the settings floor (Task 43 review fix). Nullable/
+  /// additive: legacy rows persisted before this column existed have no way
+  /// to backfill this figure, so null is a valid, permanent state for those
+  /// rows — display code must treat null as "exact figure unavailable", not
+  /// as zero.
+  receivedValueUsd      Decimal? @db.Decimal(20, 4)
+
+  sourceWallet          Wallet @relation("ProfitRotationSource", fields: [sourceWalletId], references: [id], onDelete: Cascade)
+  destWallet            Wallet @relation("ProfitRotationDest", fields: [destWalletId], references: [id], onDelete: Cascade)
+  sourceToken           Token  @relation("ProfitRotationSourceToken", fields: [sourceTokenId], references: [id], onDelete: Cascade)
+  destToken             Token  @relation("ProfitRotationDestToken", fields: [destTokenId], references: [id], onDelete: Cascade)
+  /// Task 23: reverse side of Alert.rotationSignalId — see that field's doc
+  /// comment for why this exists (dispatchPendingAlerts' ROTATION dedupe).
+  alerts                Alert[]
+
+  @@index([sourceWalletId])
+  @@index([destWalletId])
+  @@map("profit_rotation_signals")
+}
+
+// ---------------------------------------------------------------------------
+// 18. WalletGraphSearch
+// ---------------------------------------------------------------------------
+
+model WalletGraphSearch {
+  id            String                  @id @default(cuid())
+  rootAddress   String
+  chain         ChainId
+  mode          WalletGraphMode
+  params        Json
+  status        WalletGraphSearchStatus
+  nodeCount     Int
+  edgeCount     Int
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  error         String?
+  /// Task 20: { paths: TransactionPath[]; counts: { nodeCount, edgeCount, pathCount } } —
+  /// extractPaths() output + a small counts summary, persisted alongside the
+  /// row so GET /api/graph/[id] and the JSON export don't need to re-run
+  /// extractPaths against the persisted node/edge rows.
+  resultSummary Json?
+
+  nodes         WalletGraphNode[]
+  edges         WalletGraphEdge[]
+
+  @@map("wallet_graph_searches")
+}
+
+// ---------------------------------------------------------------------------
+// 19. WalletGraphNode
+// ---------------------------------------------------------------------------
+
+model WalletGraphNode {
+  id                String              @id @default(cuid())
+  searchId          String
+  address           String
+  depth             Int
+  nodeType          WalletGraphNodeType
+  totalSentUsd      Decimal             @db.Decimal(20, 4)
+  totalReceivedUsd  Decimal             @db.Decimal(20, 4)
+  netFlowUsd        Decimal             @db.Decimal(20, 4)
+  interactionCount  Int
+  firstSeen         DateTime
+  lastSeen          DateTime
+  tags              String[]
+  confidence        Float
+
+  search            WalletGraphSearch @relation(fields: [searchId], references: [id], onDelete: Cascade)
+
+  @@unique([searchId, address])
+  @@map("wallet_graph_nodes")
+}
+
+// ---------------------------------------------------------------------------
+// 20. WalletGraphEdge
+// ---------------------------------------------------------------------------
+
+model WalletGraphEdge {
+  id              String                  @id @default(cuid())
+  searchId        String
+  sourceAddress   String
+  destAddress     String
+  relationship    WalletGraphRelationship
+  totalUsd        Decimal                 @db.Decimal(20, 4)
+  txCount         Int
+  firstTs         DateTime
+  lastTs          DateTime
+  sampleTxHashes  String[]
+
+  search          WalletGraphSearch @relation(fields: [searchId], references: [id], onDelete: Cascade)
+
+  @@index([searchId])
+  @@map("wallet_graph_edges")
+}
+
+// ---------------------------------------------------------------------------
+// 21. BacktestResult
+// ---------------------------------------------------------------------------
+
+model BacktestResult {
+  id                    String          @id @default(cuid())
+  signalId              String
+  horizon               BacktestHorizon
+  maxUpsidePct          Float
+  maxDrawdownPct        Float
+  roiPct                Float
+  timeTo2xMin           Float?
+  timeTo5xMin           Float?
+  timeTo10xMin          Float?
+  smartExitedBeforeDump Boolean?
+  notes                 String?
+  /// Task 40 (backtest_labels migration) additions below — series-level label
+  /// taxonomy fields, repeated identically on every horizon row for the same
+  /// signal (see packages/db/src/backtest.ts's file header for why the label
+  /// itself is NOT per-horizon: evaluateSignalOutcome's label automaton walks
+  /// the FULL available series, not a horizon-clipped slice).
+  outcomeLabel          String?
+  hitPlus50             Boolean?
+  hit2x                 Boolean?
+  hit5x                 Boolean?
+  hit10x                Boolean?
+  timeToPeakMin         Int?
+  evaluatedAt           DateTime?
+  /// 'price' | 'mcap' — which basis evaluateSignalOutcome used for this row.
+  basis                 String?
+
+  signal                Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@unique([signalId, horizon])
+  @@map("backtest_results")
+}
+
+// ---------------------------------------------------------------------------
+// 22. AddressRegistry
+// ---------------------------------------------------------------------------
+
+model AddressRegistry {
+  id           String          @id @default(cuid())
+  chain        ChainId
+  address      String
+  category     AddressCategory
+  label        String
+  source       String
+  doNotExpand  Boolean         @default(true)
+
+  @@unique([chain, address])
+  @@map("address_registry")
+}
+
+// ---------------------------------------------------------------------------
+// 24. ExternalWalletSource (Task 34 — Wave 4.5, Spec §5b)
+// ---------------------------------------------------------------------------
+
+/// One row per external candidate-wallet feeder (Solana Tracker, Birdeye,
+/// KOLScan, GMGN, Cielo, CSV). Seeded once (packages/db/src/seed.ts) with the
+/// 6 non-CSV sources from Spec §5b; `csv_import`/`dune_token_overlap` are
+/// CandidateWallet.source vocabulary values that do NOT require a row here
+/// (csv_import predates this table; dune_token_overlap is Wave 4.6).
+model ExternalWalletSource {
+  id             String    @id @default(cuid())
+  name           String    @unique
+  type           String
+  enabled        Boolean   @default(true)
+  chainSupport   String[]
+  apiKeyEnvName  String
+  rateLimitPerMinute Int
+  status         String    @default("idle")
+  lastSyncAt     DateTime?
+  lastError      String?
+  failCount      Int       @default(0)
+  metadataJson   Json?
+
+  @@map("external_wallet_sources")
+}
+
+// ---------------------------------------------------------------------------
+// 25. CandidateWallet (Task 34 — Wave 4.5, Spec §5b)
+// ---------------------------------------------------------------------------
+
+/// A wallet address surfaced by an external source/feeder, NOT YET a tracked
+/// Wallet. Never counted by the signal engine (smartWalletCount/
+/// uniqueEntityCount/etc.) until validationStatus='promoted' and a real
+/// Wallet row exists (promotedWalletId) — Spec §5b's "critical trust rule".
+model CandidateWallet {
+  id                  String                    @id @default(cuid())
+  walletAddress       String
+  chain               ChainId
+  /// Vocabulary (Spec §5b + §5d): solana_tracker_pnl | birdeye_wallet_pnl |
+  /// birdeye_top_traders | kolscan | gmgn_smart_money | cielo | csv_import |
+  /// dune_token_overlap. Plain String (not an enum) so Wave 4.6 can add
+  /// dune_token_overlap without a further migration touching this column.
+  source              String
+  sourceRank          Int?
+  claimedPnlUsd       Decimal?                  @db.Decimal(20, 4)
+  claimedWinRate      Float?
+  claimedTradeCount   Int?
+  claimedRoi          Float?
+  firstSeenAt         DateTime
+  lastSeenAt          DateTime
+  validationStatus    CandidateValidationStatus @default(pending)
+  validationConfidence Int?
+  promotedWalletId    String?
+  rejectionReason     String?
+  metadataJson        Json?
+
+  promotedWallet      Wallet?                   @relation(fields: [promotedWalletId], references: [id])
+
+  @@unique([walletAddress, chain, source])
+  @@index([validationStatus])
+  @@map("candidate_wallets")
+}
+
+// ---------------------------------------------------------------------------
+// 25a. Dune Query Connector (Task 37 — Wave 4.6, dune-feature-wave46.md)
+// ---------------------------------------------------------------------------
+
+/// DuneQuerySource.purpose — what a saved Dune query is used for.
+enum DuneQueryPurpose {
+  token_overlap
+  token_traders
+  smart_wallet_candidates
+  funding_links
+  entity_cluster_research
+}
+
+/// DuneQuerySource.resultFormat — how a saved query's results are fetched.
+enum DuneResultFormat {
+  json
+  csv
+}
+
+/// TokenOverlapSearch.status — lifecycle of one overlap-finder search.
+enum TokenOverlapSearchStatus {
+  queued
+  running
+  done
+  failed
+}
+
+/// One configured Dune saved query (Query Execution API `query_id`), seeded/
+/// operator-managed. CREDIT-SAFE BY DEFAULT: refreshing an enabled row
+/// (runDuneQuerySync/duneQuery worker) serves the query's LATEST CACHED
+/// result (GET /v1/query/{query_id}/results) unless DUNE_EXECUTE_FRESH=true —
+/// see packages/providers/src/candidates/dune/client.ts header for the full
+/// credit-safety contract. `enabled=false` until an operator supplies a real
+/// DUNE_API_KEY + queryId (see seed.ts).
+model DuneQuerySource {
+  id                String            @id @default(cuid())
+  name              String            @unique
+  queryId           String
+  purpose           DuneQueryPurpose
+  enabled           Boolean           @default(false)
+  resultFormat      DuneResultFormat  @default(json)
+  lastExecutionId   String?
+  lastRunAt         DateTime?
+  lastSuccessAt     DateTime?
+  status            String            @default("idle")
+  /// Task 38 fix (folded from Task 37 review): last error message from a
+  /// failed refresh OR a "no DuneClient available" skip (status='no_client')
+  /// — same lastError convention as ExternalWalletSource.lastError, giving
+  /// runDuneQuerySync's pass summary + the UI observability into a
+  /// silently-skipped-until-now case (missing key mid-loop for an enabled
+  /// source).
+  lastError         String?
+  creditsEstimate   Int?
+  parametersJson    Json?
+  outputSchemaJson  Json?
+  notes             String?
+
+  @@map("dune_query_sources")
+}
+
+/// One "given 2-5 token CAs, find wallets that traded multiple/all of them"
+/// search (Overlap Finder, Task 38 UI). `params` carries the overlap query's
+/// own knobs (min_trade_usd, min_tokens_overlap, max_results, start/end —
+/// dune-feature-wave46.md's documented query params) so a search is fully
+/// reproducible from its own row. `usedCachedResult`/`truncated` surface the
+/// credit-safety + result-cap coverage flags Task 38's UI displays per
+/// dune-feature-wave46.md's "Coverage display on every Dune result".
+model TokenOverlapSearch {
+  id                String                    @id @default(cuid())
+  chain             ChainId
+  tokenAddresses     String[]
+  params            Json
+  status            TokenOverlapSearchStatus  @default(queued)
+  rowsReturned      Int?
+  usedCachedResult  Boolean?
+  truncated         Boolean?
+  executionId       String?
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  error             String?
+  createdAt         DateTime                  @default(now())
+  /// Task 38 fix (candidates-added honesty): count of CandidateWallet rows
+  /// this SPECIFIC search actually newly created (source=dune_token_overlap),
+  /// as opposed to overlap wallets that were already a candidate from an
+  /// earlier search. Null for a local search (no candidate gate at all — see
+  /// localOverlap.ts's header) and for rows predating this column. Additive
+  /// column so existing rows/queries keep working unchanged.
+  candidatesCreated Int?
+
+  walletResults     TokenOverlapWalletResult[]
+  groupResults      TokenOverlapGroupResult[]
+
+  @@index([status])
+  @@map("token_overlap_searches")
+}
+
+/// One wallet row from an overlap search's result set — one per
+/// (searchId, walletAddress). Never trusted directly: runTokenOverlapSearch
+/// ALSO creates a CandidateWallet (source='dune_token_overlap', pending) per
+/// distinct wallet so it flows through Task 35's validation/promotion
+/// pipeline — this table is the raw Dune-shaped result archive, not itself a
+/// signal input (Spec §5b trust boundary, restated for Wave 4.6 at
+/// dune-feature-wave46.md's "Dune rows are never trusted blindly").
+model TokenOverlapWalletResult {
+  id                  String   @id @default(cuid())
+  searchId            String
+  walletAddress       String
+  chain               ChainId
+  tokensOverlapCount  Int
+  totalBuyUsd         Decimal? @db.Decimal(20, 4)
+  totalSellUsd        Decimal? @db.Decimal(20, 4)
+  estimatedPnlUsd     Decimal? @db.Decimal(20, 4)
+  firstBuyTime        DateTime?
+  buyCount            Int?
+  sellCount           Int?
+  entryMarketCapUsd   Decimal? @db.Decimal(20, 4)
+  overlapGroupId      String?
+  txHashesSample      String[]
+
+  search              TokenOverlapSearch @relation(fields: [searchId], references: [id], onDelete: Cascade)
+
+  @@index([searchId])
+  @@map("token_overlap_wallet_results")
+}
+
+/// One recurring co-trader group within an overlap search (wallets sharing
+/// `overlapGroupId` — dune-feature-wave46.md's "recurring co-trader groups /
+/// possible entity clusters"). Purely descriptive/UI-facing; never itself a
+/// CandidateWallet or signal input.
+model TokenOverlapGroupResult {
+  id                String   @id @default(cuid())
+  searchId          String
+  overlapGroupId    String
+  walletCount       Int
+  walletAddresses   String[]
+  sharedTokenCount  Int
+
+  search            TokenOverlapSearch @relation(fields: [searchId], references: [id], onDelete: Cascade)
+
+  @@index([searchId])
+  @@map("token_overlap_group_results")
+}
+
+// ---------------------------------------------------------------------------
+// 23. BacktestRun (Task 41 binding decision 5)
+// ---------------------------------------------------------------------------
+
+/// One row per runHistoricalReplay() invocation (packages/db/src/replayRunner.ts)
+/// — persists the full no-lookahead replay + rule/combo performance +
+/// threshold tuning + walk-forward summary as one Json blob, so the CLI/UI
+/// (Task 42) can list/inspect past replay runs without re-running them.
+model BacktestRun {
+  id                String   @id @default(cuid())
+  /// Always 'replay' for Task 41's historical-replay runner — a distinct
+  /// string (not an enum) so a later run kind (e.g. shadow-mode summaries,
+  /// Task 42) can reuse this same table without a schema migration.
+  kind              String
+  params            Json
+  periodFrom        DateTime
+  periodTo          DateTime
+  startedAt         DateTime
+  finishedAt        DateTime?
+  status            String
+  /// Full replay + rulePerformance + comboPerformance + tuneThresholds +
+  /// walkForward output, JSON-serialized (see replayRunner.ts's own
+  /// BacktestRunSummary shape).
+  summary           Json
+  /// True when ANY signal outcome folded into `summary` carried
+  /// syntheticEvidence (i.e. was evaluated against a
+  /// TokenMarketSnapshot.source='seed_synthetic_continuation' point) — a
+  /// row-level flag so a consumer can filter/warn without parsing `summary`.
+  syntheticEvidence Boolean  @default(false)
+
+  @@index([kind, startedAt])
+  @@map("backtest_runs")
+}
