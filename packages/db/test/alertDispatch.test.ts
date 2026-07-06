@@ -57,6 +57,7 @@ beforeAll(async () => {
 });
 
 const tokenIds: string[] = [];
+const rotationWalletIds: string[] = [];
 
 afterAll(async () => {
   if (!dbReachable) return;
@@ -65,6 +66,10 @@ afterAll(async () => {
     await prisma.signal.deleteMany({ where: { tokenId: { in: tokenIds } } });
     await prisma.tokenFlowSnapshot.deleteMany({ where: { tokenId: { in: tokenIds } } });
     await prisma.tokenMarketSnapshot.deleteMany({ where: { tokenId: { in: tokenIds } } });
+  }
+  if (rotationWalletIds.length > 0) {
+    await prisma.alert.deleteMany({ where: { rotationSignal: { sourceWalletId: { in: rotationWalletIds } } } });
+    await prisma.profitRotationSignal.deleteMany({ where: { sourceWalletId: { in: rotationWalletIds } } });
   }
   await prisma.walletTokenTrade.deleteMany({ where: { wallet: { address: { startsWith: ADDR_PREFIX } } } });
   await prisma.wallet.deleteMany({ where: { address: { startsWith: ADDR_PREFIX } } });
@@ -115,6 +120,56 @@ async function makeSignal(
     }
   });
   return signal.id;
+}
+
+/** Creates a source wallet + dest wallet + ProfitRotationSignal row directly, bypassing the matcher entirely (this test only exercises dispatchPendingAlerts' ROTATION branch, not matching). */
+async function makeRotationSignal(
+  sourceTokenId: string,
+  destTokenId: string,
+  detectedAt: Date
+): Promise<{ id: string; sourceWalletId: string; destWalletId: string }> {
+  const now = new Date();
+  const sourceWallet = await prisma.wallet.upsert({
+    where: { address_chain: { address: `${ADDR_PREFIX}_rot_source_${detectedAt.getTime()}`, chain: CHAIN } },
+    create: {
+      address: `${ADDR_PREFIX}_rot_source_${detectedAt.getTime()}`,
+      chain: CHAIN,
+      firstSeenAt: now,
+      lastActiveAt: now,
+      isWatched: true
+    },
+    update: {}
+  });
+  const destWallet = await prisma.wallet.upsert({
+    where: { address_chain: { address: `${ADDR_PREFIX}_rot_dest_${detectedAt.getTime()}`, chain: CHAIN } },
+    create: {
+      address: `${ADDR_PREFIX}_rot_dest_${detectedAt.getTime()}`,
+      chain: CHAIN,
+      firstSeenAt: now,
+      lastActiveAt: now,
+      isWatched: false
+    },
+    update: {}
+  });
+  rotationWalletIds.push(sourceWallet.id);
+
+  const rotation = await prisma.profitRotationSignal.create({
+    data: {
+      sourceWalletId: sourceWallet.id,
+      destWalletId: destWallet.id,
+      sourceTokenId,
+      destTokenId,
+      realizedProfitUsd: 3000,
+      transferredValueUsd: 10_000,
+      chainPath: ['SOLANA', 'BSC'],
+      timeGapMin: 90,
+      confidence: 80,
+      detectedAt,
+      destTokenMcapAtBuy: 800_000,
+      currentDestPerfPct: 15
+    }
+  });
+  return { id: rotation.id, sourceWalletId: sourceWallet.id, destWalletId: destWallet.id };
 }
 
 // dispatchPendingAlerts is (by design — see file header) a GLOBAL pass over
@@ -217,5 +272,42 @@ describe.skipIf(!(await probePort('localhost', 5439)))('dispatchPendingAlerts', 
     const allAlertsForToken = await prisma.alert.findMany({ where: { tokenId, rule: 'G' }, orderBy: { sentAt: 'asc' } });
     expect(allAlertsForToken.length).toBe(2);
     expect(allAlertsForToken.every((a) => a.deliveryStatus === 'sent')).toBe(true);
+  });
+
+  it('ROTATION: a pending ProfitRotationSignal gets exactly one Alert row (type ROTATION), then a second run creates zero more', async () => {
+    const sourceTokenId = await makeToken('rot_source', 'T16ROTS');
+    const destTokenId = await makeToken('rot_dest', 'T16ROTD');
+    const rotation = await makeRotationSignal(sourceTokenId, destTokenId, new Date());
+
+    await dispatchPendingAlerts(prisma, DEFAULT_SETTINGS, null);
+
+    const alerts = await prisma.alert.findMany({ where: { rotationSignalId: rotation.id } });
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.type).toBe('ROTATION');
+    expect(alerts[0]!.deliveryStatus).toBe('skipped_no_token');
+    const payload = alerts[0]!.payload as { text: string };
+    expect(payload.text.length).toBeGreaterThan(0);
+    expect(payload.text).toContain('$T16ROTS');
+    expect(payload.text).toContain('$T16ROTD');
+
+    // Second pass: no longer pending (alerts: none no longer matches) -> zero new rows.
+    await dispatchPendingAlerts(prisma, DEFAULT_SETTINGS, null);
+    const alertsAfterSecond = await prisma.alert.findMany({ where: { rotationSignalId: rotation.id } });
+    expect(alertsAfterSecond.length).toBe(1);
+  });
+
+  it('ROTATION: with a real sender, alert lands "sent" and result.rotationAlertsCreated reflects it', async () => {
+    const sourceTokenId = await makeToken('rot_source2', 'T16ROTS2');
+    const destTokenId = await makeToken('rot_dest2', 'T16ROTD2');
+    const rotation = await makeRotationSignal(sourceTokenId, destTokenId, new Date());
+
+    const sender = makeFakeSender();
+    const result = await dispatchPendingAlerts(prisma, DEFAULT_SETTINGS, sender);
+
+    const alert = await prisma.alert.findFirst({ where: { rotationSignalId: rotation.id } });
+    expect(alert).not.toBeNull();
+    expect(alert!.deliveryStatus).toBe('sent');
+    expect(result.rotationAlertsCreated).toBeGreaterThanOrEqual(1);
+    expect(sender.sentTexts.some((t) => t.includes('$T16ROTS2') && t.includes('$T16ROTD2'))).toBe(true);
   });
 });

@@ -21,7 +21,22 @@ export default defineConfig({
           name: 'db',
           root: './packages/db',
           include: ['test/**/*.test.ts'],
-          passWithNoTests: true
+          passWithNoTests: true,
+          // The db integration suite runs several whole-DB passes
+          // (runEntityClustering, runProfitRotation, runSignalDetectionPass —
+          // each does full-table scans/deletes, not scoped to a single
+          // test's own address prefix) against ONE shared embedded-Postgres
+          // instance (LITE mode, port 5439). Running test FILES within this
+          // project concurrently (vitest's default) caused genuine lock
+          // contention / connection-pool pressure once enough whole-DB-pass
+          // files existed side by side (clustering.test.ts (which also carries the
+          // Task 23 evidence-path cases), rotation.test.ts, signalDedupe.test.ts)
+          // — observed as P2002 unique-constraint races and outright
+          // testTimeout failures under the default 5000ms budget. Unit-style
+          // packages (core/providers) don't touch a real DB and stay
+          // parallel; only this project needs serialization.
+          fileParallelism: false,
+          testTimeout: 20000
         }
       },
       {

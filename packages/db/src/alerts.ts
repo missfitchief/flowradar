@@ -71,6 +71,16 @@ export interface AlertDispatchResult {
   skippedNoToken: number;
   failed: number;
   errors: number;
+  /**
+   * ROTATION-type Alert rows processed this pass (Task 23 binding decision
+   * 4) — every ProfitRotationSignal without an Alert row yet gets exactly
+   * one, mirroring the SIGNAL loop's own "alerts: none -> exactly one Alert"
+   * invariant (see rotationPendingConsidered/rotationSent/etc. below, folded
+   * into the SAME sent/skippedNoToken/failed/errors counters above so a
+   * caller printing "N alerts sent" sees the true combined total — this
+   * field additionally isolates the ROTATION subset for reporting).
+   */
+  rotationAlertsCreated: number;
 }
 
 /**
@@ -240,13 +250,118 @@ export async function dispatchPendingAlerts(
     }
   }
 
+  // ---------------------------------------------------------------------
+  // ROTATION alerts (Task 23 binding decision 4): every ProfitRotationSignal
+  // without an Alert row yet gets exactly one — mirrors the SIGNAL loop's
+  // own "alerts: none -> exactly one Alert" invariant above, but simpler:
+  // ProfitRotationSignal has no severity/rule to cooldown against (its OWN
+  // creation is already deduped on sourceWallet+destWallet+destToken within
+  // 24h — see rotation.ts's header), so there is no cooldown check here,
+  // only the render + send/skip/fail branching.
+  // ---------------------------------------------------------------------
+  let rotationAlertsCreated = 0;
+
+  const pendingRotations = await prisma.profitRotationSignal.findMany({
+    where: { alerts: { none: {} } },
+    orderBy: { detectedAt: 'asc' },
+    include: { sourceToken: true, destToken: true }
+  });
+
+  for (const rotation of pendingRotations) {
+    try {
+      const { sourceToken, destToken } = rotation;
+      if (!sourceToken || !destToken) {
+        // Defensive: both FKs are required (never actually nullable in
+        // practice — both are included), but guard against a
+        // deleted/orphaned row rather than crashing the pass.
+        await prisma.alert.create({
+          data: {
+            rotationSignalId: rotation.id,
+            type: 'ROTATION',
+            channel: 'TELEGRAM',
+            tokenId: destToken?.id ?? null,
+            sentAt: now,
+            payload: { text: '', dataUsed: {}, note: 'source/dest token missing' } as unknown as Prisma.InputJsonValue,
+            deliveryStatus: 'skipped_no_token'
+          }
+        });
+        skippedNoToken += 1;
+        continue;
+      }
+
+      const { text, dataUsed } = await buildRotationAlertText(prisma, rotation, sourceToken, destToken);
+
+      if (sender === null) {
+        await prisma.alert.create({
+          data: {
+            rotationSignalId: rotation.id,
+            type: 'ROTATION',
+            channel: 'TELEGRAM',
+            tokenId: destToken.id,
+            sentAt: now,
+            payload: { text, dataUsed } as unknown as Prisma.InputJsonValue,
+            deliveryStatus: 'skipped_no_token'
+          }
+        });
+        skippedNoToken += 1;
+        rotationAlertsCreated += 1;
+        continue;
+      }
+
+      try {
+        await sender.send(text);
+        await prisma.alert.create({
+          data: {
+            rotationSignalId: rotation.id,
+            type: 'ROTATION',
+            channel: 'TELEGRAM',
+            tokenId: destToken.id,
+            sentAt: now,
+            payload: { text, dataUsed } as unknown as Prisma.InputJsonValue,
+            deliveryStatus: 'sent'
+          }
+        });
+        sent += 1;
+        rotationAlertsCreated += 1;
+      } catch (sendErr) {
+        const errorMessage = sendErr instanceof Error ? sendErr.message : String(sendErr);
+        await prisma.alert.create({
+          data: {
+            rotationSignalId: rotation.id,
+            type: 'ROTATION',
+            channel: 'TELEGRAM',
+            tokenId: destToken.id,
+            sentAt: now,
+            payload: { text, dataUsed } as unknown as Prisma.InputJsonValue,
+            deliveryStatus: 'failed',
+            error: errorMessage
+          }
+        });
+        failed += 1;
+        rotationAlertsCreated += 1;
+        log?.error('alertDispatch: sender.send failed (rotation)', {
+          rotationSignalId: rotation.id,
+          tokenId: destToken.id,
+          error: errorMessage
+        });
+      }
+    } catch (err) {
+      errors += 1;
+      log?.error('alertDispatch: failed to process rotation signal', {
+        rotationSignalId: rotation.id,
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
+  }
+
   const summary: AlertDispatchResult = {
-    pendingConsidered: pendingSignals.length,
+    pendingConsidered: pendingSignals.length + pendingRotations.length,
     sent,
     skippedCooldown,
     skippedNoToken,
     failed,
-    errors
+    errors,
+    rotationAlertsCreated
   };
   log?.info('alertDispatch cycle complete', { ...summary });
   return summary;
@@ -401,6 +516,68 @@ async function buildSignalAlertText(
     currentMcapUsd,
     reasons,
     riskFlagCount: riskFlags.length
+  };
+
+  return { text, dataUsed };
+}
+
+// ---------------------------------------------------------------------------
+// RotationAlertData assembly (Task 23 binding decision 4)
+// ---------------------------------------------------------------------------
+
+type RotationWithTokens = Prisma.ProfitRotationSignalGetPayload<{ include: { sourceToken: true; destToken: true } }>;
+
+/**
+ * Builds the rendered Telegram text + the raw dataUsed snapshot for a
+ * ROTATION-type alert, straight from a ProfitRotationSignal row's own
+ * columns (unlike buildSignalAlertText, no separate TokenFlowSnapshot/
+ * TokenMarketSnapshot lookup is needed — ProfitRotationSignal already
+ * carries realizedProfitUsd/transferredValueUsd/chainPath/timeGapMin/
+ * confidence/destTokenMcapAtBuy/currentDestPerfPct verbatim from the
+ * matcher, per Task 23's RotationCandidate contract).
+ */
+async function buildRotationAlertText(
+  prisma: PrismaClient,
+  rotation: RotationWithTokens,
+  sourceToken: RotationWithTokens['sourceToken'],
+  destToken: RotationWithTokens['destToken']
+): Promise<{ text: string; dataUsed: Record<string, unknown> }> {
+  const [chainRow] = await Promise.all([prisma.chain.findUnique({ where: { id: destToken.chain } })]);
+
+  const realizedProfitUsd = Number(rotation.realizedProfitUsd);
+  const transferredValueUsd = Number(rotation.transferredValueUsd);
+  const destTokenMcapAtBuyUsd = Number(rotation.destTokenMcapAtBuy);
+
+  const explorerUrl = chainRow ? chainRow.explorerAddressUrl.replaceAll('{address}', destToken.address) : null;
+  const dexScreenerUrl = `https://dexscreener.com/${DEXSCREENER_CHAIN_SLUG[destToken.chain as 'SOLANA' | 'BSC']}/${destToken.address}`;
+  const dashboardUrl = buildDashboardUrl(destToken.id);
+
+  const text = renderAlert('ROTATION', {
+    sourceTokenSymbol: sourceToken.symbol,
+    destTokenSymbol: destToken.symbol,
+    chainPath: rotation.chainPath,
+    realizedProfitUsd,
+    transferredValueUsd,
+    timeGapMin: rotation.timeGapMin,
+    destTokenMcapAtBuyUsd,
+    currentDestPerfPct: rotation.currentDestPerfPct,
+    confidence: rotation.confidence,
+    links: { explorerUrl, dexScreenerUrl, dashboardUrl }
+  });
+
+  const dataUsed = {
+    rotationSignalId: rotation.id,
+    sourceWalletId: rotation.sourceWalletId,
+    destWalletId: rotation.destWalletId,
+    sourceTokenId: sourceToken.id,
+    destTokenId: destToken.id,
+    realizedProfitUsd,
+    transferredValueUsd,
+    chainPath: rotation.chainPath,
+    timeGapMin: rotation.timeGapMin,
+    confidence: rotation.confidence,
+    destTokenMcapAtBuyUsd,
+    currentDestPerfPct: rotation.currentDestPerfPct
   };
 
   return { text, dataUsed };

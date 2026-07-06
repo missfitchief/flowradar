@@ -578,13 +578,26 @@ async function runSelfCheck(
   checkSupersetOf('QUIET signals >= {B}', 'QUIET', [{ rule: 'B' }]);
   checkSupersetOf('SEED signals >= {E}', 'SEED', [{ rule: 'E' }]);
   checkSupersetOf('DUMP signals >= {G}', 'DUMP', [{ rule: 'G' }]);
+  checkSupersetOf('BETA signals >= {F}', 'BETA', [{ rule: 'F' }]);
 
-  const anyFFired = [...signalsByToken.values()].some((entry) => entry.fired.some((f) => f.rule === 'F'));
+  // Task 23 (this task) supersedes the prior "no F anywhere" self-check: the
+  // rotation matcher now exists and Task 4's ALPHA->BETA scenario is
+  // SPECIFICALLY shaped to trigger it (a wallet exits ALPHA profitably,
+  // bridges the proceeds via Wormhole, the BSC-side wallet buys BETA within
+  // the re-buy window). "F fires nowhere" is no longer the correct
+  // invariant — "F fires on BETA and ONLY BETA" is (every OTHER scenario's
+  // token is deliberately NOT shaped to produce a qualifying
+  // RotationCandidate, so F firing anywhere else would indicate a
+  // false-positive rotation match, not intended behavior).
+  const tokensWhereFFired = [...signalsByToken.values()]
+    .filter((entry) => entry.fired.some((f) => f.rule === 'F'))
+    .map((entry) => entry.symbol);
+  const fFiresOnBetaOnly = tokensWhereFFired.length === 1 && tokensWhereFFired[0] === 'BETA';
   rows.push({
-    check: 'no F anywhere (rotation matcher arrives Wave 3 / Task 23)',
-    expected: 'F fires nowhere',
-    actual: anyFFired ? 'F fired somewhere' : 'F fired nowhere',
-    pass: !anyFFired
+    check: 'F fires on BETA exactly (rotation matcher — Task 23; supersedes the old "no F anywhere" check)',
+    expected: 'fired only for BETA',
+    actual: tokensWhereFFired.length > 0 ? `fired for: ${tokensWhereFFired.join(', ')}` : 'fired nowhere',
+    pass: fFiresOnBetaOnly
   });
 
   // ---------------------------------------------------------------------
@@ -625,6 +638,38 @@ async function runSelfCheck(
   });
 
   // ---------------------------------------------------------------------
+  // Profit-rotation self-check (Task 23 binding decision: "a
+  // ProfitRotationSignal row exists (source ALPHA-side wallet, dest
+  // BETA-side, bridged true)") — runProfitRotation runs as part of
+  // runSignalDetectionPass (packages/db/src/signals.ts), so by the time
+  // this self-check runs (after the signal-detection re-pass above), the
+  // ALPHA->BETA scenario's rotation should already be persisted.
+  // ---------------------------------------------------------------------
+  const alphaBetaHandle = world.meta.scenarios.alphaToBeta;
+  const rotationRow = await prisma.profitRotationSignal.findFirst({
+    where: {
+      sourceToken: { address: alphaBetaHandle.alphaTokenAddress },
+      destToken: { address: alphaBetaHandle.betaTokenAddress }
+    },
+    include: { sourceWallet: true, destWallet: true }
+  });
+  const rotationRowOk =
+    rotationRow !== null &&
+    rotationRow.sourceWallet.address === alphaBetaHandle.sourceWallet &&
+    rotationRow.destWallet.address === alphaBetaHandle.destWallet &&
+    rotationRow.chainPath.includes('SOLANA') &&
+    rotationRow.chainPath.includes('BSC') &&
+    rotationRow.chainPath.length >= 2;
+  rows.push({
+    check: 'ProfitRotationSignal row exists: source=ALPHA-side wallet, dest=BETA-side wallet, bridged (chainPath includes SOLANA+BSC)',
+    expected: 'exists, source/dest wallets match scenario, chainPath=[SOLANA,BSC]-shaped',
+    actual: rotationRow
+      ? `chainPath=${JSON.stringify(rotationRow.chainPath)}, sourceWallet match=${rotationRow.sourceWallet.address === alphaBetaHandle.sourceWallet}, destWallet match=${rotationRow.destWallet.address === alphaBetaHandle.destWallet}`
+      : 'no ProfitRotationSignal row found for ALPHA->BETA',
+    pass: rotationRowOk
+  });
+
+  // ---------------------------------------------------------------------
   // Alert self-checks (Task 16 binding decision 7): "Alert rows exist for
   // every seeded signal, all 'skipped_no_token', payload text non-empty
   // containing '$NOVA' for the NOVA A alert; print alert count." — this
@@ -633,13 +678,21 @@ async function runSelfCheck(
   // Alert row (see packages/db/src/alerts.ts's file header: "Every Signal
   // this pass ever looks at ends up with EXACTLY ONE Alert row").
   // ---------------------------------------------------------------------
+  // Task 23 update: dispatchPendingAlerts now ALSO drains ProfitRotationSignal
+  // rows into their own type=ROTATION Alert rows (see this file's "ROTATION
+  // alert self-check" above) — these are NOT backed by a Signal row at all
+  // (ProfitRotationSignal has no relation to Signal), so the "one Alert per
+  // pending item" invariant now spans TWO source tables, not one. The correct
+  // total is Signal count + ProfitRotationSignal count, not Signal count alone.
   const totalSignalCount = await prisma.signal.count();
+  const totalRotationSignalCount = await prisma.profitRotationSignal.count();
   const totalAlertCount = await prisma.alert.count();
+  const expectedAlertCount = totalSignalCount + totalRotationSignalCount;
   rows.push({
-    check: 'Alert row count == Signal row count (every seeded signal got exactly one alert)',
-    expected: `== ${totalSignalCount}`,
+    check: 'Alert row count == Signal row count + ProfitRotationSignal row count (every seeded signal/rotation got exactly one alert)',
+    expected: `== ${expectedAlertCount} (${totalSignalCount} signals + ${totalRotationSignalCount} rotations)`,
     actual: String(totalAlertCount),
-    pass: totalAlertCount === totalSignalCount
+    pass: totalAlertCount === expectedAlertCount
   });
 
   const nonSkippedAlerts = await prisma.alert.count({ where: { deliveryStatus: { not: 'skipped_no_token' } } });
@@ -662,6 +715,33 @@ async function runSelfCheck(
     expected: 'non-empty, contains "$NOVA"',
     actual: novaAlertA ? `${novaAlertText.length} chars, contains $NOVA: ${novaAlertText.includes('$NOVA')}` : 'no Alert row found',
     pass: novaAlertOk
+  });
+
+  // ---------------------------------------------------------------------
+  // ROTATION alert self-check (Task 23 binding decision 4): the
+  // ALPHA->BETA ProfitRotationSignal row above must have produced exactly
+  // one type=ROTATION Alert row (deliveryStatus 'skipped_no_token', same as
+  // every other seeded alert — see the "every Alert row is
+  // deliveryStatus 'skipped_no_token'" check above, which already covers
+  // ROTATION rows too since it counts across the WHOLE Alert table).
+  // ---------------------------------------------------------------------
+  const rotationAlert = rotationRow
+    ? await prisma.alert.findFirst({ where: { rotationSignalId: rotationRow.id } })
+    : null;
+  const rotationAlertPayload = rotationAlert?.payload as { text?: string } | undefined;
+  const rotationAlertText = rotationAlertPayload?.text ?? '';
+  const rotationAlertOk =
+    rotationAlert !== null &&
+    rotationAlert.type === 'ROTATION' &&
+    rotationAlert.deliveryStatus === 'skipped_no_token' &&
+    rotationAlertText.length > 0;
+  rows.push({
+    check: "ROTATION Alert row exists for the ALPHA->BETA ProfitRotationSignal (type ROTATION, deliveryStatus 'skipped_no_token')",
+    expected: "exists, type=ROTATION, deliveryStatus='skipped_no_token', non-empty payload.text",
+    actual: rotationAlert
+      ? `type=${rotationAlert.type}, deliveryStatus=${rotationAlert.deliveryStatus}, textLen=${rotationAlertText.length}`
+      : 'no ROTATION Alert row found',
+    pass: rotationAlertOk
   });
 
   // ---------------------------------------------------------------------

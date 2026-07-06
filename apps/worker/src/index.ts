@@ -20,13 +20,16 @@
 //      straight through @flowradar/providers's getProvider (Wave 4 — reports
 //      missing_key/stub rather than crashing).
 //   5. createRunner() (InlineRunner in LITE/no-REDIS_URL, BullMqRunner in
-//      FULL), register the 6 scheduled jobs (walletActivity, marketDataHot,
-//      marketDataNormal, flowScoring, signalDetection, alertDispatch — the
-//      last two added Tasks 15/16) on schedule() with settings.intervals.*Sec
-//      converted to ms, plus walletImport registered on-demand via process()
-//      (see below) — WORKER_FAST=1 overrides every scheduled interval to 3s
-//      so a manual verification run doesn't need to wait minutes for a full
-//      cycle of the slowest job (marketDataNormalSec, default 300s).
+//      FULL), register the scheduled jobs (walletActivity, marketDataHot,
+//      marketDataNormal, flowScoring, entityClustering, moneyFlow,
+//      bridgeFlow, profitRotation, signalDetection, alertDispatch —
+//      entityClustering added Task 22; moneyFlow/bridgeFlow/profitRotation
+//      added Task 23) on schedule() with settings.intervals.*Sec converted
+//      to ms, plus walletImport/walletGraph registered on-demand via
+//      process() (see below) — WORKER_FAST=1 overrides every scheduled
+//      interval to 3s so a manual verification run doesn't need to wait
+//      minutes for a full cycle of the slowest job (marketDataNormalSec,
+//      default 300s).
 //   6. runner.start(). SIGINT/SIGTERM => runner.stop() => prisma.$disconnect()
 //      => process.exit(0).
 
@@ -47,6 +50,9 @@ import * as marketDataHot from './jobs/marketDataHot';
 import * as marketDataNormal from './jobs/marketDataNormal';
 import * as flowScoring from './jobs/flowScoring';
 import * as entityClustering from './jobs/entityClustering';
+import * as moneyFlow from './jobs/moneyFlow';
+import * as bridgeFlow from './jobs/bridgeFlow';
+import * as profitRotation from './jobs/profitRotation';
 import * as signalDetection from './jobs/signalDetection';
 import * as alertDispatch from './jobs/alertDispatch';
 import * as walletImport from './jobs/walletImport';
@@ -159,6 +165,9 @@ async function main(): Promise<void> {
     { name: 'marketDataNormal', run: marketDataNormal.run, intervalSec: settings.intervals.marketDataNormalSec },
     { name: 'flowScoring', run: flowScoring.run, intervalSec: settings.intervals.flowScoringSec },
     { name: 'entityClustering', run: entityClustering.run, intervalSec: settings.intervals.entityClusteringSec },
+    { name: 'moneyFlow', run: moneyFlow.run, intervalSec: settings.intervals.moneyFlowSec },
+    { name: 'bridgeFlow', run: bridgeFlow.run, intervalSec: settings.intervals.bridgeFlowSec },
+    { name: 'profitRotation', run: profitRotation.run, intervalSec: settings.intervals.profitRotationSec },
     { name: 'signalDetection', run: signalDetection.run, intervalSec: settings.intervals.signalDetectionSec },
     { name: 'alertDispatch', run: alertDispatch.run, intervalSec: settings.intervals.alertDispatchSec }
   ];

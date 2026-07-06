@@ -2,13 +2,21 @@
 //
 // Normative source: Task 15 binding decisions 3-4.
 //
+// Once per pass (not per-token — mirrors clustering.ts's own "global pass,
+// not token-scoped" shape): runs runProfitRotation (Task 23 binding decision
+// 3), which both PERSISTS ProfitRotationSignal rows and returns the matched
+// MatchedRotationCandidate[] this same pass then threads into EVERY token's
+// evaluateAllRules call as RuleExtras.rotationCandidates — ruleF.ts itself
+// filters by candidate.destTokenId === agg.tokenId, so handing every token
+// the SAME full candidate list is correct (each token's own Rule F
+// evaluation only matches the subset actually destined for it).
+//
 // Per-token: fetches shared aggregate inputs (fetchAggregateInputs — the
 // SAME fetch the scoring pass uses, so scoring and signals never compute
 // two different notions of "this token's window"), builds the 30-min and
 // 1440-min TokenWindowAggregate via @flowradar/core's aggregateWindow,
-// builds FundingEvent[] via buildFundingEvents (rotationCandidates stays []
-// until Task 23's rotation-candidate builder lands), runs evaluateAllRules,
-// and for every FIRED rule result:
+// builds FundingEvent[] via buildFundingEvents, runs evaluateAllRules with
+// this pass's shared rotationCandidates, and for every FIRED rule result:
 //   - dedupe: skip creating a new Signal row if an ACTIVE Signal already
 //     exists for (tokenId, rule) with triggeredAt within the last 24h (a
 //     rule that keeps firing tick after tick shouldn't spam a fresh row
@@ -41,6 +49,7 @@ import type { Settings, TokenWindowAggregate } from '@flowradar/core';
 import type { PrismaClient } from '@prisma/client';
 import { fetchAggregateInputs } from './fetchAggregateInputs';
 import { buildFundingEvents } from './fundingEvents';
+import { runProfitRotation } from './rotation';
 
 const WINDOW_MINUTES_30 = 30;
 const WINDOW_MINUTES_1440 = 1440;
@@ -76,6 +85,11 @@ export async function runSignalDetectionPass(
     where: { trades: { some: {} } },
     select: { id: true, symbol: true }
   });
+
+  // Once per pass (see file header): matches + persists ProfitRotationSignal
+  // rows, and returns the SAME MatchedRotationCandidate[] every token's Rule
+  // F evaluation below reads from.
+  const { candidates: rotationCandidates } = await runProfitRotation(prisma, settings, now, log);
 
   let processed = 0;
   let signalsCreated = 0;
@@ -129,7 +143,7 @@ export async function runSignalDetectionPass(
       // historical/seeded token's actual activity).
       const fundingEvents = await buildFundingEvents(prisma, token.id, agg24h.from, now, settings);
 
-      const results = evaluateAllRules(agg30, agg24h, settings, { fundingEvents, rotationCandidates: [] });
+      const results = evaluateAllRules(agg30, agg24h, settings, { fundingEvents, rotationCandidates });
       const fired = firedRules(results);
 
       perToken.set(token.id, {

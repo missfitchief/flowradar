@@ -432,19 +432,27 @@ model Signal {
 // ---------------------------------------------------------------------------
 
 model Alert {
-  id             String       @id @default(cuid())
-  signalId       String?
-  type           AlertType
-  channel        AlertChannel
-  tokenId        String?
-  rule           SignalRule?
-  sentAt         DateTime
-  payload        Json
-  deliveryStatus String
-  error          String?
+  id               String                @id @default(cuid())
+  signalId         String?
+  /// Task 23: FK to the ProfitRotationSignal a ROTATION-type Alert renders
+  /// (mirrors signalId's role for SIGNAL-type alerts) — lets
+  /// dispatchPendingAlerts find "every ProfitRotationSignal with NO Alert
+  /// row yet" the same way it already finds pending Signal rows
+  /// (`rotationSignal: { alerts: { none: {} } }`), rather than needing an
+  /// ad-hoc Json-payload dedupe check.
+  rotationSignalId String?
+  type             AlertType
+  channel          AlertChannel
+  tokenId          String?
+  rule             SignalRule?
+  sentAt           DateTime
+  payload          Json
+  deliveryStatus   String
+  error            String?
 
-  signal         Signal?      @relation(fields: [signalId], references: [id])
-  token          Token?       @relation(fields: [tokenId], references: [id])
+  signal           Signal?               @relation(fields: [signalId], references: [id])
+  rotationSignal   ProfitRotationSignal? @relation(fields: [rotationSignalId], references: [id])
+  token            Token?                @relation(fields: [tokenId], references: [id])
 
   @@index([tokenId, rule, sentAt])
   @@map("alerts")
@@ -588,6 +596,9 @@ model ProfitRotationSignal {
   destWallet            Wallet @relation("ProfitRotationDest", fields: [destWalletId], references: [id], onDelete: Cascade)
   sourceToken           Token  @relation("ProfitRotationSourceToken", fields: [sourceTokenId], references: [id], onDelete: Cascade)
   destToken             Token  @relation("ProfitRotationDestToken", fields: [destTokenId], references: [id], onDelete: Cascade)
+  /// Task 23: reverse side of Alert.rotationSignalId — see that field's doc
+  /// comment for why this exists (dispatchPendingAlerts' ROTATION dedupe).
+  alerts                Alert[]
 
   @@index([sourceWalletId])
   @@index([destWalletId])

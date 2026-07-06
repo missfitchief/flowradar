@@ -123,7 +123,6 @@ interface PairEvidenceAcc {
   bridgeWithdrawalsA: { amountUsd: number; ts: Date }[];
   viaCexOrMixer: boolean;
   viaRouterOnly: boolean; // provisional — finalized after direct-transfer count known
-  hasAnyDirectRoute: boolean;
 }
 
 function pairKeyOf(x: string, y: string): [string, string] {
@@ -221,8 +220,7 @@ async function deriveCandidateLinks(
         bridgeDepositsB: [],
         bridgeWithdrawalsA: [],
         viaCexOrMixer: false,
-        viaRouterOnly: false,
-        hasAnyDirectRoute: false
+        viaRouterOnly: false
       };
       pairAcc.set(key, acc);
     }
@@ -237,9 +235,8 @@ async function deriveCandidateLinks(
       const walletA = addressToWalletId.get(row.sourceAddress)!;
       const walletB = addressToWalletId.get(row.destinationAddress)!;
       const [x, y] = pairKeyOf(walletA, walletB);
-      const key = `${x} ${y}`;
+      const key = `${x} ${y}`;
       const acc = getAcc(key);
-      acc.hasAnyDirectRoute = true;
 
       if (row.actionType === 'transfer') {
         acc.directTransferCount += 1;
@@ -276,7 +273,7 @@ async function deriveCandidateLinks(
       if (ratio < 1 - BRIDGE_AMOUNT_TOLERANCE) continue;
 
       const [x, y] = pairKeyOf(walletA, walletB);
-      const key = `${x} ${y}`;
+      const key = `${x} ${y}`;
       const acc = getAcc(key);
       acc.bridgeDepositsA.push({ amountUsd: dep.amountUsd, ts: dep.ts });
       acc.bridgeWithdrawalsB.push({ amountUsd: wd.amountUsd, ts: wd.ts });
@@ -310,7 +307,7 @@ async function deriveCandidateLinks(
     for (let i = 0; i < uniqueWallets.length; i++) {
       for (let j = i + 1; j < uniqueWallets.length; j++) {
         const [x, y] = pairKeyOf(uniqueWallets[i]!, uniqueWallets[j]!);
-        const key = `${x} ${y}`;
+        const key = `${x} ${y}`;
         const acc = getAcc(key);
         if (category === 'CEX' || category === 'MIXER') {
           acc.viaCexOrMixer = true;
@@ -382,7 +379,7 @@ async function deriveCandidateLinks(
     for (let i = 0; i < walletIds.length; i++) {
       for (let j = i + 1; j < walletIds.length; j++) {
         const [x, y] = pairKeyOf(walletIds[i]!, walletIds[j]!);
-        sameFundingPairs.add(`${x} ${y}`);
+        sameFundingPairs.add(`${x} ${y}`);
       }
     }
     // If the shared source address is ITSELF a tracked wallet, also pair
@@ -392,9 +389,13 @@ async function deriveCandidateLinks(
       for (const funded of walletIds) {
         if (funded === funderWalletId) continue;
         const [x, y] = pairKeyOf(funderWalletId, funded);
-        const key = `${x} ${y}`;
-        const acc = getAcc(key);
-        acc.hasAnyDirectRoute = true; // funder->funded is itself a direct transfer relationship
+        const key = `${x} ${y}`;
+        // Ensure this pair has an accumulator entry even if the funding
+        // transfer's own actionType wasn't 'transfer' (e.g. it was
+        // classified under a different MoneyFlowActionType) — the
+        // funder<->funded relationship must still be representable as a
+        // candidate pair below.
+        getAcc(key);
       }
     }
   }
@@ -405,7 +406,7 @@ async function deriveCandidateLinks(
   const allPairKeys = new Set<string>([...pairAcc.keys(), ...sameFundingPairs]);
 
   for (const key of allPairKeys) {
-    const [a, b] = key.split(' ') as [string, string];
+    const [a, b] = key.split(' ') as [string, string];
     const acc = pairAcc.get(key);
 
     const directTransferCount = acc?.directTransferCount ?? 0;
@@ -586,19 +587,28 @@ export async function runEntityClustering(
     });
 
     for (const walletId of cluster.members) {
-      // Per-member linkConfidence: reuse the pair-level max touching this
-      // member if available, else fall back to the cluster's own mean
-      // confidence (a member could in principle appear in evidenceByPair
-      // under either orientation — searched both).
+      // Per-member linkConfidence: this member's OWN max-confidence
+      // qualifying pair (searching every pair touching it under either
+      // orientation), NOT the cluster's own mean confidence — a member can
+      // participate in several qualifying pairs at very different
+      // confidence levels (e.g. a strong funder<->funded pair vs a weaker
+      // pair with a different cluster member), and the row should reflect
+      // the strongest evidence for THAT wallet specifically. Falls back to
+      // the cluster mean only if this member somehow has no entry in
+      // evidenceByPair at all (defensive — should not happen for a member
+      // that was actually unioned into the cluster).
       let memberEvidence: LinkEvidence | undefined;
-      let memberConfidence = cluster.confidence;
+      let memberConfidence: number | undefined;
       for (const [pairKey, evidence] of Object.entries(cluster.evidenceByPair)) {
         const [x, y] = pairKey.split(':');
-        if (x === walletId || y === walletId) {
+        if (x !== walletId && y !== walletId) continue;
+        const pairConfidence = calculateWalletLinkConfidence(evidence);
+        if (memberConfidence === undefined || pairConfidence > memberConfidence) {
+          memberConfidence = pairConfidence;
           memberEvidence = evidence;
-          break;
         }
       }
+      memberConfidence ??= cluster.confidence;
       const evidenceForRow = memberEvidence ?? ({} as LinkEvidence);
 
       try {
