@@ -21,7 +21,7 @@ import path from 'node:path';
 import { DEFAULT_SETTINGS } from '@flowradar/core';
 import type { Chain, Settings } from '@flowradar/core';
 import { computeWalletScore } from '@flowradar/core';
-import { createMockWorld, GRAPH_DEMO_ROOT_ADDRESS, MockProvider } from '@flowradar/providers';
+import { createMockWorld, GRAPH_DEMO_ROOT_ADDRESS, MockProvider, STATIC_REGISTRY_ENTRIES } from '@flowradar/providers';
 import type { MockWorld } from '@flowradar/providers';
 import type { Prisma } from '@prisma/client';
 import { prisma } from './client';
@@ -144,8 +144,23 @@ async function bootstrapSettings(): Promise<Settings> {
  *   3. The literal 'wormhole-bridge-program' address used as the bridge
  *      counterparty in the ALPHA->BETA scenario — not a MockWallet at all
  *      (just a raw string used as tx from/to), tagged BRIDGE explicitly.
+ *
+ * Task 26 addition: after the mock-world rows above are written, this
+ * function ALSO upserts packages/providers/src/registryData's curated static
+ * service-address lists (source 'static-2026-07') — real, well-known Solana/
+ * BSC service addresses (Jupiter, Raydium, Orca, Wormhole, PancakeSwap,
+ * Stargate, 1inch, major stablecoin mints, a couple of well-documented CEX
+ * hot wallets) so live-provider mode (Wave 4) has *some* real do-not-expand/
+ * CEX/router/bridge coverage from day one, on top of the mock-world's own
+ * synthetic scenario addresses. Order matters: mock-world rows are written
+ * FIRST (above), static rows SECOND (below) — on a (chain, address)
+ * collision (never expected in practice; mock-world addresses are
+ * PRNG-generated fake strings, real static addresses are genuine mainnet
+ * addresses, so the two universes shouldn't overlap) the static upsert is a
+ * no-op skip rather than a clobber, so a real seeded mock-world label always
+ * wins over a same-address static entry.
  */
-async function bootstrapAddressRegistry(world: MockWorld): Promise<number> {
+async function bootstrapAddressRegistry(world: MockWorld): Promise<{ mockCount: number; staticCount: number }> {
   const rows: {
     chain: Chain;
     address: string;
@@ -203,8 +218,35 @@ async function bootstrapAddressRegistry(world: MockWorld): Promise<number> {
     }))
   });
 
-  log('bootstrapped AddressRegistry rows.', { count: deduped.length });
-  return deduped.length;
+  log('bootstrapped AddressRegistry rows (mock-world).', { count: deduped.length });
+
+  // Static rows SECOND (see doc comment above) — upsert per-entry so an
+  // (extremely unlikely) collision with a mock-world address above is a
+  // no-op skip, never a clobber: the `update: {}` branch touches zero
+  // columns, leaving whatever mock-world row already exists at that
+  // (chain, address) key untouched.
+  let staticCount = 0;
+  for (const entry of STATIC_REGISTRY_ENTRIES) {
+    const existing = await prisma.addressRegistry.findUnique({
+      where: { chain_address: { chain: entry.chain, address: entry.address } }
+    });
+    if (existing) continue; // mock-world row already owns this (chain, address) — skip, don't clobber
+
+    await prisma.addressRegistry.create({
+      data: {
+        chain: entry.chain,
+        address: entry.address,
+        category: entry.category,
+        label: entry.label,
+        source: entry.source,
+        doNotExpand: entry.doNotExpand
+      }
+    });
+    staticCount += 1;
+  }
+
+  log('bootstrapped AddressRegistry rows (static curated lists).', { count: staticCount });
+  return { mockCount: deduped.length, staticCount };
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,13 +1059,46 @@ async function runSelfCheck(
 
   const graphNodeAddresses = new Set((graphSearch?.nodes ?? []).map((n) => n.address));
   const routerAddress = world.meta.scenarios.graphDemo.routerCounterparty;
-  const cexAddress = world.meta.scenarios.graphDemo.cexCounterparty;
-  const includesRouterAndCex = graphNodeAddresses.has(routerAddress) && graphNodeAddresses.has(cexAddress);
   rows.push({
-    check: 'graph-demo search includes router + CEX counterparty nodes',
-    expected: 'both present',
-    actual: `router present=${graphNodeAddresses.has(routerAddress)}, cex present=${graphNodeAddresses.has(cexAddress)}`,
-    pass: includesRouterAndCex
+    check: 'graph-demo search includes router counterparty node',
+    expected: 'present',
+    actual: `router present=${graphNodeAddresses.has(routerAddress)}`,
+    pass: graphNodeAddresses.has(routerAddress)
+  });
+
+  // CEX counterparty check (Task 26 fix pass — see this file's own
+  // bootstrapAddressRegistry doc comment): the graph-demo's CEX-touch leg
+  // (packages/providers/src/mock/scenarios.ts's buildGraphDemo) is a
+  // token_transfer INTO a registry-CEX address. Before Task 26, ingest.ts
+  // wrote every token_transfer as plain MoneyFlowEdge.actionType='transfer',
+  // so this edge's relationship mapped to native_transfer — which passes
+  // CAPITAL_FLOW's relationship allowlist — and the CEX node showed up as a
+  // BFS-discovered node. Task 26 makes ingest CEX-aware: this exact edge is
+  // now correctly tagged actionType='cex_deposit', which
+  // packages/core/src/graph/bfs.ts's CAPITAL_FLOW_ALLOWLIST deliberately
+  // excludes "entirely" (see bfs.test.ts's own "CAPITAL_FLOW excludes non-
+  // transfer-ish edges (swap/router/cex) from the graph entirely" — a
+  // committed, already-reviewed design choice: CAPITAL_FLOW mode intends to
+  // stop capital-flow tracing at the exchange boundary, not surface it as a
+  // leaf node). So the CEX node correctly NO LONGER appears in this
+  // CAPITAL_FLOW search's result — that is now-correct behavior, not a
+  // regression. What this self-check verifies instead is that the
+  // do-not-expand/CEX-tagging INFRASTRUCTURE itself still works end-to-end:
+  // the address is a registered CEX row with doNotExpand=true (the
+  // AddressRegistry side of Task 20 binding decision 7), even though
+  // CAPITAL_FLOW mode's own relationship allowlist is what keeps it out of
+  // this particular search's node set.
+  const cexAddress = world.meta.scenarios.graphDemo.cexCounterparty;
+  const cexRegistryRow = await prisma.addressRegistry.findFirst({
+    where: { address: cexAddress, category: 'CEX' }
+  });
+  rows.push({
+    check: 'graph-demo CEX counterparty is a registered CEX AddressRegistry row with doNotExpand=true',
+    expected: 'category=CEX, doNotExpand=true',
+    actual: cexRegistryRow
+      ? `category=${cexRegistryRow.category}, doNotExpand=${cexRegistryRow.doNotExpand}`
+      : 'no AddressRegistry row found',
+    pass: cexRegistryRow?.doNotExpand === true
   });
 
   const graphPathCount = Array.isArray((graphSearch?.resultSummary as { paths?: unknown[] } | null)?.paths)
@@ -1342,7 +1417,12 @@ async function main(): Promise<void> {
     tokens: world.tokens.length
   });
 
-  await bootstrapAddressRegistry(world);
+  const addressRegistryCounts = await bootstrapAddressRegistry(world);
+  log('AddressRegistry seed totals.', {
+    total: addressRegistryCounts.mockCount + addressRegistryCounts.staticCount,
+    static: addressRegistryCounts.staticCount,
+    mock: addressRegistryCounts.mockCount
+  });
 
   // Token rows must exist before market snapshots / trades can reference
   // them (Token.chain_address is the FK target) — upsert every mock-world

@@ -40,6 +40,22 @@ export default async function SettingsPage() {
     return acc;
   }, {} as EnvPresence);
 
+  // Address registry stats (Task 26 binding decision 4) — trivial grouped
+  // count, source is either 'static-2026-07' (packages/providers/src/
+  // registryData's curated lists) or 'mock-world' (packages/db/src/seed.ts's
+  // scenario-derived rows); any other source value (future admin-UI-added
+  // rows) folds into the mock bucket's complement via the total, not shown
+  // as a 3rd number since the brief's line only asks for static vs mock.
+  const registryGroups = await prisma.addressRegistry.groupBy({
+    by: ['source'],
+    _count: { _all: true },
+  });
+  const registryStaticCount = registryGroups
+    .filter((g) => g.source === 'static-2026-07')
+    .reduce((sum, g) => sum + g._count._all, 0);
+  const registryTotalCount = registryGroups.reduce((sum, g) => sum + g._count._all, 0);
+  const registryMockCount = registryTotalCount - registryStaticCount;
+
   return (
     <div>
       <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
@@ -52,6 +68,11 @@ export default async function SettingsPage() {
           initialSettings={settings}
           providerStatuses={providerStatuses}
           envPresence={envPresence}
+          registryStats={{
+            total: registryTotalCount,
+            static: registryStaticCount,
+            mock: registryMockCount,
+          }}
         />
       </div>
     </div>

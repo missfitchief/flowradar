@@ -66,6 +66,7 @@ afterAll(async () => {
   });
   await prisma.wallet.deleteMany({ where: { address: { startsWith: ADDR_PREFIX } } });
   await prisma.token.deleteMany({ where: { address: { startsWith: ADDR_PREFIX } } });
+  await prisma.addressRegistry.deleteMany({ where: { address: { startsWith: ADDR_PREFIX } } });
   await prisma.$disconnect();
 });
 
@@ -418,5 +419,150 @@ describe.skipIf(!(await probePort('localhost', 5439)))('snapshotMarket', () => {
     expect(Number(snapshot!.marketCapUsd)).toBeCloseTo(500_000, 4);
     expect(Number(snapshot!.fdvUsd)).toBe(0);
     expect(snapshot!.holderCount).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CEX-aware MoneyFlowEdge actionType tagging (Task 26 binding decision 3(c)):
+// a plain transfer edge gets re-tagged to cex_deposit/cex_withdrawal when one
+// side resolves against AddressRegistry as a CEX address; an edge with
+// neither side registered stays plain 'transfer'.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!(await probePort('localhost', 5439)))('ingestNormalizedTxs — CEX-aware actionType tagging', () => {
+  const CEX_ADDRESS = `${ADDR_PREFIX}cex_hot_wallet`;
+  const WALLET_DEPOSITOR = `${ADDR_PREFIX}wallet_cex_depositor`;
+  const WALLET_WITHDRAW_RECIPIENT = `${ADDR_PREFIX}wallet_cex_withdraw_recipient`;
+  const WALLET_UNREGISTERED_A = `${ADDR_PREFIX}wallet_plain_a`;
+  const WALLET_UNREGISTERED_B = `${ADDR_PREFIX}wallet_plain_b`;
+  const CEX_TOKEN_ADDR = `${ADDR_PREFIX}token_mint_cex_tag`;
+
+  beforeAll(async () => {
+    if (!(await probePort('localhost', 5439))) return;
+    await prisma.addressRegistry.upsert({
+      where: { chain_address: { chain: CHAIN, address: CEX_ADDRESS } },
+      create: {
+        chain: CHAIN,
+        address: CEX_ADDRESS,
+        category: 'CEX',
+        label: 'T5TEST mock CEX hot wallet',
+        source: 'test-fixture',
+        doNotExpand: true
+      },
+      update: {}
+    });
+  });
+
+  it('transfer TO a registry-CEX address ingests as cex_deposit', async () => {
+    const tx: NormalizedTx = {
+      txHash: `${ADDR_PREFIX}tx_cex_deposit`,
+      blockOrSlot: 2000n,
+      ts: new Date('2026-07-02T00:00:00Z'),
+      legs: [
+        {
+          kind: 'token_transfer',
+          from: WALLET_DEPOSITOR,
+          to: CEX_ADDRESS,
+          asset: { address: CEX_TOKEN_ADDR, symbol: 'T5CEX', decimals: 9 },
+          amountToken: '100',
+          amountUsd: 50
+        }
+      ]
+    };
+
+    await ingestNormalizedTxs(prisma, CHAIN, WALLET_DEPOSITOR, [tx]);
+
+    const edge = await prisma.moneyFlowEdge.findFirst({
+      where: { txHash: `${ADDR_PREFIX}tx_cex_deposit`, sourceAddress: WALLET_DEPOSITOR, destinationAddress: CEX_ADDRESS }
+    });
+    expect(edge).not.toBeNull();
+    expect(edge!.actionType).toBe('cex_deposit');
+  });
+
+  it('transfer FROM a registry-CEX address ingests as cex_withdrawal', async () => {
+    const tx: NormalizedTx = {
+      txHash: `${ADDR_PREFIX}tx_cex_withdrawal`,
+      blockOrSlot: 2001n,
+      ts: new Date('2026-07-02T00:05:00Z'),
+      legs: [
+        {
+          kind: 'token_transfer',
+          from: CEX_ADDRESS,
+          to: WALLET_WITHDRAW_RECIPIENT,
+          asset: { address: CEX_TOKEN_ADDR, symbol: 'T5CEX', decimals: 9 },
+          amountToken: '80',
+          amountUsd: 40
+        }
+      ]
+    };
+
+    await ingestNormalizedTxs(prisma, CHAIN, WALLET_WITHDRAW_RECIPIENT, [tx]);
+
+    const edge = await prisma.moneyFlowEdge.findFirst({
+      where: {
+        txHash: `${ADDR_PREFIX}tx_cex_withdrawal`,
+        sourceAddress: CEX_ADDRESS,
+        destinationAddress: WALLET_WITHDRAW_RECIPIENT
+      }
+    });
+    expect(edge).not.toBeNull();
+    expect(edge!.actionType).toBe('cex_withdrawal');
+  });
+
+  it('transfer between two unregistered addresses stays plain transfer', async () => {
+    const tx: NormalizedTx = {
+      txHash: `${ADDR_PREFIX}tx_plain_transfer`,
+      blockOrSlot: 2002n,
+      ts: new Date('2026-07-02T00:10:00Z'),
+      legs: [
+        {
+          kind: 'token_transfer',
+          from: WALLET_UNREGISTERED_A,
+          to: WALLET_UNREGISTERED_B,
+          asset: { address: CEX_TOKEN_ADDR, symbol: 'T5CEX', decimals: 9 },
+          amountToken: '10',
+          amountUsd: 5
+        }
+      ]
+    };
+
+    await ingestNormalizedTxs(prisma, CHAIN, WALLET_UNREGISTERED_A, [tx]);
+
+    const edge = await prisma.moneyFlowEdge.findFirst({
+      where: {
+        txHash: `${ADDR_PREFIX}tx_plain_transfer`,
+        sourceAddress: WALLET_UNREGISTERED_A,
+        destinationAddress: WALLET_UNREGISTERED_B
+      }
+    });
+    expect(edge).not.toBeNull();
+    expect(edge!.actionType).toBe('transfer');
+  });
+
+  it('bridge legs keep their bridge_deposit/bridge_withdrawal actionType even if a side is a registry CEX', async () => {
+    const tx: NormalizedTx = {
+      txHash: `${ADDR_PREFIX}tx_cex_bridge_deposit`,
+      blockOrSlot: 2003n,
+      ts: new Date('2026-07-02T00:15:00Z'),
+      legs: [
+        {
+          kind: 'bridge_deposit',
+          from: WALLET_DEPOSITOR,
+          to: CEX_ADDRESS,
+          asset: { symbol: 'USDC', decimals: 6 },
+          amountToken: '500',
+          amountUsd: 500,
+          programOrContract: 'Wormhole'
+        }
+      ]
+    };
+
+    await ingestNormalizedTxs(prisma, CHAIN, WALLET_DEPOSITOR, [tx]);
+
+    const edge = await prisma.moneyFlowEdge.findFirst({
+      where: { txHash: `${ADDR_PREFIX}tx_cex_bridge_deposit`, sourceAddress: WALLET_DEPOSITOR, destinationAddress: CEX_ADDRESS }
+    });
+    expect(edge).not.toBeNull();
+    expect(edge!.actionType).toBe('bridge_deposit');
   });
 });

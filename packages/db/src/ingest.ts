@@ -409,6 +409,21 @@ interface EdgeWriteInput {
  * its own chain, so a single MoneyFlowEdge row's source/destination chain are
  * identical (cross-chain bridge linkage is a pair of same-chain edges joined
  * by matching amount/time/protocol, not one cross-chain edge row).
+ *
+ * CEX-aware actionType tagging (Task 26): a plain `transfer` edge (i.e. one
+ * that did NOT already arrive with an explicit bridge_deposit/
+ * bridge_withdrawal leg kind — those keep their own actionType untouched,
+ * since a provider-typed bridge leg is already more specific than a registry
+ * lookup could make it) gets re-tagged when the AddressRegistry knows one
+ * side as a CEX: destination is a known CEX -> 'cex_deposit' (the wallet is
+ * depositing INTO the exchange); source is a known CEX -> 'cex_withdrawal'
+ * (funds are coming OUT of the exchange to the wallet). If both sides somehow
+ * resolve to CEX (registry data error) or neither does, the actionType is
+ * left as plain 'transfer'. Destination is checked first: a self-transfer-
+ * shaped edge into a CEX deposit address is the more common/actionable case
+ * to tag correctly, and the two conditions are mutually exclusive in
+ * practice (an edge does not have both a CEX source and CEX dest given how
+ * registry addresses are curated).
  */
 async function upsertMoneyFlowEdge(prisma: PrismaClient, input: EdgeWriteInput): Promise<void> {
   const { chain, tx, leg, actionType } = input;
@@ -417,6 +432,9 @@ async function upsertMoneyFlowEdge(prisma: PrismaClient, input: EdgeWriteInput):
     (actionType === 'bridge_deposit' || actionType === 'bridge_withdrawal') && leg.programOrContract
       ? leg.programOrContract
       : null;
+
+  const resolvedActionType =
+    actionType === 'transfer' ? await resolveCexAwareActionType(prisma, chain, leg) : actionType;
 
   try {
     await prisma.moneyFlowEdge.create({
@@ -430,7 +448,7 @@ async function upsertMoneyFlowEdge(prisma: PrismaClient, input: EdgeWriteInput):
         amountUsd: leg.amountUsd ?? 0,
         ts: tx.ts,
         txHash: tx.txHash,
-        actionType,
+        actionType: resolvedActionType,
         bridgeProtocol,
         confidence: 100,
         providerSource: PROVIDER_SOURCE,
@@ -444,6 +462,37 @@ async function upsertMoneyFlowEdge(prisma: PrismaClient, input: EdgeWriteInput):
     }
     throw error;
   }
+}
+
+/**
+ * Looks up leg.to/leg.from against AddressRegistry for `chain` and re-tags a
+ * plain 'transfer' as 'cex_deposit'/'cex_withdrawal' when one side is a
+ * registered CEX address — see upsertMoneyFlowEdge's doc comment above for
+ * the direction rule. A fresh two-row lookup per transfer leg (rather than a
+ * preloaded map like graph/edgeFetcher.ts's createRegistryLookup) keeps this
+ * correct under concurrent ingest without needing a shared cache-invalidation
+ * story; AddressRegistry is small (curated + mock-world rows only) so the
+ * extra round trip is cheap relative to the rest of this per-leg pipeline.
+ */
+async function resolveCexAwareActionType(
+  prisma: PrismaClient,
+  chain: Chain,
+  leg: TxLeg
+): Promise<MoneyFlowActionType> {
+  const [destEntry, sourceEntry] = await Promise.all([
+    prisma.addressRegistry.findUnique({
+      where: { chain_address: { chain, address: leg.to } },
+      select: { category: true }
+    }),
+    prisma.addressRegistry.findUnique({
+      where: { chain_address: { chain, address: leg.from } },
+      select: { category: true }
+    })
+  ]);
+
+  if (destEntry?.category === 'CEX') return 'cex_deposit';
+  if (sourceEntry?.category === 'CEX') return 'cex_withdrawal';
+  return 'transfer';
 }
 
 /**

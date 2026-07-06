@@ -13,3 +13,4 @@ export * from './mock/world';
 export * from './mock/provider';
 export * from './mock/scenarios';
 export * from './telegram';
+export * from './registryData';

@@ -68,10 +68,17 @@ export interface EnvPresence {
   TELEGRAM_CHAT_ID: boolean;
 }
 
+export interface RegistryStats {
+  total: number;
+  static: number;
+  mock: number;
+}
+
 export interface SettingsFormProps {
   initialSettings: Settings;
   providerStatuses: ProviderStatusRow[];
   envPresence: EnvPresence;
+  registryStats: RegistryStats;
 }
 
 // ---------------------------------------------------------------------------
@@ -279,7 +286,7 @@ const MODE_BADGE_CLASS: Record<ProviderStatusRow['mode'], string> = {
 type SaveState = { status: 'idle' } | { status: 'saving' } | { status: 'saved' } | { status: 'error'; issues: string[] };
 type TestAlertState = { status: 'idle' } | { status: 'sending' } | { status: 'done'; deliveryStatus: string };
 
-export function SettingsForm({ initialSettings, providerStatuses, envPresence }: SettingsFormProps) {
+export function SettingsForm({ initialSettings, providerStatuses, envPresence, registryStats }: SettingsFormProps) {
   const router = useRouter();
   const [settings, setSettings] = useState<Settings>(initialSettings);
   const [saveState, setSaveState] = useState<SaveState>({ status: 'idle' });
@@ -498,6 +505,9 @@ export function SettingsForm({ initialSettings, providerStatuses, envPresence }:
 
       {/* Provider status */}
       <Section title="Provider status" description="Reports MOCK_MODE and env-key presence — never echoes secret values.">
+        <p className="text-sm text-muted-foreground">
+          Address registry: {registryStats.total} entries ({registryStats.static} static, {registryStats.mock} mock)
+        </p>
         <div className="overflow-hidden rounded-lg border border-border">
           <Table>
             <TableHeader>
