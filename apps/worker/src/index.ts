@@ -20,13 +20,13 @@
 //      straight through @flowradar/providers's getProvider (Wave 4 — reports
 //      missing_key/stub rather than crashing).
 //   5. createRunner() (InlineRunner in LITE/no-REDIS_URL, BullMqRunner in
-//      FULL), register the 5 scheduled jobs (walletActivity, marketDataHot,
-//      marketDataNormal, flowScoring, signalDetection — the last added Task
-//      15) on schedule() with settings.intervals.*Sec converted to ms, plus
-//      walletImport registered on-demand via process() (see below) —
-//      WORKER_FAST=1 overrides every scheduled interval to 3s so a manual
-//      verification run doesn't need to wait minutes for a full cycle of the
-//      slowest job (marketDataNormalSec, default 300s).
+//      FULL), register the 6 scheduled jobs (walletActivity, marketDataHot,
+//      marketDataNormal, flowScoring, signalDetection, alertDispatch — the
+//      last two added Tasks 15/16) on schedule() with settings.intervals.*Sec
+//      converted to ms, plus walletImport registered on-demand via process()
+//      (see below) — WORKER_FAST=1 overrides every scheduled interval to 3s
+//      so a manual verification run doesn't need to wait minutes for a full
+//      cycle of the slowest job (marketDataNormalSec, default 300s).
 //   6. runner.start(). SIGINT/SIGTERM => runner.stop() => prisma.$disconnect()
 //      => process.exit(0).
 
@@ -47,6 +47,7 @@ import * as marketDataHot from './jobs/marketDataHot';
 import * as marketDataNormal from './jobs/marketDataNormal';
 import * as flowScoring from './jobs/flowScoring';
 import * as signalDetection from './jobs/signalDetection';
+import * as alertDispatch from './jobs/alertDispatch';
 import * as walletImport from './jobs/walletImport';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -155,7 +156,8 @@ async function main(): Promise<void> {
     { name: 'marketDataHot', run: marketDataHot.run, intervalSec: settings.intervals.marketDataHotSec },
     { name: 'marketDataNormal', run: marketDataNormal.run, intervalSec: settings.intervals.marketDataNormalSec },
     { name: 'flowScoring', run: flowScoring.run, intervalSec: settings.intervals.flowScoringSec },
-    { name: 'signalDetection', run: signalDetection.run, intervalSec: settings.intervals.signalDetectionSec }
+    { name: 'signalDetection', run: signalDetection.run, intervalSec: settings.intervals.signalDetectionSec },
+    { name: 'alertDispatch', run: alertDispatch.run, intervalSec: settings.intervals.alertDispatchSec }
   ];
 
   for (const job of jobs) {

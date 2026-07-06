@@ -19,3 +19,5 @@ export * from './rules/ruleF';
 export * from './rules/ruleG';
 export * from './rules/index';
 export * from './window/aggregate';
+export * from './alerts/templates';
+export * from './alerts/cooldown';

@@ -4,9 +4,9 @@ import type { NextConfig } from 'next';
 // published as raw TypeScript (main/types point at src/*.ts, no build step) —
 // transpilePackages tells Next's bundler to run them through its own
 // TS/ESM pipeline instead of expecting pre-built JS. @flowradar/providers
-// isn't a direct dependency of apps/web yet, but is included per the task-7
-// binding decision so a later page that imports it (Tasks 8-10) doesn't need
-// a config change.
+// became a direct apps/web dependency in Task 16 (POST /api/alerts/test
+// needs createTelegramSender) — the task-7 binding decision had already
+// pre-added it here in transpilePackages ahead of that need.
 //
 // serverExternalPackages: '@prisma/client' ships native query-engine binaries
 // that must NOT be bundled by webpack/Turbopack — Next needs to require() it

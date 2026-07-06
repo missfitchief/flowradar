@@ -28,6 +28,7 @@ import { prisma } from './client';
 import { ingestNormalizedTxs, snapshotMarket } from './ingest';
 import { runFlowScoringPass } from './scoring-pass';
 import { runSignalDetectionPass } from './signals';
+import { dispatchPendingAlerts } from './alerts';
 import { importWalletsCsv } from './csv/importWalletsCsv';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -553,6 +554,46 @@ async function runSelfCheck(
     pass: !anyFFired
   });
 
+  // ---------------------------------------------------------------------
+  // Alert self-checks (Task 16 binding decision 7): "Alert rows exist for
+  // every seeded signal, all 'skipped_no_token', payload text non-empty
+  // containing '$NOVA' for the NOVA A alert; print alert count." — this
+  // runs AFTER dispatchPendingAlerts(prisma, settings, null, ...) (Phase
+  // 7.75, main()), which by construction gives every Signal row exactly one
+  // Alert row (see packages/db/src/alerts.ts's file header: "Every Signal
+  // this pass ever looks at ends up with EXACTLY ONE Alert row").
+  // ---------------------------------------------------------------------
+  const totalSignalCount = await prisma.signal.count();
+  const totalAlertCount = await prisma.alert.count();
+  rows.push({
+    check: 'Alert row count == Signal row count (every seeded signal got exactly one alert)',
+    expected: `== ${totalSignalCount}`,
+    actual: String(totalAlertCount),
+    pass: totalAlertCount === totalSignalCount
+  });
+
+  const nonSkippedAlerts = await prisma.alert.count({ where: { deliveryStatus: { not: 'skipped_no_token' } } });
+  rows.push({
+    check: "every Alert row is deliveryStatus 'skipped_no_token' (seed dispatches with a null sender)",
+    expected: '0 alerts with any other deliveryStatus',
+    actual: `${nonSkippedAlerts} alert(s) with a different deliveryStatus`,
+    pass: nonSkippedAlerts === 0
+  });
+
+  const novaAlertA = await prisma.alert.findFirst({
+    where: { token: { address: novaAddress }, rule: 'A' },
+    orderBy: { sentAt: 'desc' }
+  });
+  const novaAlertPayload = novaAlertA?.payload as { text?: string } | undefined;
+  const novaAlertText = novaAlertPayload?.text ?? '';
+  const novaAlertOk = novaAlertText.length > 0 && novaAlertText.includes('$NOVA');
+  rows.push({
+    check: "NOVA rule-A Alert payload.text is non-empty and contains '$NOVA'",
+    expected: 'non-empty, contains "$NOVA"',
+    actual: novaAlertA ? `${novaAlertText.length} chars, contains $NOVA: ${novaAlertText.includes('$NOVA')}` : 'no Alert row found',
+    pass: novaAlertOk
+  });
+
   // Hard-fail checks (brief: "exit code 1 if any fails") exclude only the
   // NOVA 60-70 flowScore band (the brief's own explicit "still pass but
   // flag" carve-out, handled separately above via `concerns.push` while
@@ -620,14 +661,16 @@ function printSignalSummaryTable(signalsByToken: SignalsByToken): void {
 }
 
 async function printSummaryTable(): Promise<void> {
-  const [wallets, tokens, trades, snapshots, flowSnapshots, addressRegistry, csvImportJob] = await Promise.all([
+  const [wallets, tokens, trades, snapshots, flowSnapshots, addressRegistry, csvImportJob, signals, alerts] = await Promise.all([
     prisma.wallet.count(),
     prisma.token.count(),
     prisma.walletTokenTrade.count(),
     prisma.tokenMarketSnapshot.count(),
     prisma.tokenFlowSnapshot.count(),
     prisma.addressRegistry.count(),
-    prisma.importJob.findFirst({ where: { filename: 'wallets.csv' }, orderBy: { createdAt: 'desc' } })
+    prisma.importJob.findFirst({ where: { filename: 'wallets.csv' }, orderBy: { createdAt: 'desc' } }),
+    prisma.signal.count(),
+    prisma.alert.count()
   ]);
 
   const top5 = await prisma.tokenFlowSnapshot.findMany({
@@ -644,6 +687,8 @@ async function printSummaryTable(): Promise<void> {
   console.log(`  flow snapshots:       ${flowSnapshots}`);
   console.log(`  address registry:     ${addressRegistry}`);
   console.log(`  CSV import (okRows):  ${csvImportJob?.okRows ?? 'n/a'}`);
+  console.log(`  signals:              ${signals}`);
+  console.log(`  alerts:               ${alerts}`);
   console.log('');
   console.log('  Top 5 tokens by flowScore:');
   top5.forEach((s, i) => {
@@ -733,6 +778,22 @@ async function main(): Promise<void> {
     error: (msg, meta) => log(`ERROR: ${msg}`, meta)
   });
   log('signal detection pass complete.', { ...signalResult });
+
+  // Phase 7.75: alert dispatch pass (Task 16 binding decision 7) — shared
+  // body with apps/worker/src/jobs/alertDispatch.ts. `sender: null` here
+  // (this seed script never reads TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID) is
+  // deliberate, not an oversight: a fresh `npm run db:seed` run has no
+  // reason to actually deliver Telegram messages to whatever chat the
+  // developer's env happens to point at — the point of this phase is to
+  // populate every seeded Signal with a real, fully-rendered Alert row
+  // (deliveryStatus 'skipped_no_token') so the Alerts page has data to show
+  // and the payload text itself is exercised end-to-end, matching Task 16
+  // binding decision 5's "MOCK/no-token mode ... the text IS the artifact".
+  const alertResult = await dispatchPendingAlerts(prisma, settings, null, {
+    info: (msg, meta) => log(msg, meta),
+    error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+  });
+  log('alert dispatch pass complete.', { ...alertResult });
 
   // Phase 8: self-check.
   const { rows: selfCheckRows, hardFail, concerns } = await runSelfCheck(world, signalsByToken);

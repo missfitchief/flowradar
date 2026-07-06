@@ -190,8 +190,28 @@ async function initialiseCluster(): Promise<void> {
     password: LITE_PASSWORD,
     authMethod: 'password',
     persistent: true,
+    // Task 16 fix: without an explicit --encoding/--locale, `initdb` on this
+    // Windows box defaults to the OS codepage — observed as
+    // datcollate/datctype "English_United States.1252" / encoding "WIN1252"
+    // on every database in the cluster (postgres/template0/template1/
+    // flowradar alike). That silently breaks storing ANY non-Latin-1 byte
+    // sequence in a Json/text column — e.g. Task 16's Telegram alert
+    // templates, which start every SIGNAL/ROTATION/WALLET_GRAPH template
+    // with an emoji header (🚨/🧠/🕸) per the product spec. Postgres raised
+    // "character with byte sequence 0xf0 0x9f 0x9a 0xa8 in encoding UTF8 has
+    // no equivalent in encoding WIN1252" the first time an Alert.payload
+    // insert carried one. `--locale=C --encoding=UTF8` makes initdb create a
+    // genuinely encoding-agnostic (C locale) UTF8 cluster instead — the
+    // correct, durable fix, since WIN1252 template0/template1 can never be
+    // upgraded to UTF8 in place (CREATE DATABASE ... ENCODING 'UTF8' against
+    // a .1252-collated template1 fails outright). Applies only on a FRESH
+    // initdb (this function only runs when DATA_DIR doesn't already have a
+    // PG_VERSION file — see isInitialised()), so nothing here touches an
+    // already-initialised cluster; anyone hitting this bug on an existing
+    // ./.pgdata must delete it once so this corrected initdb runs.
+    initdbFlags: ['--locale=C', '--encoding=UTF8'],
   });
-  console.log(`[db-local] initialising Postgres 16 cluster in ${DATA_DIR} ...`);
+  console.log(`[db-local] initialising Postgres 16 cluster in ${DATA_DIR} (locale=C, encoding=UTF8) ...`);
   await pg.initialise();
   console.log('[db-local] cluster initialised.');
 }
