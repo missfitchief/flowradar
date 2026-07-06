@@ -208,3 +208,149 @@ export function comboPerformance(evaluated: EvaluatedReplaySignal[], settings: S
 
   return combos;
 }
+
+// ---------------------------------------------------------------------------
+// bucketPerformance (Task 41 review — IMPORTANT: capture-mandated bucket
+// breakdowns, previously absent)
+// ---------------------------------------------------------------------------
+//
+// Four independent bucketing dimensions, each real/synthetic split via the
+// SAME splitSummarize pattern comboPerformance/rulePerformance already use —
+// a signal is bucketed once per dimension (a signal can appear in exactly one
+// bucket of EACH of the four dimensions simultaneously; the dimensions are
+// orthogonal views over the same `evaluated` batch, not a single combined
+// bucket key).
+//
+// Field sourcing (from RuleResult.metrics, i.e. ReplayedSignal.metrics — see
+// rules/ruleA.ts, the only rule that currently populates mcapUsd/
+// liquidityUsd/uniqueEntityCount; other rules' signals fall into the
+// 'unknown' bucket for mcap/liquidity for exactly that reason, which is
+// correct/expected today, not a bug):
+//   mcapAtTrigger      <- metrics.mcapUsd (number)
+//   liquidity          <- metrics.liquidityUsd (number)
+//   uniqueEntityCount  <- metrics.uniqueEntityCount (number)
+//   clusterConcentration <- metrics.entityConcentrationRisk (string, one of
+//     'low'|'medium'|'high'|'unknown' per alerts/templates.ts's
+//     ClusterConcentration type) — degrades to 'unknown' whenever the metric
+//     is absent OR carries any other value, mirroring the same
+//     "clustering hasn't landed yet -> unknown" degradation already used at
+//     the DB layer (packages/db/src/signals.ts).
+//
+// Bucket boundaries (capture-mandated, inclusive lower / exclusive upper
+// unless noted):
+//   mcapAtTrigger:  <100k | [100k,1M) | [1M,5M) | >=5M | unknown (missing/non-number)
+//   liquidity:      <20k | [20k,100k) | >=100k | unknown (missing/non-number)
+//   uniqueEntityCount: 1-4 | 5-14 | 15+ (inclusive on both ends; a signal
+//     with uniqueEntityCount < 1 or not a number is EXCLUDED from this
+//     dimension's buckets entirely — there is no 'unknown' bucket in the
+//     capture's own spec for this dimension, and fabricating one beyond the
+//     literal capture would be an undocumented invention; mirrors
+//     comboPerformance's own asNumber-based "cannot evaluate -> excluded"
+//     precedent for uniqueEntityCount filters elsewhere in this file).
+//   clusterConcentration: low | medium | high | unknown
+
+export type McapBucket = '<100k' | '100k-1M' | '1M-5M' | '>5M' | 'unknown';
+export type LiquidityBucket = '<20k' | '20k-100k' | '>100k' | 'unknown';
+export type EntityCountBucket = '1-4' | '5-14' | '15+';
+export type ClusterConcentrationBucket = 'low' | 'medium' | 'high' | 'unknown';
+
+export interface BucketBreakdowns {
+  mcapAtTrigger: Record<McapBucket, RealSyntheticSplit>;
+  liquidity: Record<LiquidityBucket, RealSyntheticSplit>;
+  uniqueEntityCount: Record<EntityCountBucket, RealSyntheticSplit>;
+  clusterConcentration: Record<ClusterConcentrationBucket, RealSyntheticSplit>;
+}
+
+function mcapBucketOf(metrics: EvaluatedReplaySignal['signal']['metrics']): McapBucket {
+  const v = asNumber(metrics.mcapUsd);
+  if (v === null) return 'unknown';
+  if (v < 100_000) return '<100k';
+  if (v < 1_000_000) return '100k-1M';
+  if (v < 5_000_000) return '1M-5M';
+  return '>5M';
+}
+
+function liquidityBucketOf(metrics: EvaluatedReplaySignal['signal']['metrics']): LiquidityBucket {
+  const v = asNumber(metrics.liquidityUsd);
+  if (v === null) return 'unknown';
+  if (v < 20_000) return '<20k';
+  if (v < 100_000) return '20k-100k';
+  return '>100k';
+}
+
+/** Null when the signal cannot be evaluated for this dimension (missing/non-number/< 1) — excluded from the returned buckets, per this file's header note (no 'unknown' bucket defined for this dimension in the capture spec). */
+function entityCountBucketOf(metrics: EvaluatedReplaySignal['signal']['metrics']): EntityCountBucket | null {
+  const v = asNumber(metrics.uniqueEntityCount);
+  if (v === null || v < 1) return null;
+  if (v <= 4) return '1-4';
+  if (v <= 14) return '5-14';
+  return '15+';
+}
+
+const CLUSTER_CONCENTRATION_VALUES = new Set(['low', 'medium', 'high', 'unknown']);
+
+function clusterConcentrationBucketOf(metrics: EvaluatedReplaySignal['signal']['metrics']): ClusterConcentrationBucket {
+  const v = metrics.entityConcentrationRisk;
+  if (typeof v === 'string' && CLUSTER_CONCENTRATION_VALUES.has(v)) {
+    return v as ClusterConcentrationBucket;
+  }
+  return 'unknown';
+}
+
+/**
+ * Groups evaluated replay signals into 4 independent bucketing dimensions
+ * (mcapAtTrigger, liquidity, uniqueEntityCount, clusterConcentration), each
+ * real/synthetic split via splitSummarize. Every bucket key for every
+ * dimension is always present (a bucket with zero qualifying signals still
+ * gets a zero-count summary via summarizeOutcomes([]), never omitted) except
+ * where a signal cannot be evaluated for the uniqueEntityCount dimension at
+ * all (see entityCountBucketOf) — such signals simply don't contribute to
+ * ANY of that one dimension's 3 buckets, while still contributing normally to
+ * the other 3 dimensions.
+ */
+export function bucketPerformance(evaluated: EvaluatedReplaySignal[]): BucketBreakdowns {
+  const byMcap = new Map<McapBucket, EvaluatedReplaySignal[]>();
+  const byLiquidity = new Map<LiquidityBucket, EvaluatedReplaySignal[]>();
+  const byEntityCount = new Map<EntityCountBucket, EvaluatedReplaySignal[]>();
+  const byClusterConcentration = new Map<ClusterConcentrationBucket, EvaluatedReplaySignal[]>();
+
+  for (const e of evaluated) {
+    const metrics = e.signal.metrics;
+
+    const mcapKey = mcapBucketOf(metrics);
+    byMcap.set(mcapKey, [...(byMcap.get(mcapKey) ?? []), e]);
+
+    const liqKey = liquidityBucketOf(metrics);
+    byLiquidity.set(liqKey, [...(byLiquidity.get(liqKey) ?? []), e]);
+
+    const entityKey = entityCountBucketOf(metrics);
+    if (entityKey !== null) {
+      byEntityCount.set(entityKey, [...(byEntityCount.get(entityKey) ?? []), e]);
+    }
+
+    const clusterKey = clusterConcentrationBucketOf(metrics);
+    byClusterConcentration.set(clusterKey, [...(byClusterConcentration.get(clusterKey) ?? []), e]);
+  }
+
+  const mcapAtTrigger = {} as Record<McapBucket, RealSyntheticSplit>;
+  for (const key of ['<100k', '100k-1M', '1M-5M', '>5M', 'unknown'] as const) {
+    mcapAtTrigger[key] = splitSummarize(byMcap.get(key) ?? []);
+  }
+
+  const liquidity = {} as Record<LiquidityBucket, RealSyntheticSplit>;
+  for (const key of ['<20k', '20k-100k', '>100k', 'unknown'] as const) {
+    liquidity[key] = splitSummarize(byLiquidity.get(key) ?? []);
+  }
+
+  const uniqueEntityCount = {} as Record<EntityCountBucket, RealSyntheticSplit>;
+  for (const key of ['1-4', '5-14', '15+'] as const) {
+    uniqueEntityCount[key] = splitSummarize(byEntityCount.get(key) ?? []);
+  }
+
+  const clusterConcentration = {} as Record<ClusterConcentrationBucket, RealSyntheticSplit>;
+  for (const key of ['low', 'medium', 'high', 'unknown'] as const) {
+    clusterConcentration[key] = splitSummarize(byClusterConcentration.get(key) ?? []);
+  }
+
+  return { mcapAtTrigger, liquidity, uniqueEntityCount, clusterConcentration };
+}

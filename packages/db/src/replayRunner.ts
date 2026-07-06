@@ -68,6 +68,7 @@ import {
   evaluateReplay,
   rulePerformance,
   comboPerformance,
+  bucketPerformance,
   tuneThresholds,
   walkForward
 } from '@flowradar/core';
@@ -75,6 +76,7 @@ import type {
   ReplayedSignal,
   RulePerformance,
   ComboPerfResult,
+  BucketBreakdowns,
   TuneThresholdsResult,
   WalkForwardResult,
   ThresholdSweepGrid,
@@ -114,6 +116,7 @@ export interface BacktestRunSummary {
   replayedSignalCount: number;
   rulePerformance: RulePerformance;
   comboPerformance: ComboPerfResult[];
+  bucketPerformance: BucketBreakdowns;
   thresholdTuning: TuneThresholdsResult;
   walkForward: WalkForwardResult;
   syntheticEvidencePresent: boolean;
@@ -251,6 +254,7 @@ export async function runHistoricalReplay(
     const evaluated = evaluateReplay(replayed, marketSeriesByToken, ALL_HORIZONS);
     const rulePerf = rulePerformance(evaluated);
     const comboPerf = comboPerformance(evaluated, settings);
+    const bucketPerf = bucketPerformance(evaluated);
 
     // Threshold tuning + walk-forward are single-token-shaped (see this
     // file's header) — scoped to the single MOST-ACTIVE token in the period
@@ -316,6 +320,7 @@ export async function runHistoricalReplay(
       replayedSignalCount: replayed.length,
       rulePerformance: rulePerf,
       comboPerformance: comboPerf,
+      bucketPerformance: bucketPerf,
       thresholdTuning: tuning,
       walkForward: wf,
       syntheticEvidencePresent,

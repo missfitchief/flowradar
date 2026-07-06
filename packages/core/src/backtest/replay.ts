@@ -32,6 +32,24 @@
 // structural, run-level limitation restated in the CLI/report output instead
 // (see packages/db/src/replayRunner.ts).
 //
+// FundingEvent gets a SECOND, more subtle filtering pass beyond plain
+// `ts <= T` (Critical fix, Task 41 review): FundingEvent.ts is only the
+// funding TRANSFER's own timestamp — the event also optionally carries
+// `fundedFirstBuy` (see types.ts), a LATER timestamp for the buy that
+// transfer supposedly financed, which rules/ruleE.ts reads directly
+// (firstBuy.ts/mcapAtBuy/usd) without any T-gating of its own. Filtering the
+// funding EVENT list on event.ts <= T alone would still hand Rule E a
+// fundedFirstBuy dated after T — a real lookahead leak the plain trades/
+// market/rotation ts<=T filters don't catch, since fundedFirstBuy isn't its
+// own top-level time-series row. The fix: once event.ts <= T qualifies an
+// event for inclusion, additionally scrub `fundedFirstBuy` to `undefined`
+// whenever `fundedFirstBuy.ts > T` — the funding transfer is legitimately
+// known as of T even when the buy it financed is not, so the event survives
+// with its future tail removed rather than being dropped outright. This is
+// the exact same principle rotationCandidates' own `destBuyTs`-gating below
+// already applies (gate on the LAST timestamp in a multi-step chain, not the
+// first) — see the inline comment beside `rotationAsOfT` in replaySignals().
+//
 // ---------------------------------------------------------------------------
 // Live-parity dedupe
 // ---------------------------------------------------------------------------
@@ -142,7 +160,29 @@ export function replaySignals(input: ReplaySignalsInput): ReplayedSignal[] {
     // --- no-lookahead filtering: ts <= T for every time-series input ---
     const tradesAsOfT = trades.filter((t) => t.ts.getTime() <= tMs);
     const marketAsOfT = marketPoints.filter((m) => m.ts.getTime() <= tMs);
-    const fundingAsOfT = fundingEvents.filter((f) => f.ts.getTime() <= tMs);
+    // FundingEvent has TWO timestamps that can each independently leak: the
+    // funding transfer itself (event.ts) and the LAST-in-chain fundedFirstBuy.ts.
+    // Filtering ONLY on event.ts <= T (as this used to do) passed through the
+    // whole event — including a fundedFirstBuy dated AFTER T — to Rule E, which
+    // reads firstBuy.ts/mcapAtBuy/usd directly (see rules/ruleE.ts). That is a
+    // lookahead leak: the funding transfer may have happened by T, but the buy
+    // it supposedly financed hasn't happened YET as of T, so Rule E must not be
+    // able to see it. Mirrors rotationCandidates' own gating one line below,
+    // which gates on destBuyTs (the LAST-in-chain timestamp of that chain) —
+    // here we scrub the not-yet-happened tail of the chain instead of dropping
+    // the whole event, since the funding transfer itself IS legitimately known
+    // as of T even when the buy isn't.
+    const fundingAsOfT = fundingEvents
+      .filter((f) => f.ts.getTime() <= tMs)
+      .map((f) =>
+        f.fundedFirstBuy && f.fundedFirstBuy.ts.getTime() > tMs ? { ...f, fundedFirstBuy: undefined } : f
+      );
+    // rotationCandidates gates on destBuyTs — the LAST timestamp in the
+    // exit->transfer->buy chain (see types.ts's RotationCandidate) — not on
+    // transferTs/receiptTs, so a candidate is only visible once its ENTIRE
+    // chain, including the destination buy, has happened as of T. This is the
+    // same principle the fundingAsOfT fix above applies to FundingEvent: gate
+    // (or scrub) on the latest event in the chain, never on an earlier one.
     const rotationAsOfT = rotationCandidates.filter((r) => r.destBuyTs.getTime() <= tMs);
 
     const agg30 = { ...aggregateWindow({ trades: tradesAsOfT, wallets, clusters, market: marketAsOfT, windowMinutes: 30, now: T, inflowSpikeMult: settings.rules.A.inflowSpikeMult }), tokenId: tokenId ?? '' };

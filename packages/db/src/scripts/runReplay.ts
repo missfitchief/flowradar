@@ -6,6 +6,10 @@
 // period) unless FROM/TO env vars are supplied. Prints:
 //   - replayed signal count
 //   - rule-performance table (real vs synthetic-evidence split, per rule A-G)
+//   - combined-strategy (combo) performance
+//   - performance by bucket (mcap at trigger / liquidity at trigger /
+//     unique entity count / cluster concentration — Task 41 review,
+//     capture-mandated, see rulePerf.ts's bucketPerformance)
 //   - top-3 / bottom-3 threshold sets from the OAT sweep
 //   - walk-forward verdict
 //   - the MANDATORY overfitting warning
@@ -14,7 +18,7 @@
 
 import { prisma } from '../client';
 import { runHistoricalReplay } from '../replayRunner';
-import type { RulePerformance, ThresholdSet } from '@flowradar/core';
+import type { RulePerformance, ThresholdSet, BucketBreakdowns, RealSyntheticSplit } from '@flowradar/core';
 
 const HOUR_MS = 60 * 60_000;
 
@@ -57,6 +61,36 @@ function printRulePerformanceTable(perf: RulePerformance): void {
   }
 }
 
+function printBucketRow(label: string, split: RealSyntheticSplit): void {
+  console.log(
+    `  ${label.padEnd(14)} real N=${String(split.real.signalCount).padEnd(6)} hit2x=${fmtPct(split.real.hitRate2x).padEnd(8)} | synthetic N=${String(split.synthetic.signalCount).padEnd(6)} hit2x=${fmtPct(split.synthetic.hitRate2x)}`
+  );
+}
+
+function printBucketPerformance(buckets: BucketBreakdowns): void {
+  console.log('\n=== Performance by bucket (real vs synthetic-evidence, NEVER pooled) ===');
+
+  console.log('\n-- mcap at trigger --');
+  for (const key of ['<100k', '100k-1M', '1M-5M', '>5M', 'unknown'] as const) {
+    printBucketRow(key, buckets.mcapAtTrigger[key]);
+  }
+
+  console.log('\n-- liquidity at trigger --');
+  for (const key of ['<20k', '20k-100k', '>100k', 'unknown'] as const) {
+    printBucketRow(key, buckets.liquidity[key]);
+  }
+
+  console.log('\n-- unique entity count --');
+  for (const key of ['1-4', '5-14', '15+'] as const) {
+    printBucketRow(key, buckets.uniqueEntityCount[key]);
+  }
+
+  console.log('\n-- cluster concentration --');
+  for (const key of ['low', 'medium', 'high', 'unknown'] as const) {
+    printBucketRow(key, buckets.clusterConcentration[key]);
+  }
+}
+
 function printThresholdSets(label: string, sets: ThresholdSet[]): void {
   console.log(`\n=== ${label} ===`);
   for (const s of sets) {
@@ -88,6 +122,8 @@ async function main(): Promise<void> {
       `  ${combo.name}: real N=${combo.summary.real.signalCount} hit2x=${fmtPct(combo.summary.real.hitRate2x)} | synthetic N=${combo.summary.synthetic.signalCount} hit2x=${fmtPct(combo.summary.synthetic.hitRate2x)}`
     );
   }
+
+  printBucketPerformance(summary.bucketPerformance);
 
   printThresholdSets('Top-3 threshold sets', summary.thresholdTuning.best);
   printThresholdSets('Bottom-3 threshold sets', summary.thresholdTuning.worst);

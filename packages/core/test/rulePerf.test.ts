@@ -1,9 +1,10 @@
-// FlowRadar — evaluateReplay / rulePerformance / comboPerformance tests
-// (Task 41 binding decision 2). TDD RED-then-GREEN.
+// FlowRadar — evaluateReplay / rulePerformance / comboPerformance /
+// bucketPerformance tests (Task 41 binding decision 2; bucketPerformance
+// added per Task 41 review IMPORTANT item). TDD RED-then-GREEN.
 
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS } from '../src/settings';
-import { evaluateReplay, rulePerformance, comboPerformance } from '../src/backtest/rulePerf';
+import { evaluateReplay, rulePerformance, comboPerformance, bucketPerformance } from '../src/backtest/rulePerf';
 import type { ReplayedSignal } from '../src/backtest/replay';
 import type { MarketPoint } from '../src/backtest/evaluate';
 
@@ -140,5 +141,139 @@ describe('comboPerformance', () => {
     const combos = comboPerformance(evaluated, DEFAULT_SETTINGS);
     const combo = combos.find((c) => c.name === 'A+entityAdjusted')!;
     expect(combo.summary.real.signalCount).toBe(1);
+  });
+});
+
+describe('bucketPerformance', () => {
+  it('buckets mcapAtTrigger by the documented boundaries: <100k | 100k-1M | 1M-5M | >5M | unknown', () => {
+    const seriesByToken = new Map([
+      ['tokUnder100k', [point(T0, 1), point(minutesAfter(60), 1.6)]],
+      ['tok100kTo1M', [point(T0, 1), point(minutesAfter(60), 1.6)]],
+      ['tok1MTo5M', [point(T0, 1), point(minutesAfter(60), 1.6)]],
+      ['tokOver5M', [point(T0, 1), point(minutesAfter(60), 1.6)]],
+      ['tokNoMcap', [point(T0, 1), point(minutesAfter(60), 1.6)]]
+    ]);
+    const signals: ReplayedSignal[] = [
+      sig('A', 'tokUnder100k', T0, { mcapUsd: 50_000 }),
+      sig('A', 'tok100kTo1M', T0, { mcapUsd: 100_000 }), // lower boundary inclusive
+      sig('A', 'tok1MTo5M', T0, { mcapUsd: 4_999_999 }), // just under upper boundary
+      sig('A', 'tokOver5M', T0, { mcapUsd: 5_000_000 }), // exactly the >=5M boundary
+      sig('A', 'tokNoMcap', T0, {}) // no mcapUsd metric at all -> unknown
+    ];
+    const evaluated = evaluateReplay(signals, seriesByToken, ['H1']);
+    const buckets = bucketPerformance(evaluated);
+
+    expect(buckets.mcapAtTrigger['<100k'].real.signalCount).toBe(1);
+    expect(buckets.mcapAtTrigger['100k-1M'].real.signalCount).toBe(1);
+    expect(buckets.mcapAtTrigger['1M-5M'].real.signalCount).toBe(1);
+    expect(buckets.mcapAtTrigger['>5M'].real.signalCount).toBe(1);
+    expect(buckets.mcapAtTrigger['unknown'].real.signalCount).toBe(1);
+  });
+
+  it('buckets liquidity by the documented boundaries: <20k | 20k-100k | >100k | unknown', () => {
+    const seriesByToken = new Map([
+      ['tokLowLiq', [point(T0, 1)]],
+      ['tokMidLiq', [point(T0, 1)]],
+      ['tokHighLiq', [point(T0, 1)]],
+      ['tokNoLiq', [point(T0, 1)]]
+    ]);
+    const signals: ReplayedSignal[] = [
+      sig('A', 'tokLowLiq', T0, { liquidityUsd: 19_999 }),
+      sig('A', 'tokMidLiq', T0, { liquidityUsd: 20_000 }), // lower boundary inclusive
+      sig('A', 'tokHighLiq', T0, { liquidityUsd: 100_000 }), // exactly the >100k boundary
+      sig('A', 'tokNoLiq', T0, {})
+    ];
+    const evaluated = evaluateReplay(signals, seriesByToken, ['H1']);
+    const buckets = bucketPerformance(evaluated);
+
+    expect(buckets.liquidity['<20k'].real.signalCount).toBe(1);
+    expect(buckets.liquidity['20k-100k'].real.signalCount).toBe(1);
+    expect(buckets.liquidity['>100k'].real.signalCount).toBe(1);
+    expect(buckets.liquidity['unknown'].real.signalCount).toBe(1);
+  });
+
+  it('buckets uniqueEntityCount by the documented boundaries: 1-4 | 5-14 | 15+, excluding signals that cannot be evaluated (no unknown bucket for this dimension)', () => {
+    const seriesByToken = new Map([
+      ['tokFew', [point(T0, 1)]],
+      ['tokMid', [point(T0, 1)]],
+      ['tokMany', [point(T0, 1)]],
+      ['tokNone', [point(T0, 1)]]
+    ]);
+    const signals: ReplayedSignal[] = [
+      sig('A', 'tokFew', T0, { uniqueEntityCount: 4 }), // upper boundary of 1-4
+      sig('A', 'tokMid', T0, { uniqueEntityCount: 5 }), // lower boundary of 5-14
+      sig('A', 'tokMany', T0, { uniqueEntityCount: 15 }), // lower boundary of 15+
+      sig('A', 'tokNone', T0, {}) // cannot evaluate -> excluded entirely, not 'unknown'
+    ];
+    const evaluated = evaluateReplay(signals, seriesByToken, ['H1']);
+    const buckets = bucketPerformance(evaluated);
+
+    expect(buckets.uniqueEntityCount['1-4'].real.signalCount).toBe(1);
+    expect(buckets.uniqueEntityCount['5-14'].real.signalCount).toBe(1);
+    expect(buckets.uniqueEntityCount['15+'].real.signalCount).toBe(1);
+    // Total bucketed signals across all 3 buckets is 3, not 4 — the
+    // no-metric signal contributes to none of them.
+    const total =
+      buckets.uniqueEntityCount['1-4'].real.signalCount +
+      buckets.uniqueEntityCount['5-14'].real.signalCount +
+      buckets.uniqueEntityCount['15+'].real.signalCount;
+    expect(total).toBe(3);
+  });
+
+  it('buckets clusterConcentration by metrics.entityConcentrationRisk, defaulting to unknown when absent or unrecognized', () => {
+    const seriesByToken = new Map([
+      ['tokLow', [point(T0, 1)]],
+      ['tokMed', [point(T0, 1)]],
+      ['tokHigh', [point(T0, 1)]],
+      ['tokAbsent', [point(T0, 1)]],
+      ['tokGarbage', [point(T0, 1)]]
+    ]);
+    const signals: ReplayedSignal[] = [
+      sig('F', 'tokLow', T0, { entityConcentrationRisk: 'low' }),
+      sig('F', 'tokMed', T0, { entityConcentrationRisk: 'medium' }),
+      sig('F', 'tokHigh', T0, { entityConcentrationRisk: 'high' }),
+      sig('F', 'tokAbsent', T0, {}),
+      sig('F', 'tokGarbage', T0, { entityConcentrationRisk: 'not-a-real-value' })
+    ];
+    const evaluated = evaluateReplay(signals, seriesByToken, ['H1']);
+    const buckets = bucketPerformance(evaluated);
+
+    expect(buckets.clusterConcentration['low'].real.signalCount).toBe(1);
+    expect(buckets.clusterConcentration['medium'].real.signalCount).toBe(1);
+    expect(buckets.clusterConcentration['high'].real.signalCount).toBe(1);
+    // Both the absent-metric and unrecognized-value signals fall into 'unknown'.
+    expect(buckets.clusterConcentration['unknown'].real.signalCount).toBe(2);
+  });
+
+  it('split integrity: every bucket always appears (zero-count summary when empty), and real/synthetic-evidence signals never pool together within a bucket', () => {
+    const seriesByToken = new Map([
+      ['tokReal', [point(T0, 1), point(minutesAfter(60), 2.5)]],
+      ['tokSynth', [point(T0, 1), point(minutesAfter(60), 2.5, { source: 'seed_synthetic_continuation' })]]
+    ]);
+    const signals: ReplayedSignal[] = [
+      sig('A', 'tokReal', T0, { mcapUsd: 50_000, liquidityUsd: 10_000, uniqueEntityCount: 2 }),
+      sig('A', 'tokSynth', T0, { mcapUsd: 50_000, liquidityUsd: 10_000, uniqueEntityCount: 2 })
+    ];
+    const evaluated = evaluateReplay(signals, seriesByToken, ['H1']);
+    const buckets = bucketPerformance(evaluated);
+
+    // Every documented bucket key exists across all 4 dimensions, even ones
+    // with zero signals routed to them.
+    expect(Object.keys(buckets.mcapAtTrigger).sort()).toEqual(
+      ['1M-5M', '100k-1M', '<100k', '>5M', 'unknown'].sort()
+    );
+    expect(Object.keys(buckets.liquidity).sort()).toEqual(['20k-100k', '<20k', '>100k', 'unknown'].sort());
+    expect(Object.keys(buckets.uniqueEntityCount).sort()).toEqual(['1-4', '5-14', '15+'].sort());
+    expect(Object.keys(buckets.clusterConcentration).sort()).toEqual(
+      ['low', 'medium', 'high', 'unknown'].sort()
+    );
+    // An empty bucket still returns a well-formed zero-count summary, not undefined.
+    expect(buckets.mcapAtTrigger['>5M'].real.signalCount).toBe(0);
+    expect(buckets.mcapAtTrigger['>5M'].synthetic.signalCount).toBe(0);
+
+    // Real vs synthetic-evidence split within the SAME bucket ('<100k' mcap,
+    // both signals land there) — never silently pooled.
+    expect(buckets.mcapAtTrigger['<100k'].real.signalCount).toBe(1);
+    expect(buckets.mcapAtTrigger['<100k'].synthetic.signalCount).toBe(1);
   });
 });
