@@ -74,11 +74,17 @@ async function loadOverlapResult(searchId: string): Promise<OverlapResultData | 
   const params = search.params as { max_results?: number; hybrid?: unknown } | null;
   const source = inferSourceKind(search.params, search.usedCachedResult);
 
-  // "Added as candidates" only counts wallets THIS overlap pipeline's
-  // dune_token_overlap source actually created/upserted (see localOverlap.ts
-  // header — local overlap never creates candidates) — NOT every wallet that
-  // happens to already be a CandidateWallet from some unrelated source.
-  const duneAddedCount = [...candidateByAddress.values()].filter((c) => c.source === 'dune_token_overlap').length;
+  // Task 38 fix: "added as candidates" must report only wallets THIS search
+  // actually newly CREATED — search.candidatesCreated, the additive column
+  // runTokenOverlapSearch persists at run time (see duneOverlap.ts's own
+  // header) — NOT every wallet that happens to already be a
+  // dune_token_overlap CandidateWallet from some earlier, overlapping
+  // search. That re-derivation (candidateByAddress here reflects CURRENT
+  // pool state, not this search's own creation event) is exactly the bug:
+  // a repeat search over the same tokens would re-count the whole existing
+  // pool as "added". candidatesMatched (current pool membership) is still
+  // surfaced separately.
+  const candidatesMatched = [...candidateByAddress.values()].filter((c) => c.source === 'dune_token_overlap').length;
 
   return {
     searchId: search.id,
@@ -92,7 +98,8 @@ async function loadOverlapResult(searchId: string): Promise<OverlapResultData | 
     truncated: Boolean(search.truncated),
     maxResults: params?.max_results ?? 100,
     finishedAtIso: search.finishedAt ? search.finishedAt.toISOString() : null,
-    candidatesAddedCount: source === 'local' ? 0 : duneAddedCount,
+    candidatesAddedCount: source === 'local' ? 0 : (search.candidatesCreated ?? 0),
+    candidatesMatchedCount: source === 'local' ? 0 : candidatesMatched,
     walletResults: search.walletResults.map((w) => ({
       walletAddress: w.walletAddress,
       chain: w.chain,

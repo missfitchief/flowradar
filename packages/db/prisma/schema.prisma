@@ -905,6 +905,13 @@ model TokenOverlapSearch {
   finishedAt        DateTime?
   error             String?
   createdAt         DateTime                  @default(now())
+  /// Task 38 fix (candidates-added honesty): count of CandidateWallet rows
+  /// this SPECIFIC search actually newly created (source=dune_token_overlap),
+  /// as opposed to overlap wallets that were already a candidate from an
+  /// earlier search. Null for a local search (no candidate gate at all — see
+  /// localOverlap.ts's header) and for rows predating this column. Additive
+  /// column so existing rows/queries keep working unchanged.
+  candidatesCreated Int?
 
   walletResults     TokenOverlapWalletResult[]
   groupResults      TokenOverlapGroupResult[]

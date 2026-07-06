@@ -28,7 +28,10 @@ export interface CoverageBannerProps {
   usedCachedResult: boolean | null;
   truncated: boolean;
   maxResults: number;
+  /** Wallets THIS search actually newly created as candidates. */
   candidatesAddedCount?: number;
+  /** Total overlap wallets from this search now in the candidate pool (new + pre-existing). */
+  candidatesMatchedCount?: number;
 }
 
 const CONFIDENCE_BY_SOURCE: Record<OverlapSourceKind, { label: string; className: string; note: string }> = {
@@ -63,6 +66,7 @@ export function CoverageBanner({
   truncated,
   maxResults,
   candidatesAddedCount,
+  candidatesMatchedCount,
 }: CoverageBannerProps) {
   const confidence = CONFIDENCE_BY_SOURCE[source];
   const isLocal = source === 'local';
@@ -98,10 +102,13 @@ export function CoverageBanner({
 
         <p className="text-xs text-muted-foreground">{confidence.note}</p>
 
-        {typeof candidatesAddedCount === 'number' && candidatesAddedCount > 0 && (
+        {typeof candidatesAddedCount === 'number' && (candidatesAddedCount > 0 || (candidatesMatchedCount ?? 0) > 0) && (
           <p className="text-xs text-muted-foreground">
-            {candidatesAddedCount} wallet{candidatesAddedCount === 1 ? '' : 's'} added as candidates → pending
-            validation (see Sources). Overlap wallets are never auto-watched.
+            {candidatesAddedCount} newly added as candidate{candidatesAddedCount === 1 ? '' : 's'}
+            {typeof candidatesMatchedCount === 'number' && candidatesMatchedCount > candidatesAddedCount
+              ? ` (${candidatesMatchedCount} total overlap wallet${candidatesMatchedCount === 1 ? '' : 's'} already in the candidate pool)`
+              : ''}
+            {' '}→ pending validation (see Sources). Overlap wallets are never auto-watched.
           </p>
         )}
       </CardContent>

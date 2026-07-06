@@ -36,7 +36,10 @@ export interface OverlapResultData {
   truncated: boolean;
   maxResults: number;
   finishedAtIso: string | null;
+  /** Wallets THIS search actually newly created as candidates (candidatesCreated). */
   candidatesAddedCount: number;
+  /** Total overlap wallets from this search that are (now) in the candidate pool, new or pre-existing. */
+  candidatesMatchedCount: number;
   walletResults: OverlapWalletRow[];
   groupResults: OverlapGroupRow[];
 }
@@ -59,6 +62,10 @@ interface ApiSearch {
   usedCachedResult: boolean | null;
   truncated: boolean | null;
   finishedAt: string | null;
+  /** Newly-created-by-this-search candidate count (null for local/rows predating this column). */
+  candidatesCreated: number | null;
+  /** Total overlap wallets from this search now in the candidate pool (new + pre-existing). */
+  candidatesMatched: number;
 }
 
 interface ApiWalletResult {
@@ -97,12 +104,15 @@ async function fetchOverlapResult(searchId: string, source: OverlapSourceKind): 
     throw new Error(body.error ?? `failed to load search result (HTTP ${response.status})`);
   }
 
-  // "Added as candidates" only counts wallets THIS overlap pipeline's
-  // dune_token_overlap source actually created/upserted — local overlap
-  // never creates candidates itself (see localOverlap.ts's header), so a
-  // local search reports 0 regardless of any pre-existing candidate rows
-  // its wallets may happen to already have from an unrelated source.
-  const candidatesAddedCount = source === 'local' ? 0 : body.walletResults.filter((w) => w.isDuneOverlapCandidate).length;
+  // Task 38 fix: "added as candidates" must report only wallets THIS search
+  // actually newly CREATED (search.candidatesCreated, set at run time by
+  // runTokenOverlapSearch) — not every overlap wallet that happens to
+  // already be a dune_token_overlap candidate from some earlier search.
+  // Local overlap never creates candidates itself (see localOverlap.ts's
+  // header), so a local search always reports 0. candidatesMatched (the
+  // total pool count) is surfaced separately, never used for "newly added".
+  const candidatesAddedCount = source === 'local' ? 0 : (body.search.candidatesCreated ?? 0);
+  const candidatesMatchedCount = source === 'local' ? 0 : body.search.candidatesMatched;
 
   return {
     searchId: body.search.id,
@@ -117,6 +127,7 @@ async function fetchOverlapResult(searchId: string, source: OverlapSourceKind): 
     maxResults: body.search.params?.max_results ?? 100,
     finishedAtIso: body.search.finishedAt,
     candidatesAddedCount,
+    candidatesMatchedCount,
     walletResults: body.walletResults.map((w) => ({
       walletAddress: w.walletAddress,
       chain: w.chain,
@@ -222,6 +233,15 @@ export function OverlapFinder({ initialResult, explorerAddressUrlTemplate }: Ove
             </p>
           )}
 
+          {/* TODO(minor, Task 38 review): 'overlap_finder_ad_hoc' duplicates
+              packages/db/src/dune/duneOverlap.ts's DEFAULT_QUERY_ID_PLACEHOLDER
+              literal. It's genuinely not a per-search value in this codebase
+              today (every dune overlap search uses the same ad-hoc query id,
+              not a real per-search Dune query id), so threading it through the
+              API response would just carry the same constant string — not
+              worth a response-shape change for this pass. If a real per-search
+              queryId is ever introduced, thread it through instead of
+              re-declaring this literal here. */}
           <CoverageBanner
             source={result.source}
             queryId={result.source === 'local' ? null : 'overlap_finder_ad_hoc'}
@@ -231,6 +251,7 @@ export function OverlapFinder({ initialResult, explorerAddressUrlTemplate }: Ove
             truncated={result.truncated}
             maxResults={result.maxResults}
             candidatesAddedCount={result.candidatesAddedCount}
+            candidatesMatchedCount={result.candidatesMatchedCount}
           />
 
           <div>

@@ -161,6 +161,52 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runLocalOverlapSearch', 
     expect(result.walletResultsCreated).toBe(0);
   });
 
+  it('CRITICAL: a SELL-only token (no qualifying BUY) does NOT count toward tokensOverlapCount — "traded all N" must be false', async () => {
+    const tokA = `${PREFIX}_tokA_sellonly`;
+    const tokB = `${PREFIX}_tokB_sellonly`;
+    const tokC = `${PREFIX}_tokC_sellonly`;
+    const w1 = `${PREFIX}_w_sellonly`;
+
+    const { token: tA, wallet } = await seedTokenAndWallet(tokA, w1);
+    const { token: tB } = await seedTokenAndWallet(tokB, w1);
+    const { token: tC } = await seedTokenAndWallet(tokC, w1);
+
+    // Qualifying BUYs of A and B.
+    await trade({ wallet, token: tA, action: 'BUY', amountUsd: 500, txHash: `${PREFIX}_tx_so1` });
+    await trade({ wallet, token: tB, action: 'BUY', amountUsd: 500, txHash: `${PREFIX}_tx_so2` });
+    // C is SELL-only — never bought, only sold. Must NOT count as "traded".
+    await trade({ wallet, token: tC, action: 'SELL', amountUsd: 700, txHash: `${PREFIX}_tx_so3` });
+
+    // Ask for overlap across all 3 tokens with minTokensOverlap=2 (not "all
+    // 3") so the wallet still surfaces in the result set — the point under
+    // test is tokensOverlapCount itself, not whether the wallet qualifies.
+    const result = await runLocalOverlapSearch(prisma, {
+      chain: CHAIN,
+      tokenAddresses: [tokA, tokB, tokC],
+      minTokensOverlap: 2
+    });
+
+    expect(result.status).toBe('done');
+    const walletResults = await prisma.tokenOverlapWalletResult.findMany({ where: { searchId: result.searchId } });
+    expect(walletResults).toHaveLength(1);
+    expect(walletResults[0]!.walletAddress).toBe(w1);
+    // A + B qualify (bought), C does not (sell-only) => count is 2, NOT 3.
+    expect(walletResults[0]!.tokensOverlapCount).toBe(2);
+    // "traded all 3" would require tokensOverlapCount === 3 — must be false.
+    expect(walletResults[0]!.tokensOverlapCount).not.toBe(3);
+    // Sells still contribute to totalSellUsd/sellCount aggregates.
+    expect(Number(walletResults[0]!.totalSellUsd)).toBe(700);
+    expect(walletResults[0]!.sellCount).toBe(1);
+
+    // Re-run requiring ALL 3 tokens — the wallet must NOT qualify at all.
+    const allThreeResult = await runLocalOverlapSearch(prisma, {
+      chain: CHAIN,
+      tokenAddresses: [tokA, tokB, tokC]
+      // minTokensOverlap defaults to tokenAddresses.length (3) = "traded all".
+    });
+    expect(allThreeResult.walletResultsCreated).toBe(0);
+  });
+
   it('groups wallets sharing the exact same overlapping-token set into a TokenOverlapGroupResult', async () => {
     const tokA = `${PREFIX}_tokA3`;
     const tokB = `${PREFIX}_tokB3`;
@@ -186,6 +232,40 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runLocalOverlapSearch', 
     expect(groups).toHaveLength(1);
     expect(groups[0]!.walletCount).toBe(2);
     expect(groups[0]!.walletAddresses.sort()).toEqual([w1, w2].sort());
+  });
+
+  it('IMPORTANT: truncated=true when maxResults caps qualifying wallets — feeds hybrid.truncated = local || dune', async () => {
+    const tokA = `${PREFIX}_tokA_trunc`;
+    const tokB = `${PREFIX}_tokB_trunc`;
+    const w1 = `${PREFIX}_wt1`;
+    const w2 = `${PREFIX}_wt2`;
+    const w3 = `${PREFIX}_wt3`;
+
+    const { token: tA, wallet: wallet1 } = await seedTokenAndWallet(tokA, w1);
+    const { token: tB } = await seedTokenAndWallet(tokB, w1);
+    const { wallet: wallet2 } = await seedTokenAndWallet(tokA, w2);
+    await prisma.walletTokenTrade.deleteMany({ where: { walletId: wallet2.id } });
+    const { wallet: wallet3 } = await seedTokenAndWallet(tokA, w3);
+    await prisma.walletTokenTrade.deleteMany({ where: { walletId: wallet3.id } });
+
+    for (const [i, w] of [wallet1, wallet2, wallet3].entries()) {
+      await trade({ wallet: w, token: tA, action: 'BUY', amountUsd: 500, txHash: `${PREFIX}_tx_tr${i}_a` });
+      await trade({ wallet: w, token: tB, action: 'BUY', amountUsd: 500, txHash: `${PREFIX}_tx_tr${i}_b` });
+    }
+
+    // 3 qualifying wallets, capped to 2 => truncated must be true.
+    const result = await runLocalOverlapSearch(prisma, {
+      chain: CHAIN,
+      tokenAddresses: [tokA, tokB],
+      maxResults: 2
+    });
+
+    expect(result.status).toBe('done');
+    expect(result.walletResultsCreated).toBe(2);
+    expect(result.truncated).toBe(true);
+
+    const search = await prisma.tokenOverlapSearch.findUnique({ where: { id: result.searchId } });
+    expect(search?.truncated).toBe(true);
   });
 
   it('no matching tokens in DB => done with 0 rows, never throws', async () => {

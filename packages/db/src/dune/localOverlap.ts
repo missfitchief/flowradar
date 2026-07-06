@@ -38,6 +38,8 @@ export interface LocalOverlapSearchResult {
   rowsReturned: number;
   walletResultsCreated: number;
   groupResultsCreated: number;
+  /** True only when the maxResults cap actually dropped qualifying rows. */
+  truncated: boolean;
   error?: string;
 }
 
@@ -94,7 +96,7 @@ export async function runLocalOverlapSearch(
         where: { id: search.id },
         data: { status: 'done', rowsReturned: 0, usedCachedResult: null, truncated: false, finishedAt: new Date() }
       });
-      return { searchId: search.id, status: 'done', rowsReturned: 0, walletResultsCreated: 0, groupResultsCreated: 0 };
+      return { searchId: search.id, status: 'done', rowsReturned: 0, walletResultsCreated: 0, groupResultsCreated: 0, truncated: false };
     }
 
     const trades = await prisma.walletTokenTrade.findMany({
@@ -148,8 +150,14 @@ export async function runLocalOverlapSearch(
         aggByWallet.set(trade.walletId, agg);
       }
 
-      agg.tokensHit.add(trade.tokenId);
       if (trade.action === 'BUY') {
+        // Overlap counts a token only when the wallet has a QUALIFYING BUY of
+        // it (amountUsd >= minTradeUsd) — matches the "traded all N tokens"
+        // framing (task-38-brief.md + the UI's "bought-all-early" language).
+        // A SELL-only touch on a token (no qualifying BUY) must NOT count
+        // toward tokensHit/tokensOverlapCount, even though it still
+        // contributes to totalSellUsd/sellCount/pnl below.
+        agg.tokensHit.add(trade.tokenId);
         agg.totalBuyUsd += amountUsd;
         agg.buyCount += 1;
         if (!agg.firstBuyTime || trade.ts < agg.firstBuyTime) {
@@ -246,7 +254,8 @@ export async function runLocalOverlapSearch(
       status: 'done',
       rowsReturned: limited.length,
       walletResultsCreated,
-      groupResultsCreated
+      groupResultsCreated,
+      truncated
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -259,6 +268,7 @@ export async function runLocalOverlapSearch(
       rowsReturned: 0,
       walletResultsCreated: 0,
       groupResultsCreated: 0,
+      truncated: false,
       error: message
     };
   }

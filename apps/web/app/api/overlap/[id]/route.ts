@@ -40,8 +40,21 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
 
   const { walletResults, groupResults, ...searchFields } = search;
 
+  // Task 38 fix: "N newly added as candidates" must come from THIS search's
+  // own candidatesCreated column (set by runTokenOverlapSearch at the moment
+  // it ran — see duneOverlap.ts's own header), NOT from re-deriving a count
+  // off current CandidateWallet state. The latter overcounts on a
+  // repeat/overlapping search: every overlap wallet that's already a
+  // candidate from an earlier search would get re-counted as "added" even
+  // though this search created zero new rows. candidatesMatched (the
+  // isDuneOverlapCandidate tally below) is still surfaced separately as
+  // "total overlap wallets already in the candidate pool".
+  const candidatesMatched = walletResults.filter(
+    (w) => candidateByAddress.get(w.walletAddress)?.source === 'dune_token_overlap'
+  ).length;
+
   return NextResponse.json({
-    search: searchFields,
+    search: { ...searchFields, candidatesMatched },
     walletResults: walletResults.map((w) => ({
       walletAddress: w.walletAddress,
       chain: w.chain,

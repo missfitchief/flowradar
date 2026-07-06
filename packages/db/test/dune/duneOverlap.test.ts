@@ -189,6 +189,48 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runTokenOverlapSearch', 
     expect(allRows).toHaveLength(1);
   });
 
+  it('IMPORTANT: candidatesCreated reflects only THIS search\'s newly-created candidates — a re-run over the same wallets reports candidatesCreated=0, candidatesUpserted unchanged', async () => {
+    const client = makeFakeDuneClient({
+      rows: [
+        { wallet_address: `${ADDR_PREFIX}_added1`, tokens_overlap_count: 2, estimated_pnl_usd: 100 },
+        { wallet_address: `${ADDR_PREFIX}_added2`, tokens_overlap_count: 2, estimated_pnl_usd: 200 }
+      ],
+      usedCached: true,
+      truncated: false,
+      rowsReturned: 2
+    });
+
+    const firstRun = await runTokenOverlapSearch(
+      prisma,
+      { chain: CHAIN, tokenAddresses: [`${ADDR_PREFIX}_tokA`, `${ADDR_PREFIX}_tokB`] },
+      () => client
+    );
+    // Both wallets are brand new candidates => created === upserted === 2.
+    expect(firstRun.candidatesUpserted).toBe(2);
+    expect(firstRun.candidatesCreated).toBe(2);
+
+    const firstSearchRow = await prisma.tokenOverlapSearch.findUnique({ where: { id: firstRun.searchId } });
+    expect(firstSearchRow?.candidatesCreated).toBe(2);
+
+    // Second run over the exact same tokens/result set (a fresh
+    // TokenOverlapSearch row, same overlap wallets) — nothing NEW is
+    // created; both wallets already exist as dune_token_overlap candidates.
+    const secondRun = await runTokenOverlapSearch(
+      prisma,
+      { chain: CHAIN, tokenAddresses: [`${ADDR_PREFIX}_tokA`, `${ADDR_PREFIX}_tokB`] },
+      () => client
+    );
+    expect(secondRun.candidatesUpserted).toBe(2); // still matches/re-syncs both
+    expect(secondRun.candidatesCreated).toBe(0); // but creates none
+
+    const secondSearchRow = await prisma.tokenOverlapSearch.findUnique({ where: { id: secondRun.searchId } });
+    expect(secondSearchRow?.candidatesCreated).toBe(0);
+
+    // Still exactly one CandidateWallet row per address — never duplicated.
+    const rowsForAdded1 = await prisma.candidateWallet.findMany({ where: { walletAddress: `${ADDR_PREFIX}_added1` } });
+    expect(rowsForAdded1).toHaveLength(1);
+  });
+
   it('no DuneClient available => search marked failed, never throws', async () => {
     const result = await runTokenOverlapSearch(
       prisma,

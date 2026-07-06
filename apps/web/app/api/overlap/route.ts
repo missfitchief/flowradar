@@ -178,7 +178,8 @@ export async function POST(request: Request): Promise<NextResponse> {
       searchId: result.searchId,
       status: result.status,
       error: result.error ?? null,
-      candidatesUpserted: result.candidatesUpserted
+      candidatesUpserted: result.candidatesUpserted,
+      candidatesCreated: result.candidatesCreated
     });
   }
 
@@ -241,9 +242,21 @@ export async function POST(request: Request): Promise<NextResponse> {
   const mergedGroups = [...localData.groups, ...duneData.groups];
 
   const usedCachedResult = duneResult.status === 'done' ? true : null; // local has no cache concept; surface dune's cache flag when it ran
-  const truncated = localResult.status === 'done' && duneResult.status === 'done'
-    ? false // recomputed below from the actual child search rows
-    : false;
+  // Task 38 fix: hybrid.truncated must be true whenever EITHER child leg was
+  // truncated — previously hardcoded to false with a comment claiming it was
+  // "recomputed below", which never happened, so a truncated dune leg's
+  // warning silently vanished once merged into the hybrid view. Read each
+  // child's own truncated flag directly off its returned result (both
+  // runLocalOverlapSearch/runTokenOverlapSearch already persist this onto
+  // their own TokenOverlapSearch row — same source of truth, no extra query
+  // needed) and OR them.
+  const localTruncated = localResult.status === 'done' && localResult.truncated;
+  const duneTruncated = duneResult.status === 'done' && duneResult.truncated;
+  const truncated = localTruncated || duneTruncated;
+
+  // Candidates-added: local never creates candidates (see localOverlap.ts's
+  // header) — the dune leg's own candidatesCreated is the hybrid's total.
+  const candidatesCreated = duneResult.status === 'done' ? duneResult.candidatesCreated : 0;
 
   const hybridSearch = await prisma.tokenOverlapSearch.create({
     data: {
@@ -260,6 +273,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       rowsReturned: mergedWallets.size,
       usedCachedResult,
       truncated,
+      candidatesCreated,
       startedAt: new Date(),
       finishedAt: new Date()
     }

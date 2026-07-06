@@ -25,6 +25,14 @@
 // DUNE_USE_LATEST_RESULT/DUNE_EXECUTE_FRESH). runTokenOverlapSearch just
 // records whatever the client reports (usedCachedResult/truncated) onto the
 // TokenOverlapSearch row for Task 38's UI "coverage display".
+//
+// CANDIDATES-ADDED HONESTY (Task 38 review fix): candidatesUpserted counts
+// every distinct overlap wallet processed through the CandidateWallet upsert
+// this run (created OR already-existing, re-synced). candidatesCreated is
+// the strict subset this run actually CREATED — persisted onto the search
+// row's own `candidatesCreated` column — so a repeat/overlapping search over
+// tokens whose overlap wallets are already candidates correctly reports 0
+// "newly added", instead of re-counting the whole pool every time.
 
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type { Chain, Settings } from '@flowradar/core';
@@ -53,7 +61,19 @@ export interface TokenOverlapSearchResult {
   rowsDropped: number;
   walletResultsCreated: number;
   groupResultsCreated: number;
+  /** Total distinct overlap wallets processed through the CandidateWallet upsert this run (created + already-existing). */
   candidatesUpserted: number;
+  /**
+   * Task 38 fix (candidates-added honesty): count of CandidateWallet rows
+   * this search actually NEWLY CREATED — as opposed to `candidatesUpserted`,
+   * which also includes overlap wallets that were already a candidate (e.g.
+   * from an earlier, overlapping search) and merely got their
+   * lastSeenAt/claimed* fields re-synced. A re-run of the exact same search
+   * over the same tokens must report candidatesCreated=0 (nothing NEW), even
+   * though candidatesUpserted stays the same (every overlap wallet is still
+   * "matched" to a candidate row).
+   */
+  candidatesCreated: number;
   usedCachedResult: boolean;
   truncated: boolean;
   error?: string;
@@ -125,6 +145,7 @@ export async function runTokenOverlapSearch(
         walletResultsCreated: 0,
         groupResultsCreated: 0,
         candidatesUpserted: 0,
+        candidatesCreated: 0,
         usedCachedResult: false,
         truncated: false,
         error: errorMessage
@@ -150,6 +171,12 @@ export async function runTokenOverlapSearch(
     // Persist wallet results + build overlapGroupId aggregates in the same pass.
     const groupAccumulator = new Map<string, { walletAddresses: Set<string>; sharedTokenCounts: number[] }>();
     let walletResultsCreated = 0;
+    // Task 38 fix (candidates-added honesty): track NEWLY created candidate
+    // wallets separately from ones that already existed (re-synced, not
+    // added). Keyed by address so a result set with a duplicate wallet
+    // address never double-counts within this one run.
+    const createdCandidateAddresses = new Set<string>();
+    const matchedCandidateAddresses = new Set<string>();
 
     for (const row of rows) {
       const chain = (row.chain as Chain | undefined) ?? input.chain;
@@ -182,12 +209,14 @@ export async function runTokenOverlapSearch(
       // Trust boundary: create/upsert the CandidateWallet row (pending) —
       // the ONLY signal-path-adjacent write this module makes. Never touches
       // Wallet/WalletStats — Task 35's validation pipeline owns that.
-      await upsertOverlapCandidate(prisma, chain, row.wallet_address, {
+      const { created } = await upsertOverlapCandidate(prisma, chain, row.wallet_address, {
         estimatedPnlUsd: row.estimated_pnl_usd,
         buyCount: row.buy_count,
         sellCount: row.sell_count,
         tokensOverlapCount: row.tokens_overlap_count
       });
+      matchedCandidateAddresses.add(row.wallet_address);
+      if (created) createdCandidateAddresses.add(row.wallet_address);
     }
 
     let groupResultsCreated = 0;
@@ -211,6 +240,9 @@ export async function runTokenOverlapSearch(
     const rowsReturned = resultSet.rowsReturned;
     const truncated = resultSet.truncated || rowsReturned >= maxResults;
 
+    const candidatesUpserted = matchedCandidateAddresses.size;
+    const candidatesCreated = createdCandidateAddresses.size;
+
     await prisma.tokenOverlapSearch.update({
       where: { id: search.id },
       data: {
@@ -219,11 +251,10 @@ export async function runTokenOverlapSearch(
         usedCachedResult: resultSet.usedCached,
         truncated,
         executionId: resultSet.executionId ?? null,
+        candidatesCreated,
         finishedAt: new Date()
       }
     });
-
-    const candidatesUpserted = new Set(rows.map((r) => r.wallet_address)).size;
 
     log?.info('runTokenOverlapSearch: search complete', {
       searchId: search.id,
@@ -232,6 +263,7 @@ export async function runTokenOverlapSearch(
       walletResultsCreated,
       groupResultsCreated,
       candidatesUpserted,
+      candidatesCreated,
       usedCached: resultSet.usedCached,
       truncated
     });
@@ -244,6 +276,7 @@ export async function runTokenOverlapSearch(
       walletResultsCreated,
       groupResultsCreated,
       candidatesUpserted,
+      candidatesCreated,
       usedCachedResult: resultSet.usedCached,
       truncated
     };
@@ -261,6 +294,7 @@ export async function runTokenOverlapSearch(
       walletResultsCreated: 0,
       groupResultsCreated: 0,
       candidatesUpserted: 0,
+      candidatesCreated: 0,
       usedCachedResult: false,
       truncated: false,
       error: message
@@ -268,14 +302,28 @@ export async function runTokenOverlapSearch(
   }
 }
 
+/**
+ * Upserts one CandidateWallet row (pending, source=dune_token_overlap),
+ * returning whether this call CREATED a new row vs matched/re-synced an
+ * existing one — a plain upsert() doesn't expose that distinction itself, so
+ * this does a findUnique on the same unique tuple BEFORE the upsert to
+ * determine it (Task 38 fix: the UI's "N newly added as candidates" note
+ * must reflect only genuinely-new rows, not every overlap wallet that
+ * happens to already be a candidate from an earlier search).
+ */
 async function upsertOverlapCandidate(
   prisma: PrismaClient,
   chain: Chain,
   walletAddress: string,
   claimed: { estimatedPnlUsd?: number; buyCount?: number; sellCount?: number; tokensOverlapCount?: number }
-): Promise<void> {
+): Promise<{ created: boolean }> {
   const now = new Date();
   const claimedTradeCount = (claimed.buyCount ?? 0) + (claimed.sellCount ?? 0);
+
+  const existing = await prisma.candidateWallet.findUnique({
+    where: { walletAddress_chain_source: { walletAddress, chain, source: SOURCE_NAME } },
+    select: { id: true }
+  });
 
   await prisma.candidateWallet.upsert({
     where: {
@@ -303,6 +351,8 @@ async function upsertOverlapCandidate(
       metadataJson: { tokensOverlapCount: claimed.tokensOverlapCount ?? null }
     }
   });
+
+  return { created: existing === null };
 }
 
 // ---------------------------------------------------------------------------
