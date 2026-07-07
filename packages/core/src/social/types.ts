@@ -1,7 +1,8 @@
 // FlowRadar — social intelligence: shared pure types.
 //
-// packages/core is PURE (zero I/O, zod is the only runtime dep; node:crypto is
-// a builtin used only by normalize.ts). These types are the contract every
+// packages/core is PURE (zero I/O, zod is the only runtime dep; no Node
+// builtins — contentHash uses a pure-JS hash so @flowradar/core stays safe to
+// import from client bundles). These types are the contract every
 // later social task (providers ingest, socialIngest worker job, db helpers,
 // web token-social-section) imports from @flowradar/core.
 //

@@ -35,9 +35,11 @@ describe('contentHash', () => {
     expect(contentHash(n)).toBe(contentHash(n));
   });
 
-  it('is a 64-char lowercase hex sha256 digest', () => {
+  it('is a stable, non-empty deterministic string (non-cryptographic grouping hash)', () => {
     const h = contentHash('buy nova now');
-    expect(h).toMatch(/^[0-9a-f]{64}$/);
+    expect(typeof h).toBe('string');
+    expect(h.length).toBeGreaterThan(0);
+    expect(contentHash('buy nova now')).toBe(h);
   });
 
   it('differs for different normalized content', () => {

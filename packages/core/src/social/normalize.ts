@@ -1,11 +1,12 @@
 // FlowRadar — social: snippet normalization + content hash (spec §3).
 //
-// PURE. node:crypto is a Node builtin (no new runtime dep; matches spec's
-// "hash(normalizedSnippet) via Node crypto"). normalizeSnippet produces the
-// copy-paste comparison key: lowercase, urls/emojis/mentions/punctuation
-// stripped, whitespace collapsed, truncated to <= 280 chars (schema limit).
-
-import { createHash } from 'node:crypto';
+// PURE, and deliberately free of any `node:` builtin import — this module is
+// re-exported through the @flowradar/core barrel, which a client component
+// (apps/web/components/graph/GraphCanvas.tsx) imports at runtime, so anything
+// exported here must bundle cleanly for the browser as well as the server.
+// normalizeSnippet produces the copy-paste comparison key: lowercase,
+// urls/emojis/mentions/punctuation stripped, whitespace collapsed, truncated
+// to <= 280 chars (schema limit).
 
 const MAX_SNIPPET_LEN = 280;
 
@@ -35,7 +36,29 @@ export function normalizeSnippet(content: string): string {
   return normalized.length > MAX_SNIPPET_LEN ? normalized.slice(0, MAX_SNIPPET_LEN) : normalized;
 }
 
-/** sha256 hex digest of a normalized snippet — the copy-paste grouping key. */
+/**
+ * Deterministic, non-cryptographic grouping hash of a normalized snippet —
+ * used only to bucket identical normalized post content together for
+ * copy-paste detection (see packages/db/src/social/ingest.ts). It is NOT a
+ * security/integrity hash: no collision-resistance guarantees are needed,
+ * only "same input -> same output" and a low real-world collision rate for
+ * short social-post strings. Implemented as a self-contained, pure-JS
+ * cyrb53 (no `node:` builtin import) so @flowradar/core stays safe to bundle
+ * into the browser as well as run on the server.
+ *
+ * Returns a stable base36 string. Same input always yields the same output;
+ * different inputs are extremely unlikely to collide (53-bit output space).
+ */
 export function contentHash(normalized: string): string {
-  return createHash('sha256').update(normalized, 'utf8').digest('hex');
+  let h1 = 0xdeadbeef ^ 0;
+  let h2 = 0x41c6ce57 ^ 0;
+  for (let i = 0; i < normalized.length; i++) {
+    const ch = normalized.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  const combined = 4294967296 * (2097151 & h2) + (h1 >>> 0);
+  return combined.toString(36);
 }
