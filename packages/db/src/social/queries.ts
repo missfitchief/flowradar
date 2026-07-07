@@ -86,9 +86,28 @@ export async function getRecentMentions(
   return rows.map(toRecentMentionRow);
 }
 
-// NOTE: getTokenSocialMentions is NOT defined here — Task F appends it to this
-// same file with its own canonical shape (raw Prisma rows via
-// include: { source: { select: { name, platform, trustTier } } }).
+// --- Task F: token-detail social section --------------------------------
+// This token's recent SocialMention rows (shadow-only), newest first, with a
+// minimal source projection (name/platform/trustTier) for display. Read-only.
+// Capped at MAX_TOKEN_MENTIONS so a single spammed token can't unbounded the
+// page query. Returns [] for a token with no mentions (graceful empty state).
+
+const MAX_TOKEN_MENTIONS = 50;
+
+export type SocialMentionWithSource = Awaited<
+  ReturnType<typeof getTokenSocialMentions>
+>[number];
+
+export async function getTokenSocialMentions(prisma: PrismaClient, tokenId: string) {
+  return prisma.socialMention.findMany({
+    where: { tokenId },
+    orderBy: { postedAt: 'desc' },
+    take: MAX_TOKEN_MENTIONS,
+    include: {
+      source: { select: { name: true, platform: true, trustTier: true } },
+    },
+  });
+}
 
 /**
  * Per-source health: all SocialSource rows (enabled or not) with their
