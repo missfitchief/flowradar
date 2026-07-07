@@ -165,6 +165,78 @@ export function buildRiskReport(concentration: HolderConcentration, mintAuthorit
 }
 
 // ---------------------------------------------------------------------------
+// RPC error typing + "holder data unavailable" degrade (F9)
+// ---------------------------------------------------------------------------
+
+const RPC_INVALID_REQUEST = -32600;
+
+/**
+ * A Helius JSON-RPC `error` response (the `json.error` branch of callRpc),
+ * carrying the raw RPC `code` + `message` so callers can classify specific
+ * conditions (e.g. -32600 "too many accounts") WITHOUT string-parsing the
+ * formatted Error.message. The message format is unchanged from the prior
+ * plain-Error throw, so existing message/key-redaction expectations still hold.
+ */
+export class HeliusRpcError extends Error {
+  readonly code: number;
+  readonly rpcMessage: string;
+  readonly method: string;
+  constructor(method: string, code: number, rpcMessage: string) {
+    super(`Helius RPC ${method} returned an error: ${code} ${rpcMessage}`);
+    this.name = 'HeliusRpcError';
+    this.code = code;
+    this.rpcMessage = rpcMessage;
+    this.method = method;
+  }
+}
+
+/**
+ * True for the specific "this mint has too many holder accounts to sample"
+ * failure getTokenLargestAccounts returns for mega-holder mints (stablecoins
+ * like USDC/USDT, wSOL, other major tokens): JSON-RPC code -32600 with a
+ * "too many accounts" message (e.g. "Too many accounts requested (5000000
+ * pubkeys), try adding filters to narrow down results"). This is a KNOWN,
+ * expected condition for high-holder tokens — not a provider outage — so
+ * getTokenRisk treats it as "holder data unavailable" and degrades instead of
+ * failing the token's whole score on every scoring cycle. Deliberately narrow:
+ * it must be the getTokenLargestAccounts call (the only method that produces
+ * this holder-sampling limit), a different -32600 message, a different code, or
+ * a non-HeliusRpcError all return false so genuine failures still propagate.
+ */
+export function isTokenAccountsUnavailableError(err: unknown): boolean {
+  return (
+    err instanceof HeliusRpcError &&
+    err.method === 'getTokenLargestAccounts' &&
+    err.code === RPC_INVALID_REQUEST &&
+    /too many accounts/i.test(err.rpcMessage)
+  );
+}
+
+/**
+ * RiskReport for a mint whose holder concentration can't be sampled (see
+ * isTokenAccountsUnavailableError). Surfaces an explicit `holder_data_unavailable`
+ * warn flag so the token reads as UNKNOWN, never clean/safe — while keeping
+ * `penalty: 0` so the flow-score formula (which reads ONLY risk.penalty, not
+ * flags — see @flowradar/core computeFlowScore) stays completely unchanged.
+ * penalty 0 is also the correct default here: a mint with millions of holders
+ * is the OPPOSITE of top-holder-concentrated, so it warrants no concentration
+ * penalty — we simply couldn't measure it precisely, and must not fabricate a
+ * penalty (falsely dangerous) OR an empty report (falsely clean) either way.
+ */
+export function buildUnavailableRiskReport(): RiskReport {
+  return {
+    flags: [
+      {
+        id: 'holder_data_unavailable',
+        label: 'Holder concentration data unavailable (mint has too many accounts to sample)',
+        severity: 'warn'
+      }
+    ],
+    penalty: 0
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Live provider construction
 // ---------------------------------------------------------------------------
 
@@ -185,7 +257,7 @@ async function callRpc<T>(apiKey: string, limiter: RateLimiter, method: string, 
 
   const json = (await response.json()) as JsonRpcResponse<T>;
   if (json.error) {
-    throw new Error(`Helius RPC ${method} returned an error: ${json.error.code} ${json.error.message}`);
+    throw new HeliusRpcError(method, json.error.code, json.error.message);
   }
   if (json.result === undefined) {
     throw new Error(`Helius RPC ${method} returned no result field`);
@@ -208,13 +280,26 @@ export function createHeliusRiskProvider(env: HeliusRiskEnv): RiskProvider | nul
   return {
     providerName: 'Helius',
     async getTokenRisk(_chain: Chain, address: string): Promise<RiskReport> {
-      const [largestAccounts, supply] = await Promise.all([
-        callRpc<RpcTokenLargestAccountsResult>(apiKey, limiter, 'getTokenLargestAccounts', [address]),
-        callRpc<RpcTokenSupplyResult>(apiKey, limiter, 'getTokenSupply', [address])
-      ]);
-      const concentration = computeHolderConcentration(largestAccounts, supply);
-      const mintAuthority = getMintAuthorityFlags(address);
-      return buildRiskReport(concentration, mintAuthority);
+      try {
+        const [largestAccounts, supply] = await Promise.all([
+          callRpc<RpcTokenLargestAccountsResult>(apiKey, limiter, 'getTokenLargestAccounts', [address]),
+          callRpc<RpcTokenSupplyResult>(apiKey, limiter, 'getTokenSupply', [address])
+        ]);
+        const concentration = computeHolderConcentration(largestAccounts, supply);
+        const mintAuthority = getMintAuthorityFlags(address);
+        return buildRiskReport(concentration, mintAuthority);
+      } catch (err) {
+        // Mega-holder mints (stablecoins/wSOL/major tokens) can't have their
+        // holder concentration sampled — getTokenLargestAccounts returns
+        // -32600 "too many accounts". Degrade to an explicit "unavailable"
+        // report instead of throwing, which would fail this token's score on
+        // EVERY cycle and spam the log. Any OTHER error (rate limit, network,
+        // other RPC codes) still propagates unchanged.
+        if (isTokenAccountsUnavailableError(err)) {
+          return buildUnavailableRiskReport();
+        }
+        throw err;
+      }
     }
   };
 }

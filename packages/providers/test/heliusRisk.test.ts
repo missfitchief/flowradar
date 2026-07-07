@@ -11,14 +11,25 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
   buildRiskReport,
+  buildUnavailableRiskReport,
   computeHolderConcentration,
   createHeliusRiskProvider,
-  getMintAuthorityFlags
+  getMintAuthorityFlags,
+  HeliusRpcError,
+  isTokenAccountsUnavailableError
 } from '../src/solana/risk';
 import largestAccountsFixture from './fixtures/helius/rpc-token-largest-accounts.json';
 import supplyFixture from './fixtures/helius/rpc-token-supply.json';
 
 const MINT = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263';
+
+// The exact error Helius returns for a mega-holder mint (USDT/USDC/wSOL): the
+// getTokenLargestAccounts -32600 "too many accounts" condition seen live.
+const TOO_MANY_ACCOUNTS_ERROR = {
+  jsonrpc: '2.0',
+  id: '1',
+  error: { code: -32600, message: 'Too many accounts requested (5000000 pubkeys), try adding filters to narrow down results' }
+};
 
 describe('getMintAuthorityFlags', () => {
   it('is a stub: returns mode "stub" with null flags and makes no network call', () => {
@@ -138,5 +149,129 @@ describe('createHeliusRiskProvider', () => {
       const message = err instanceof Error ? err.message : String(err);
       expect(message).not.toContain(secretKey);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F9: mega-holder / stablecoin mint risk-unavailable handling
+// ---------------------------------------------------------------------------
+
+describe('isTokenAccountsUnavailableError', () => {
+  it('is true only for a -32600 "too many accounts" HeliusRpcError', () => {
+    expect(
+      isTokenAccountsUnavailableError(
+        new HeliusRpcError('getTokenLargestAccounts', -32600, 'Too many accounts requested (5000000 pubkeys), try adding filters')
+      )
+    ).toBe(true);
+    // case-insensitive on the message
+    expect(isTokenAccountsUnavailableError(new HeliusRpcError('getTokenLargestAccounts', -32600, 'TOO MANY ACCOUNTS'))).toBe(true);
+  });
+
+  it('is false for a different -32600 message, a different code, or a non-HeliusRpcError', () => {
+    expect(isTokenAccountsUnavailableError(new HeliusRpcError('getTokenLargestAccounts', -32600, 'Invalid params'))).toBe(false);
+    expect(isTokenAccountsUnavailableError(new HeliusRpcError('getTokenSupply', -32000, 'too many accounts'))).toBe(false);
+    expect(isTokenAccountsUnavailableError(new Error('too many accounts requested'))).toBe(false);
+    expect(isTokenAccountsUnavailableError(null)).toBe(false);
+    expect(isTokenAccountsUnavailableError(undefined)).toBe(false);
+  });
+
+  it('is method-specific: the SAME code+message from a non-largest-accounts call is not degraded', () => {
+    // Only getTokenLargestAccounts hits the holder-sampling limit; the identical
+    // code+message from any other method must still propagate as a real error.
+    expect(
+      isTokenAccountsUnavailableError(
+        new HeliusRpcError('getTokenSupply', -32600, 'Too many accounts requested (5000000 pubkeys), try adding filters')
+      )
+    ).toBe(false);
+  });
+});
+
+describe('buildUnavailableRiskReport', () => {
+  it('surfaces holder_data_unavailable (warn) with zero penalty — unknown, not clean/safe', () => {
+    const report = buildUnavailableRiskReport();
+    // NOT an empty (falsely-clean) report
+    expect(report.flags).not.toEqual([]);
+    const flag = report.flags.find((f) => f.id === 'holder_data_unavailable');
+    expect(flag).toBeDefined();
+    expect(flag!.severity).toBe('warn');
+    // penalty 0 => flow-score formula ((1 - penalty) * 5) is unchanged.
+    expect(report.penalty).toBe(0);
+  });
+});
+
+describe('createHeliusRiskProvider — mega-holder mint (-32600 too many accounts)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubTooManyAccounts() {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string);
+      if (body.method === 'getTokenLargestAccounts') {
+        return new Response(JSON.stringify(TOO_MANY_ACCOUNTS_ERROR), { status: 200 });
+      }
+      if (body.method === 'getTokenSupply') {
+        return new Response(JSON.stringify(supplyFixture), { status: 200 });
+      }
+      throw new Error(`unexpected method ${body.method}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  it('does not crash/throw scoring — resolves to a RiskReport', async () => {
+    stubTooManyAccounts();
+    const provider = createHeliusRiskProvider({ HELIUS_API_KEY: 'k' });
+    await expect(provider!.getTokenRisk('SOLANA', MINT)).resolves.toBeDefined();
+  });
+
+  it('marks the token risk unknown/unavailable, NOT clean/safe', async () => {
+    stubTooManyAccounts();
+    const provider = createHeliusRiskProvider({ HELIUS_API_KEY: 'k' });
+    const report = await provider!.getTokenRisk('SOLANA', MINT);
+    expect(report.flags.some((f) => f.id === 'holder_data_unavailable')).toBe(true);
+    expect(report.flags).not.toEqual([]); // never the empty clean report
+    expect(report.penalty).toBe(0); // no scoring-formula change
+  });
+
+  it('repeated cycles keep degrading gracefully (no per-cycle fatal throw/spam)', async () => {
+    stubTooManyAccounts();
+    const provider = createHeliusRiskProvider({ HELIUS_API_KEY: 'k' });
+    for (let i = 0; i < 5; i++) {
+      const report = await provider!.getTokenRisk('SOLANA', MINT);
+      expect(report.flags.some((f) => f.id === 'holder_data_unavailable')).toBe(true);
+    }
+  });
+
+  it('a DIFFERENT RPC error is NOT swallowed — still propagates', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(init.body as string);
+        if (body.method === 'getTokenLargestAccounts') {
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: '1', error: { code: -32000, message: 'server error' } }), { status: 200 });
+        }
+        return new Response(JSON.stringify(supplyFixture), { status: 200 });
+      })
+    );
+    const provider = createHeliusRiskProvider({ HELIUS_API_KEY: 'k' });
+    await expect(provider!.getTokenRisk('SOLANA', MINT)).rejects.toThrow();
+  });
+
+  it('the normal (sampleable) token path is unaffected — real concentration flags, no unavailable flag', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(init.body as string);
+        if (body.method === 'getTokenLargestAccounts') {
+          return new Response(JSON.stringify(largestAccountsFixture), { status: 200 });
+        }
+        return new Response(JSON.stringify(supplyFixture), { status: 200 });
+      })
+    );
+    const provider = createHeliusRiskProvider({ HELIUS_API_KEY: 'k' });
+    const report = await provider!.getTokenRisk('SOLANA', MINT);
+    expect(report.flags.some((f) => f.id === 'top_holder_concentration')).toBe(true);
+    expect(report.flags.some((f) => f.id === 'holder_data_unavailable')).toBe(false);
   });
 });
