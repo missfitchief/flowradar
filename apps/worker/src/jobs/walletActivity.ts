@@ -9,6 +9,7 @@
 // scheduled tick for other wallets.
 
 import { ingestNormalizedTxs } from '@flowradar/db';
+import { isRateLimitError } from '@flowradar/providers';
 import type { Chain, NormalizedTx } from '@flowradar/core';
 import type { JobContext } from '../context';
 
@@ -27,16 +28,28 @@ export async function run(ctx: JobContext): Promise<void> {
 
   let totalIngestedTxs = 0;
   let walletsWithErrors = 0;
+  let walletsRateLimited = 0;
 
+  // Sequential by design: each wallet is awaited before the next, so the
+  // provider's shared rate limiter (one instance per cached provider) meters
+  // the whole cycle rather than a burst of concurrent calls. A single wallet's
+  // provider error — including a provider throttle (429) that survived the
+  // adapter's own backoff/retries — is caught and recorded per-wallet, never
+  // rethrown, so it can't abort the rest of the cycle.
   for (const wallet of wallets) {
     try {
       const ingestedCount = await pollAndIngestWallet(ctx, wallet.address, wallet.chain);
       totalIngestedTxs += ingestedCount;
     } catch (err) {
       walletsWithErrors += 1;
+      const rateLimited = isRateLimitError(err);
+      if (rateLimited) walletsRateLimited += 1;
       await recordSyncFailure(prisma, wallet.chain, wallet.address, err);
       log.error(`walletActivity: failed to poll wallet ${wallet.address}`, {
         chain: wallet.chain,
+        // Honest classification: a provider throttle is rate_limited, not an
+        // auth_error or unknown failure (live-validation finding 2026-07-07).
+        kind: rateLimited ? 'rate_limited' : 'provider_error',
         error: err instanceof Error ? err.message : String(err)
       });
     }
@@ -45,7 +58,8 @@ export async function run(ctx: JobContext): Promise<void> {
   log.info('walletActivity cycle complete', {
     walletsPolled: wallets.length,
     txsIngested: totalIngestedTxs,
-    walletsWithErrors
+    walletsWithErrors,
+    walletsRateLimited
   });
 }
 
