@@ -172,6 +172,33 @@ const DEFAULT_INFLOW_SPIKE_MULT = 3;
 const TOP_HOLDER_COUNT = 5;
 
 // ---------------------------------------------------------------------------
+// Window bounds
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves the [from, to] window bounds an aggregate uses, from a token's
+ * latest-trade timestamp, the current time, and the window length in minutes.
+ *
+ * Anchors `to` to the latest trade (so a token stops "advancing" its window
+ * once its last trade is in the past) unless that trade is at/after `now`, in
+ * which case `to = now`; `from = to − windowMinutes`.
+ *
+ * Extracted so the DB layer (fetchAggregateInputs) can compute the SAME bounds
+ * and fetch only the market snapshots aggregateWindow will actually read
+ * (latest ≤ to, latest ≤ from) instead of a token's full snapshot history —
+ * making that bounded query score-exact by construction.
+ */
+export function resolveWindowBounds(
+  latestTradeTs: number | null,
+  now: Date,
+  windowMinutes: number
+): { from: Date; to: Date } {
+  const to = latestTradeTs !== null && latestTradeTs < now.getTime() ? new Date(latestTradeTs) : now;
+  const from = new Date(to.getTime() - windowMinutes * MIN_MS);
+  return { from, to };
+}
+
+// ---------------------------------------------------------------------------
 // aggregateWindow
 // ---------------------------------------------------------------------------
 
@@ -184,8 +211,7 @@ export function aggregateWindow(input: AggregateWindowInput): TokenWindowAggrega
     (max, t) => (max === null || t.ts.getTime() > max ? t.ts.getTime() : max),
     null
   );
-  const to = latestTradeTs !== null && latestTradeTs < now.getTime() ? new Date(latestTradeTs) : now;
-  const from = new Date(to.getTime() - windowMinutes * MIN_MS);
+  const { from, to } = resolveWindowBounds(latestTradeTs, now, windowMinutes);
 
   const walletById = new Map(wallets.map((w) => [w.walletId, w]));
   const clusterByWallet = new Map(clusters.map((c) => [c.walletId, c.clusterId]));

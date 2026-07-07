@@ -90,7 +90,13 @@ export async function runFlowScoringPass(
 
   for (const token of tokensWithTrades) {
     try {
-      const inputs = await fetchAggregateInputs(prisma, token.id, settings);
+      // F8: bound the market-snapshot load to only the points aggregateWindow
+      // reads for this 24h window (score-exact) instead of the token's full,
+      // ever-growing snapshot history.
+      const inputs = await fetchAggregateInputs(prisma, token.id, settings, {
+        now,
+        windows: [WINDOW_MINUTES_1440]
+      });
       if (inputs.trades.length === 0) {
         skippedNoWindow += 1;
         continue;

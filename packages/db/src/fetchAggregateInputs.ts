@@ -11,19 +11,19 @@
 // pass) both call this instead of writing their own queries.
 //
 // Scope: fetches the token's FULL trade history (all BUY/SELL rows, no time
-// bound) and FULL market-snapshot history — aggregateWindow itself needs the
-// complete trailing history to compute newSmartBuyers ("first trade ever"),
-// trailingBuyVolumeUsd (the window immediately before `from`), and
-// tokenAgeDays (earliest market point). This is safe at the current
-// mock/seed scale (~920 trades across 28 tokens total, per progress.md) —
-// a real-scale deployment would need this narrowed to a bounded lookback,
-// but that's out of this task's scope (no task brief asks for pagination
-// here, and every existing worker job in this codebase makes the same
-// "small dataset, full scan is fine" assumption — see e.g.
-// apps/web/app/wallets/page.tsx's own header comment).
+// bound) — aggregateWindow needs the complete trailing history to compute
+// newSmartBuyers ("first trade ever") and trailingBuyVolumeUsd (the window
+// immediately before `from`), so trades genuinely can't be windowed without
+// changing scores. The MARKET-snapshot load, by contrast, is BOUNDED when a
+// caller passes `marketWindow` (F8): aggregateWindow only ever reads the
+// earliest snapshot (tokenAgeDays) plus the latest snapshot ≤ to and ≤ from,
+// so fetching just those points is score-exact — and it stops the unbounded
+// growth of loading a token's full snapshot history every cycle (marketData
+// appends one snapshot per token per cycle). Callers that don't pass
+// marketWindow (backtest replay, tests) keep the original full-history load.
 
 import type { PrismaClient } from '@prisma/client';
-import { isProfitableWallet } from '@flowradar/core';
+import { isProfitableWallet, resolveWindowBounds } from '@flowradar/core';
 import type { Settings } from '@flowradar/core';
 import type {
   ClusterMembershipInput,
@@ -40,6 +40,77 @@ export interface AggregateInputs {
 }
 
 /**
+ * Optional bounded-market-load hint (F8). When supplied, only the market
+ * snapshots aggregateWindow will read are fetched — the earliest (token age)
+ * plus the latest ≤ to and ≤ from for EACH window in `windows` — instead of
+ * the token's full (unboundedly-growing) snapshot history. Score-exact only if
+ * `now` + `windows` match what the caller then feeds aggregateWindow (`to` is
+ * window-independent; `from = to − window`). Omit for the full-history load.
+ */
+export interface AggregateMarketWindow {
+  now: Date;
+  windows: number[];
+}
+
+interface MarketRow {
+  ts: Date;
+  marketCapUsd: unknown;
+  liquidityUsd: unknown;
+}
+
+const MARKET_SELECT = { ts: true, marketCapUsd: true, liquidityUsd: true } as const;
+
+/**
+ * Bounded (F8) or full market-snapshot load. Bounded returns the deduped set of
+ * {earliest, latest ≤ to, latest ≤ from(each window)} — exactly the points
+ * aggregateWindow reads — so scores are identical to the full-history load.
+ */
+async function loadMarketRows(
+  prisma: PrismaClient,
+  tokenId: string,
+  latestTradeTs: number | null,
+  marketWindow: AggregateMarketWindow | undefined
+): Promise<MarketRow[]> {
+  // Empty `windows` would fetch no `from` point (a divergence vs full history),
+  // so treat it — like a missing marketWindow — as the safe full-history load.
+  if (!marketWindow || marketWindow.windows.length === 0) {
+    return prisma.tokenMarketSnapshot.findMany({
+      where: { tokenId },
+      orderBy: [{ ts: 'asc' }, { id: 'asc' }],
+      select: MARKET_SELECT
+    });
+  }
+  // `to` is window-independent (resolveWindowBounds ignores the minutes arg for
+  // `to`); one boundary time per window gives its `from`. The secondary `id`
+  // ordering makes each boundary pick the SAME physical row the full path
+  // would (whose stable ts-sort resolves equal-ts ties by the id-asc load
+  // order) — robust even if a future writer ever emits two snapshots at the
+  // identical ms (the live marketData pipeline writes one per token per cycle,
+  // so this is belt-and-suspenders).
+  const { to } = resolveWindowBounds(latestTradeTs, marketWindow.now, marketWindow.windows[0] ?? 0);
+  const boundaryTimes = [to, ...marketWindow.windows.map((w) => new Date(to.getTime() - w * 60_000))];
+  const [earliest, ...boundaryRows] = await Promise.all([
+    prisma.tokenMarketSnapshot.findFirst({
+      where: { tokenId },
+      orderBy: [{ ts: 'asc' }, { id: 'asc' }],
+      select: MARKET_SELECT
+    }),
+    ...boundaryTimes.map((t) =>
+      prisma.tokenMarketSnapshot.findFirst({
+        where: { tokenId, ts: { lte: t } },
+        orderBy: [{ ts: 'desc' }, { id: 'desc' }],
+        select: MARKET_SELECT
+      })
+    )
+  ]);
+  const byTs = new Map<number, MarketRow>();
+  for (const row of [earliest, ...boundaryRows]) {
+    if (row) byTs.set(row.ts.getTime(), row);
+  }
+  return [...byTs.values()].sort((a, b) => a.ts.getTime() - b.ts.getTime());
+}
+
+/**
  * Fetches every row aggregateWindow needs for one token: the token's full
  * BUY/SELL trade history, WalletInfoInput for every wallet that appears in
  * that trade history (isWatched + latest WalletStats-derived
@@ -51,7 +122,8 @@ export interface AggregateInputs {
 export async function fetchAggregateInputs(
   prisma: PrismaClient,
   tokenId: string,
-  settings: Settings
+  settings: Settings,
+  marketWindow?: AggregateMarketWindow
 ): Promise<AggregateInputs> {
   const tradeRows = await prisma.walletTokenTrade.findMany({
     where: { tokenId, action: { in: ['BUY', 'SELL'] } },
@@ -76,6 +148,10 @@ export async function fetchAggregateInputs(
   }));
 
   const walletIds = [...new Set(trades.map((t) => t.walletId))];
+  const latestTradeTs = trades.reduce<number | null>(
+    (max, t) => (max === null || t.ts.getTime() > max ? t.ts.getTime() : max),
+    null
+  );
 
   const [walletRows, statsRows, classificationRows, clusterRows, marketRows] = await Promise.all([
     prisma.wallet.findMany({
@@ -103,11 +179,7 @@ export async function fetchAggregateInputs(
       where: { walletId: { in: walletIds } },
       select: { walletId: true, clusterId: true }
     }),
-    prisma.tokenMarketSnapshot.findMany({
-      where: { tokenId },
-      orderBy: { ts: 'asc' },
-      select: { ts: true, marketCapUsd: true, liquidityUsd: true }
-    })
+    loadMarketRows(prisma, tokenId, latestTradeTs, marketWindow)
   ]);
 
   const isWatchedByWallet = new Map(walletRows.map((w) => [w.id, w.isWatched]));

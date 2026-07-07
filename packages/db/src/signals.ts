@@ -99,7 +99,13 @@ export async function runSignalDetectionPass(
 
   for (const token of tokensWithTrades) {
     try {
-      const inputs = await fetchAggregateInputs(prisma, token.id, settings);
+      // F8: bound the market-snapshot load to only the points aggregateWindow
+      // reads for these two windows (30m + 24h) — score-exact, and avoids
+      // re-loading the token's full, ever-growing snapshot history each cycle.
+      const inputs = await fetchAggregateInputs(prisma, token.id, settings, {
+        now,
+        windows: [WINDOW_MINUTES_30, WINDOW_MINUTES_1440]
+      });
       if (inputs.trades.length === 0) {
         continue;
       }
