@@ -15,6 +15,8 @@ export * from './candidateValidation';
 export * from './tokenTopTraderBackfill';
 export * from './dune/duneOverlap';
 export * from './dune/localOverlap';
+export * from './social/queries';
+export * from './social/overlap';
 export * from './signals';
 export * from './backtest';
 export * from './replayRunner';
