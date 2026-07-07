@@ -36,6 +36,7 @@ export * from './backtest/shadow';
 export * from './backtest/replayRequest';
 export * from './feed/explain';
 export * from './candidates/validate';
+export * from './social/index';
 
 // Graph module: the unused sketch GraphNode/GraphEdge/RawGraphEdge that used
 // to live in ./types (never implemented or consumed — confirmed by repo-wide
