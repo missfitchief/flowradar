@@ -6,8 +6,11 @@ import net from 'node:net';
 import { DEFAULT_SETTINGS } from '@flowradar/core';
 import type { Chain } from '@flowradar/core';
 import type { SocialSourceProvider, SocialPostRaw, FetchPostsOpts } from '@flowradar/providers';
+import { MockSocialSource, createMockWorld } from '@flowradar/providers';
 import { prisma } from '../src/client';
 import { runSocialIngestPass } from '../src/social/ingest';
+import { getSocialSignalOverlap } from '../src/social/overlap';
+import { getRecentMentions } from '../src/social/queries';
 
 const SOURCE_PREFIX = 'T_D_socialSource';
 // NOTE: base58-safe (no `_`, `0`, `O`, `I`, `l`) and unbroken so extractMentions'
@@ -344,5 +347,211 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runSocialIngestPass', ()
     await runSocialIngestPass(prisma, DEFAULT_SETTINGS, (s) => (s.name === sourceName ? provider : null));
     expect(provider.lastSince).not.toBeUndefined();
     expect(provider.lastSince!.getTime()).toBe(firstSyncAt!.getTime());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task G — cross-cutting end-to-end gate: drives the REAL MockSocialSource
+// (not a hand-rolled fixture provider) through runSocialIngestPass, exactly
+// as apps/worker/src/jobs/socialIngest.ts's getSharedMockSocialSource() does
+// in MOCK_MODE, and asserts the full chain works: mentions created +
+// token-linked where a matching Token exists, the wallet-signal overlap join
+// returns confluence rows for a token with BOTH legs, and a disabled source
+// is skipped cleanly with the provider never invoked. Same probePort/
+// prefix-cleanup/serialized-db-project discipline as the rest of this file;
+// shares the module-level `prisma` client (no second PrismaClient), disposed
+// only in this block's own afterAll-independent module afterAll above.
+// ---------------------------------------------------------------------------
+
+const GATE_TOKEN_PREFIX = 'TGgateTok';
+const GATE_SOURCE_PREFIX = 'TGgateSrc';
+
+// Each gate test gets its OWN world seed so the mock world's deterministic
+// NOVA address differs per test (createMockWorld's address generation is
+// derived from `seed`, not wall-clock time) — this avoids two tests (or two
+// reruns of the same test) racing to create a Token at the SAME real
+// mock-world address, which is not itself GATE_TOKEN_PREFIX-scoped and so
+// would never be caught by the prefix-based cleanup below.
+//
+// genesis is anchored to "now minus a small buffer" (NOT a hardcoded past
+// date) so every MockSocialSource post (offsetMin up to 40 minutes past
+// genesis) lands well inside getSocialSignalOverlap's windowMinutes lookback
+// — a fixed past-dated genesis would eventually (and did) age out of that
+// window and silently break the overlap-join assertion.
+let gateWorldSeedCounter = 900000;
+function gateWorld() {
+  gateWorldSeedCounter += 1;
+  const genesis = new Date(Date.now() - 60 * 60_000); // 1h ago
+  return createMockWorld({ seed: gateWorldSeedCounter, genesis });
+}
+
+async function makeGateSourceRow(name: string, overrides: Partial<{ enabled: boolean }> = {}) {
+  return prisma.socialSource.create({
+    data: {
+      name,
+      platform: 'telegram',
+      enabled: overrides.enabled ?? true,
+      chainSupport: ['SOLANA'],
+      apiKeyEnvName: null,
+      rateLimitPerMinute: 30
+    }
+  });
+}
+
+// Tracks the exact mock-world token addresses this suite has created Token
+// rows for (they are NOT GATE_TOKEN_PREFIX-prefixed — they're the real
+// deterministic addresses from createMockWorld), so cleanup can delete them
+// precisely instead of relying on a prefix match.
+const gateCreatedAddresses = new Set<string>();
+
+async function gateCleanup(): Promise<void> {
+  await prisma.socialMention.deleteMany({ where: { source: { name: { startsWith: GATE_SOURCE_PREFIX } } } });
+  await prisma.socialSource.deleteMany({ where: { name: { startsWith: GATE_SOURCE_PREFIX } } });
+  if (gateCreatedAddresses.size > 0) {
+    const addresses = [...gateCreatedAddresses];
+    await prisma.signal.deleteMany({ where: { token: { address: { in: addresses } } } });
+    await prisma.token.deleteMany({ where: { address: { in: addresses } } });
+  }
+  await prisma.signal.deleteMany({ where: { token: { address: { startsWith: GATE_TOKEN_PREFIX } } } });
+  await prisma.token.deleteMany({ where: { address: { startsWith: GATE_TOKEN_PREFIX } } });
+}
+
+const gateDbReachable = await probePort('localhost', 5439);
+
+describe.skipIf(!gateDbReachable)('runSocialIngestPass + MockSocialSource (Task G end-to-end gate)', () => {
+  beforeEach(async () => {
+    await gateCleanup();
+  });
+
+  afterAll(async () => {
+    await gateCleanup();
+  });
+
+  it('a real MockSocialSource run creates SocialMention rows, token-linking the ones matching a seeded Token', async () => {
+    const sourceName = `${GATE_SOURCE_PREFIX}_mock`;
+    await makeGateSourceRow(sourceName);
+
+    const world = gateWorld();
+    const novaAddress = world.tokens.find((t) => t.symbol === 'NOVA')!.address;
+
+    // Seed a real Token at the mock world's NOVA address so the extractor's
+    // address-mention (tg-0001, tg-0004) resolves to a genuine tokenId — the
+    // "token-linked where a matching Token exists" leg of the gate.
+    gateCreatedAddresses.add(novaAddress);
+    const linkedToken = await prisma.token.create({
+      data: {
+        chain: 'SOLANA',
+        address: novaAddress,
+        symbol: 'NOVA',
+        name: 'Nova (gate token)',
+        decimals: 9,
+        firstSeenAt: new Date(),
+        riskFlags: []
+      }
+    });
+
+    const provider = new MockSocialSource(world, { name: sourceName });
+    const result = await runSocialIngestPass(prisma, DEFAULT_SETTINGS, (s) => (s.name === sourceName ? provider : null));
+
+    expect(result.errors).toBe(0);
+    // MockSocialSource's 8-post fixture yields >=9 mentions (tg-0004 alone
+    // contributes 2 tokens); every post is scanned regardless of outcome.
+    expect(result.mentionsUpserted).toBeGreaterThanOrEqual(8);
+    expect(result.postsScanned).toBeGreaterThanOrEqual(8);
+
+    const mentions = await prisma.socialMention.findMany({ where: { source: { name: sourceName } } });
+    expect(mentions.length).toBeGreaterThanOrEqual(8);
+
+    // At least one mention is token-LINKED to the seeded NOVA Token.
+    const linked = mentions.filter((m) => m.tokenId === linkedToken.id);
+    expect(linked.length).toBeGreaterThanOrEqual(1);
+
+    // QUIET has no seeded Token row -> its mentions are gracefully UNLINKED
+    // (tokenId null) rather than dropped.
+    const unlinkedQuiet = mentions.filter((m) => m.tokenId === null && m.tokenSymbol === 'QUIET');
+    expect(unlinkedQuiet.length).toBeGreaterThanOrEqual(1);
+
+    // Snippet safety (Spec §1): every stored snippet <=280 chars.
+    for (const m of mentions) {
+      expect(m.contentSnippet.length).toBeLessThanOrEqual(280);
+      expect(m.normalizedSnippet.length).toBeLessThanOrEqual(280);
+    }
+
+    // The 3-author copy-paste cluster (tg-0005/6/7) shares a contentHash.
+    const hashes = new Set(mentions.map((m) => m.contentHash));
+    expect(hashes.size).toBeLessThan(mentions.length);
+
+    // getRecentMentions surfaces them end-to-end (feed query works).
+    const recent = await getRecentMentions(prisma, { limit: 100 });
+    expect(recent.some((r) => r.tokenSymbol === 'NOVA' && r.tokenId === linkedToken.id)).toBe(true);
+  });
+
+  it('overlap join returns a confluence row for a token with BOTH a MockSocialSource mention and a wallet Signal', async () => {
+    const sourceName = `${GATE_SOURCE_PREFIX}_overlap`;
+    await makeGateSourceRow(sourceName);
+
+    const world = gateWorld();
+    const novaAddress = world.tokens.find((t) => t.symbol === 'NOVA')!.address;
+    gateCreatedAddresses.add(novaAddress);
+    const token = await prisma.token.create({
+      data: {
+        chain: 'SOLANA',
+        address: novaAddress,
+        symbol: 'NOVA',
+        name: 'Nova (overlap gate token)',
+        decimals: 9,
+        firstSeenAt: new Date(),
+        riskFlags: []
+      }
+    });
+
+    // The wallet-driven leg of the confluence: a real Signal on this token.
+    await prisma.signal.create({
+      data: {
+        tokenId: token.id,
+        rule: 'A',
+        severity: 'HIGH',
+        reasons: ['multi-wallet accumulation'],
+        walletCount: 5,
+        uniqueEntityCount: 4,
+        netFlowUsd: 1000,
+        mcapAtTrigger: 500_000,
+        status: 'active',
+        triggeredAt: new Date()
+      }
+    });
+
+    // The social leg: run the REAL MockSocialSource, which mentions NOVA's
+    // (now-linked) address across several posts.
+    const provider = new MockSocialSource(world, { name: sourceName });
+    await runSocialIngestPass(prisma, DEFAULT_SETTINGS, (s) => (s.name === sourceName ? provider : null));
+
+    const overlap = await getSocialSignalOverlap(prisma, { windowMinutes: 1440 });
+    const row = overlap.find((r) => r.tokenId === token.id);
+    expect(row).toBeDefined();
+    expect(row!.socialMentionCount).toBeGreaterThanOrEqual(1);
+    expect(row!.firedSignals.some((s) => s.rule === 'A')).toBe(true);
+  });
+
+  it('a disabled source is skipped cleanly — MockSocialSource never invoked, no mentions written', async () => {
+    const sourceName = `${GATE_SOURCE_PREFIX}_disabled`;
+    await makeGateSourceRow(sourceName, { enabled: false });
+
+    const world = gateWorld();
+    let called = 0;
+    const provider = new MockSocialSource(world, { name: sourceName });
+    const originalFetchPosts = provider.fetchPosts.bind(provider);
+    provider.fetchPosts = async (chain: Chain, opts?: FetchPostsOpts) => {
+      called += 1;
+      return originalFetchPosts(chain, opts);
+    };
+
+    const result = await runSocialIngestPass(prisma, DEFAULT_SETTINGS, (s) => (s.name === sourceName ? provider : null));
+
+    expect(result.sourcesSkippedDisabled).toBeGreaterThanOrEqual(1);
+    expect(called).toBe(0);
+
+    const mentions = await prisma.socialMention.findMany({ where: { source: { name: sourceName } } });
+    expect(mentions).toHaveLength(0);
   });
 });

@@ -99,3 +99,17 @@ describe('/social page (Task E — empty state, spam collapse, force-dynamic, wi
     expect(nav).toMatch(/\{ label: 'Social', href: '\/social' \}/);
   });
 });
+
+describe('token detail social section (Task G gate)', () => {
+  const tokenPage = read('app', 'tokens', '[id]', 'page.tsx');
+
+  it('token detail page renders <SocialSection /> (shadow-only social mentions)', () => {
+    expect(tokenPage).toMatch(/<SocialSection\b/);
+  });
+
+  it("SocialSection reads this token's mentions + velocity (shadow-only, read-only)", () => {
+    const section = read('components', 'tokens', 'SocialSection.tsx');
+    expect(section).toMatch(/mentions/);
+    expect(section).toMatch(/velocity/);
+  });
+});
