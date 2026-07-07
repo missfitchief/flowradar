@@ -72,6 +72,7 @@ import * as externalWalletSource from './jobs/externalWalletSource';
 import * as walletCandidateValidation from './jobs/walletCandidateValidation';
 import * as tokenTopTraderBackfill from './jobs/tokenTopTraderBackfill';
 import * as duneQuery from './jobs/duneQuery';
+import * as socialIngest from './jobs/socialIngest';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const HOUR_MS = 60 * 60 * 1000;
@@ -241,6 +242,16 @@ async function main(): Promise<void> {
       name: 'duneQuery',
       run: duneQuery.run,
       intervalSec: settings.connectors.dune.syncHours * 3600
+    },
+    // socialIngest (Task D, Social Intelligence): shadow-only inbound social
+    // mention ingest. Registered on settings.connectors.social.syncHours (6h
+    // default) — same *3600 hours->seconds conversion as every other
+    // hours-denominated interval above. INBOUND-ONLY / SHADOW-ONLY: never emits
+    // an Alert and never touches the wallet/signal/scoring pipeline.
+    {
+      name: 'socialIngest',
+      run: socialIngest.run,
+      intervalSec: settings.connectors.social.syncHours * 3600
     }
   ];
 
