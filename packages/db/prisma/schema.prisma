@@ -310,6 +310,7 @@ model Token {
   alerts            Alert[]
   sourceRotations   ProfitRotationSignal[] @relation("ProfitRotationSourceToken")
   destRotations     ProfitRotationSignal[] @relation("ProfitRotationDestToken")
+  socialMentions    SocialMention[]
 
   @@unique([chain, address])
   @@map("tokens")
@@ -999,4 +1000,87 @@ model BacktestRun {
 
   @@index([kind, startedAt])
   @@map("backtest_runs")
+}
+
+// ---------------------------------------------------------------------------
+// 26. SocialSource (Social Intelligence — spec §1; operator-managed registry)
+// ---------------------------------------------------------------------------
+
+/// One operator-registered inbound social reader (Telegram/Discord channel,
+/// or a `manual` registry-only entry with no automated reader this phase).
+/// Mirrors ExternalWalletSource's role for the wallet-candidate pipeline, but
+/// is ENTIRELY SEPARATE from it: social data is shadow-only confluence
+/// evidence and never feeds FlowScore, signal rules, wallet scoring, or
+/// production alerts. `apiKeyEnvName` stores the env VAR NAME of the read
+/// credential (never a value), distinct from the outbound alert sender's
+/// TELEGRAM_BOT_TOKEN. `trustTier` is operator-assigned display/weighting
+/// confidence only — it never feeds scoring.
+model SocialSource {
+  id                 String    @id @default(cuid())
+  name               String    @unique
+  platform           String
+  externalId         String?
+  inviteLink         String?
+  notes              String?
+  trustTier          String    @default("medium")
+  enabled            Boolean   @default(true)
+  chainSupport       ChainId[]
+  apiKeyEnvName      String?
+  rateLimitPerMinute Int       @default(30)
+  status             String    @default("idle")
+  lastSyncAt         DateTime?
+  lastError          String?
+  failCount          Int       @default(0)
+  addedAt            DateTime  @default(now())
+  metadataJson       Json?
+
+  mentions           SocialMention[]
+
+  @@map("social_sources")
+}
+
+// ---------------------------------------------------------------------------
+// 27. SocialMention (Social Intelligence — spec §1; extractor output, shadow-only)
+// ---------------------------------------------------------------------------
+
+/// One extracted token mention from one social post. A post mentioning two
+/// tokens produces two rows; zero-token posts are NOT stored (only counted).
+/// `contentSnippet`/`normalizedSnippet` are SAFE, TRUNCATED (<=280 char)
+/// excerpts — never a full raw-message archive. `tokenId` is nullable: when
+/// the extracted token is not (yet) a Token row it stays null (graceful
+/// skip / "unlinked" in the UI). `dedupeKey` is NON-NULL
+/// (`${externalPostId}::${tokenAddress ?? '$'+tokenSymbol ?? 'none'}`), so
+/// @@unique([sourceId, dedupeKey]) makes re-ingest idempotent without
+/// NULLs-are-distinct surprises.
+model SocialMention {
+  id                String       @id @default(cuid())
+  sourceId          String
+  source            SocialSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  platform          String
+  externalPostId    String
+  authorHash        String?
+  postedAt          DateTime
+  ingestedAt        DateTime     @default(now())
+  chain             ChainId
+  contentSnippet    String
+  normalizedSnippet String
+  contentHash       String
+  mentionType       String
+  tokenAddress      String?
+  tokenSymbol       String?
+  tokenUrl          String?
+  tokenId           String?
+  token             Token?       @relation(fields: [tokenId], references: [id])
+  confidence        Int
+  spamScore         Int          @default(0)
+  spamReason        String?
+  dedupeKey         String
+  metadataJson      Json?
+
+  @@unique([sourceId, dedupeKey])
+  @@index([tokenId])
+  @@index([chain, tokenAddress])
+  @@index([postedAt])
+  @@index([contentHash])
+  @@map("social_mentions")
 }
