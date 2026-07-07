@@ -16,7 +16,7 @@
 4. **Social data is shadow-only confluence/evidence.** Never a primary data source.
 5. **No FlowScore formula changes.** `packages/core/src/scoring/flowScore.ts` untouched.
 6. **No signal threshold changes.** No changes to rule constants or `evaluateAllRules`.
-7. **No wallet scoring changes.** `walletScore.ts` and the candidate/promotion pipeline untouched.
+7. **No wallet scoring or CandidateWallet changes.** `walletScore.ts`, the `CandidateWallet` model, and the candidate/promotion pipeline are untouched (social is entirely separate from the wallet-candidate pipeline).
 8. **No BSC.** Solana-only extraction; schema stays chain-aware (`ChainId`) but default/only `SOLANA`.
 9. **`DUNE_EXECUTE_FRESH=false`; no Dune fresh execution.**
 10. **No secrets printed or committed.** `apiKeyEnvName` stores the env var NAME, never a value. `.env` stays gitignored.
@@ -28,7 +28,7 @@
 - Outbound social alerts; Discord/Telegram *sending*.
 - Feeding social signals into FlowScore or the signal engine.
 - A raw `SocialPost` archive table (future normalization; see §11).
-- Twitter/X ingestion (schema leaves room; only Telegram + Discord readers are built).
+- Twitter/X ingestion — out of this build. Only Telegram + Discord (+ `manual` registry) are built; `platform` is an open string, so a future reader can be added without a schema change.
 - Real group links / live credentials (adapters ship as config-gated stubs + mock fixtures).
 - Author de-anonymization (author identity is stored only as an opaque hash).
 
@@ -42,21 +42,25 @@
 ```
 id                 String   @id @default(cuid())
 name               String   @unique          // operator label, e.g. "alpha-callers-tg"
-platform           String                    // "telegram" | "discord" (String for extensibility)
-handle             String                    // group/channel identifier (opaque; may be a placeholder pre-link)
+platform           String                    // "telegram" | "discord" | "manual"
+externalId         String?                   // chat id / channel id if known (nullable pre-link)
+inviteLink         String?                   // optional invite/link
+notes              String?                   // optional operator notes
+trustTier          String   @default("medium") // "high" | "medium" | "low" — operator trust; shadow-only display/weight
 enabled            Boolean  @default(true)
 chainSupport       ChainId[]                 // default ["SOLANA"]
-apiKeyEnvName      String                    // env VAR NAME for this platform's read credential
+apiKeyEnvName      String?                   // env VAR NAME for the platform read credential; null for "manual"
 rateLimitPerMinute Int      @default(30)
 status             String   @default("idle") // idle|ok|error
 lastSyncAt         DateTime?
 lastError          String?
 failCount          Int      @default(0)
 addedAt            DateTime @default(now())  // for the manual-add UI display
-metadataJson       Json?
+metadataJson       Json?                     // e.g. { postsScanned } counter
 mentions           SocialMention[]
 @@map("social_sources")
 ```
+`platform: "manual"` = an operator-registered source with **no automated reader this phase** (registry entry only; the ingest job skips live-fetch for it, and in `MOCK_MODE` the mock source can still back it). `telegram`/`discord` have config-gated (stub) readers. `trustTier` is operator-assigned confidence, surfaced for display/weighting only — it never feeds scoring.
 
 ### `SocialMention` (extractor output — shadow-only)
 ```
@@ -69,8 +73,8 @@ authorHash        String?                    // opaque author id (NEVER a real h
 postedAt          DateTime
 ingestedAt        DateTime @default(now())
 chain             ChainId
-contentSnippet    String                     // trimmed raw snippet (display)
-normalizedSnippet String                     // lowercased/stripped, for copy-paste grouping
+contentSnippet    String                     // SAFE, TRUNCATED snippet (≤280 chars) — never a full raw-message archive
+normalizedSnippet String                     // lowercased/stripped (also ≤280), for copy-paste grouping
 contentHash       String                     // hash(normalizedSnippet) — copy-paste key
 mentionType       String                     // "address" | "ticker" | "url"
 tokenAddress      String?                    // extracted CA (from CA or URL); null for pure ticker
