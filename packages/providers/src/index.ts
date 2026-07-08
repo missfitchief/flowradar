@@ -25,3 +25,4 @@ export * from './bsc/goplus';
 export * from './bsc/stubs';
 export * from './candidates';
 export * from './social';
+export * from './confluence';

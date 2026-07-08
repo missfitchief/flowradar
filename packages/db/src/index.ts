@@ -11,6 +11,8 @@ export * from './walletStatsRefresh';
 export * from './walletDiscovery';
 export * from './externalWalletSource';
 export * from './social/ingest';
+export * from './confluence/ingest';
+export * from './confluence/queries';
 export * from './candidateValidation';
 export * from './tokenTopTraderBackfill';
 export * from './dune/duneOverlap';

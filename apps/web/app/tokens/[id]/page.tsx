@@ -13,10 +13,11 @@ import { WalletBuyersTable } from '@/components/tokens/WalletBuyersTable';
 import type { BuyerWalletLabel, BuyerWalletRow } from '@/components/tokens/WalletBuyersTable';
 import { RiskPanel } from '@/components/tokens/RiskPanel';
 import type { RiskFlagRow } from '@/components/tokens/RiskPanel';
-import { getTokenSocialMentions } from '@flowradar/db';
+import { getTokenSocialMentions, getTokenConfluence } from '@flowradar/db';
 import { computeMentionVelocity, DEFAULT_SETTINGS } from '@flowradar/core';
 import { SocialSection } from '@/components/tokens/SocialSection';
 import type { SocialMentionRowVM } from '@/components/tokens/SocialSection';
+import { ConfluencePanel } from '@/components/tokens/ConfluencePanel';
 import { fmtAge, fmtUsd } from '@/lib/format';
 
 // DB-backed detail page — must render per-request, never freeze at build time
@@ -77,7 +78,7 @@ export default async function TokenDetailPage({ params }: TokenDetailPageProps) 
 
   if (!token) notFound();
 
-  const [chain, latestMarket, latestFlow, marketSeries, flowHistory, trades, socialMentions] =
+  const [chain, latestMarket, latestFlow, marketSeries, flowHistory, trades, socialMentions, confluence] =
     await Promise.all([
       prisma.chain.findUnique({ where: { id: token.chain } }),
       prisma.tokenMarketSnapshot.findFirst({ where: { tokenId: token.id }, orderBy: { ts: 'desc' } }),
@@ -97,6 +98,7 @@ export default async function TokenDetailPage({ params }: TokenDetailPageProps) 
         },
       }),
       getTokenSocialMentions(prisma, token.id),
+      getTokenConfluence(prisma, token.id),
     ]);
 
   // ---------------------------------------------------------------------
@@ -330,6 +332,12 @@ export default async function TokenDetailPage({ params }: TokenDetailPageProps) 
           velocity={mentionVelocity}
           uiHideThreshold={socialCfg.spam.uiHideThreshold}
         />
+      </div>
+
+      {/* Confluence (shadow-only external/internal evidence — Task E) */}
+      <div>
+        <h2 className="mb-3 text-lg font-medium tracking-tight">Confluence</h2>
+        <ConfluencePanel confluence={confluence} />
       </div>
 
       <p className="text-xs text-muted-foreground">

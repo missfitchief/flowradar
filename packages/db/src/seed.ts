@@ -37,6 +37,7 @@ import { importWalletsCsv } from './csv/importWalletsCsv';
 import { runGraphSearch } from './graph/runSearch';
 import { runExternalWalletSourceSync } from './externalWalletSource';
 import { runSocialIngestPass } from './social/ingest';
+import { runExternalConfluencePass } from './confluence/ingest';
 import { runCandidateValidation } from './candidateValidation';
 import { runTokenOverlapSearch } from './dune/duneOverlap';
 
@@ -104,6 +105,11 @@ async function wipeAllTables(): Promise<void> {
   await prisma.tokenOverlapGroupResult.deleteMany();
   await prisma.tokenOverlapSearch.deleteMany();
   await prisma.duneQuerySource.deleteMany();
+  // TokenConfluenceSnapshot carries nullable FKs to Token (SET NULL) and
+  // ExternalConfluenceSource — wiped leaf-first, before token.deleteMany()
+  // below (Task D, External Confluence).
+  await prisma.tokenConfluenceSnapshot.deleteMany();
+  await prisma.externalConfluenceSource.deleteMany();
   await prisma.wallet.deleteMany();
   await prisma.token.deleteMany();
   await prisma.importJob.deleteMany();
@@ -398,6 +404,67 @@ async function seedSocialIngestPass(world: MockWorld, settings: Settings) {
     }
   );
   log('social ingest pass complete.', { ...result });
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3.8: ExternalConfluenceSource seed rows (Task D, External Confluence).
+// 2 example rows (holderscan + gmgn, BOTH DISABLED by default — no API key is
+// required to build/seed, per the design doc non-goal "every external provider
+// degrades to stub/missing_key/plan_required and the build stays green with
+// zero keys"). apiKeyEnvName is the env VAR NAME only, never a value (design
+// rule 13). Enabling a row requires an operator to supply the real key first.
+// ---------------------------------------------------------------------------
+
+const EXTERNAL_CONFLUENCE_SOURCE_SEED_ROWS = [
+  {
+    name: 'holderscan-holder-risk',
+    provider: 'holderscan',
+    apiKeyEnvName: 'HOLDERSCAN_API_KEY',
+    rateLimitPerMinute: 30,
+    notes: 'Optional/paid holder-risk provider — disabled until an operator supplies HOLDERSCAN_API_KEY + a plan that returns holder deltas/concentration. Reports missing_key/plan_required until then; never marks a token safe.'
+  },
+  {
+    name: 'gmgn-external-intel',
+    provider: 'gmgn',
+    apiKeyEnvName: 'GMGN_API_KEY',
+    rateLimitPerMinute: 30,
+    notes: 'Query-only external intel — disabled by default; stub until confirmed query-only docs/key. NEVER references swap/order/private-key/wallet endpoints (query-only, design rule 8).'
+  }
+] as const;
+
+async function bootstrapExternalConfluenceSources(): Promise<number> {
+  await prisma.externalConfluenceSource.createMany({
+    data: EXTERNAL_CONFLUENCE_SOURCE_SEED_ROWS.map((row) => ({
+      name: row.name,
+      provider: row.provider,
+      enabled: false,
+      apiKeyEnvName: row.apiKeyEnvName,
+      rateLimitPerMinute: row.rateLimitPerMinute,
+      metadataJson: { notes: row.notes }
+    }))
+  });
+  log('bootstrapped ExternalConfluenceSource rows (disabled by default).', {
+    count: EXTERNAL_CONFLUENCE_SOURCE_SEED_ROWS.length
+  });
+  return EXTERNAL_CONFLUENCE_SOURCE_SEED_ROWS.length;
+}
+
+/**
+ * Runs ONE runExternalConfluencePass (design doc "Worker integration") so a
+ * fresh `npm run db:seed` demonstrates the internal LiquidityRisk snapshots
+ * end-to-end. Both seeded external sources are DISABLED, so this pass only
+ * exercises Leg 1 (internal LiquidityRisk over every seeded Token that has a
+ * market snapshot) — deterministic, no provider, no key. The resolver returns
+ * null for any (disabled -> never-reached) source, same convention as the
+ * other mock-mode seed passes.
+ */
+async function seedExternalConfluencePass(settings: Settings) {
+  const result = await runExternalConfluencePass(prisma, settings, () => null, {
+    info: (msg, meta) => log(msg, meta),
+    error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+  });
+  log('external confluence pass complete.', { ...result });
   return result;
 }
 
@@ -2274,8 +2341,22 @@ async function main(): Promise<void> {
   const socialIngestResult = await seedSocialIngestPass(world, settings);
   log('social seed totals.', { ...socialIngestResult });
 
+  // Phase 3.8 (Task D, External Confluence): seed 2 example
+  // ExternalConfluenceSource rows (both disabled by default — no API key
+  // required). The pass itself (Leg 1: internal LiquidityRisk) is run further
+  // below, AFTER Phase 4's market snapshots exist (LiquidityRisk needs a
+  // TokenMarketSnapshot to compute from).
+  await bootstrapExternalConfluenceSources();
+
   // Phase 4: market snapshots FIRST.
   await seedMarketSnapshots(world, tokenIdByAddress);
+
+  // Phase 4.1 (Task D, External Confluence): ONE runExternalConfluencePass now
+  // that every token has a market snapshot — both seeded sources are disabled,
+  // so this only exercises the internal LiquidityRisk leg (deterministic, no
+  // provider/key required).
+  const externalConfluenceResult = await seedExternalConfluencePass(settings);
+  log('external confluence seed totals.', { ...externalConfluenceResult });
 
   // Phase 5(a): computed WalletStats for smart_money/human_like/whale wallets.
   await seedComputedWalletStats(world);
