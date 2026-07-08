@@ -21,7 +21,7 @@ import path from 'node:path';
 import { DEFAULT_SETTINGS } from '@flowradar/core';
 import type { Chain, Settings } from '@flowradar/core';
 import { computeWalletScore } from '@flowradar/core';
-import { createMockWorld, GRAPH_DEMO_ROOT_ADDRESS, MockCandidateSource, MockProvider, STATIC_REGISTRY_ENTRIES, getPoisonedAddresses, createMockDuneClient, getDunePoisonedAddresses } from '@flowradar/providers';
+import { createMockWorld, GRAPH_DEMO_ROOT_ADDRESS, MockCandidateSource, MockSocialSource, MockProvider, STATIC_REGISTRY_ENTRIES, getPoisonedAddresses, createMockDuneClient, getDunePoisonedAddresses } from '@flowradar/providers';
 import type { MockWorld } from '@flowradar/providers';
 import type { Prisma } from '@prisma/client';
 import { prisma } from './client';
@@ -36,6 +36,7 @@ import { runHistoricalReplay } from './replayRunner';
 import { importWalletsCsv } from './csv/importWalletsCsv';
 import { runGraphSearch } from './graph/runSearch';
 import { runExternalWalletSourceSync } from './externalWalletSource';
+import { runSocialIngestPass } from './social/ingest';
 import { runCandidateValidation } from './candidateValidation';
 import { runTokenOverlapSearch } from './dune/duneOverlap';
 
@@ -90,6 +91,11 @@ async function wipeAllTables(): Promise<void> {
   // CandidateWallet carries an FK to Wallet (promotedWalletId) — wiped
   // before wallet.deleteMany() (Task 34, Wave 4.5).
   await prisma.candidateWallet.deleteMany();
+  // SocialMention carries FKs to SocialSource (Cascade) and Token (nullable) —
+  // wiped leaf-first, before token.deleteMany() below (Task D, Social
+  // Intelligence).
+  await prisma.socialMention.deleteMany();
+  await prisma.socialSource.deleteMany();
   await prisma.externalWalletSource.deleteMany();
   // TokenOverlapWalletResult/GroupResult carry an FK to TokenOverlapSearch
   // (Task 37, Wave 4.6) — wiped leaf-first, same convention as every other
@@ -324,6 +330,74 @@ async function seedExternalWalletSourceSync(world: MockWorld, settings: Settings
     }
   );
   log('external wallet source sync pass complete.', { ...result });
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3.7: SocialSource seed rows + one social ingest pass (Task D, Social
+// Intelligence, Spec §2/§6). 2 example rows (1 telegram, 1 discord, both
+// enabled) so `npm run db:seed` demonstrates the /social pipeline end-to-end
+// in MOCK_MODE. apiKeyEnvName is the env VAR NAME only (never a value — Spec
+// constraint 10). The /social empty state is what renders when zero sources
+// exist (fresh operator / all deleted).
+// ---------------------------------------------------------------------------
+
+const SOCIAL_SOURCE_SEED_ROWS = [
+  {
+    name: 'alpha-callers-tg',
+    platform: 'telegram',
+    trustTier: 'high',
+    apiKeyEnvName: 'SOCIAL_TELEGRAM_READ_TOKEN',
+    rateLimitPerMinute: 30,
+    notes: 'Example seeded Telegram caller channel (mock-backed until real group link + read token exist).'
+  },
+  {
+    name: 'degen-signals-dc',
+    platform: 'discord',
+    trustTier: 'medium',
+    apiKeyEnvName: 'SOCIAL_DISCORD_BOT_TOKEN',
+    rateLimitPerMinute: 30,
+    notes: 'Example seeded Discord signals server (mock-backed until real channel + bot token exist).'
+  }
+] as const;
+
+async function bootstrapSocialSources(): Promise<number> {
+  await prisma.socialSource.createMany({
+    data: SOCIAL_SOURCE_SEED_ROWS.map((row) => ({
+      name: row.name,
+      platform: row.platform,
+      trustTier: row.trustTier,
+      enabled: true,
+      chainSupport: ['SOLANA'] as Chain[],
+      apiKeyEnvName: row.apiKeyEnvName,
+      rateLimitPerMinute: row.rateLimitPerMinute,
+      notes: row.notes
+    }))
+  });
+  log('bootstrapped SocialSource rows.', { count: SOCIAL_SOURCE_SEED_ROWS.length });
+  return SOCIAL_SOURCE_SEED_ROWS.length;
+}
+
+/**
+ * Runs ONE runSocialIngestPass (Spec §6) — every enabled SocialSource row
+ * resolves to the SAME shared MockSocialSource built from this seed run's own
+ * `world` (deterministic, same convention as seedExternalWalletSourceSync).
+ * The mock source's fixtures mention seeded mock-world tokens so /social's
+ * mention-feed / velocity / wallet-signal-overlap panels populate out of the
+ * box.
+ */
+async function seedSocialIngestPass(world: MockWorld, settings: Settings) {
+  const socialSource = new MockSocialSource(world);
+  const result = await runSocialIngestPass(
+    prisma,
+    settings,
+    () => socialSource,
+    {
+      info: (msg, meta) => log(msg, meta),
+      error: (msg, meta) => log(`ERROR: ${msg}`, meta)
+    }
+  );
+  log('social ingest pass complete.', { ...result });
   return result;
 }
 
@@ -2189,6 +2263,16 @@ async function main(): Promise<void> {
     tokenIdByAddress.set(token.address, created.id);
   }
   log('upserted Token rows + persisted riskFlags.', { count: tokenIdByAddress.size });
+
+  // Phase 3.7 (Task D, Social Intelligence): seed 2 example SocialSource rows,
+  // then run ONE runSocialIngestPass against the shared mock source so
+  // `npm run db:seed` populates SocialMention rows out of the box (no live
+  // read credentials required — MockSocialSource, same mock-mode-by-default
+  // convention as Phase 3.5). Runs AFTER Token upserts above so
+  // (chain,address) resolution links mentions to real seeded tokens.
+  await bootstrapSocialSources();
+  const socialIngestResult = await seedSocialIngestPass(world, settings);
+  log('social seed totals.', { ...socialIngestResult });
 
   // Phase 4: market snapshots FIRST.
   await seedMarketSnapshots(world, tokenIdByAddress);

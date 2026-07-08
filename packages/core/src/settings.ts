@@ -148,12 +148,37 @@ const DuneConnectorSchema = z.object({
   syncHours: z.number()
 });
 
+// Task B (Social Intelligence, spec §7) — the inbound social-mention subsystem's
+// config. syncHours reuses the hours→seconds *3600 worker convention. spam holds
+// the pure-classifier thresholds/weights (see classifySpam.ts); velocityWindowsMin
+// feeds computeMentionVelocity. Shadow-only: none of these feed FlowScore or the
+// signal engine.
+const SocialSpamConfigSchema = z.object({
+  copypastaAuthorMin: z.number(),
+  repeatAuthorMin: z.number(),
+  lowContentMinChars: z.number(),
+  windowMinutes: z.number(),
+  weights: z.object({
+    copypasta: z.number(),
+    repeat_author: z.number(),
+    low_content: z.number()
+  }),
+  uiHideThreshold: z.number()
+});
+
+const SocialConfigSchema = z.object({
+  syncHours: z.number(),
+  spam: SocialSpamConfigSchema,
+  velocityWindowsMin: z.array(z.number())
+});
+
 const ConnectorsSchema = z.object({
   sourcesEnabled: z.record(z.string(), z.boolean()),
   syncHours: z.number(),
   validationBatchSize: z.number(),
   topTraderBackfill: TopTraderBackfillSchema,
-  dune: DuneConnectorSchema
+  dune: DuneConnectorSchema,
+  social: SocialConfigSchema
 });
 
 export const SettingsSchema = z
@@ -304,6 +329,19 @@ export const DEFAULT_SETTINGS: Settings = {
       // credit-conscious by design (latest-cached-result only by default), so
       // a daily-ish default cadence (24h) rather than syncHours' 6h.
       syncHours: 24
+    },
+    // Social intelligence (spec §7). Shadow-only inbound-mention config.
+    social: {
+      syncHours: 6,
+      spam: {
+        copypastaAuthorMin: 3,
+        repeatAuthorMin: 5,
+        lowContentMinChars: 12,
+        windowMinutes: 360,
+        weights: { copypasta: 80, repeat_author: 60, low_content: 50 },
+        uiHideThreshold: 70
+      },
+      velocityWindowsMin: [60, 360, 1440]
     }
   }
 };

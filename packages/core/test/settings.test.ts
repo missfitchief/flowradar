@@ -112,3 +112,42 @@ describe('SettingsSchema.connectors (Task 34 — Wave 4.5 external wallet-source
     expect(() => parseSettings({ connectors: { syncHours: 'x' } })).toThrow();
   });
 });
+
+describe('SettingsSchema.connectors.social (Task B — social intelligence config §7)', () => {
+  it('DEFAULT_SETTINGS.connectors.social carries the spec §7 defaults', () => {
+    expect(DEFAULT_SETTINGS.connectors.social).toEqual({
+      syncHours: 6,
+      spam: {
+        copypastaAuthorMin: 3,
+        repeatAuthorMin: 5,
+        lowContentMinChars: 12,
+        windowMinutes: 360,
+        weights: { copypasta: 80, repeat_author: 60, low_content: 50 },
+        uiHideThreshold: 70
+      },
+      velocityWindowsMin: [60, 360, 1440]
+    });
+  });
+
+  it('DEFAULT_SETTINGS parses through SettingsSchema with social present', () => {
+    const parsed = SettingsSchema.parse(DEFAULT_SETTINGS);
+    expect(parsed.connectors.social).toEqual(DEFAULT_SETTINGS.connectors.social);
+  });
+
+  it('parseSettings deep-merges a partial social override and keeps other social defaults', () => {
+    const result = parseSettings({ connectors: { social: { syncHours: 12, spam: { uiHideThreshold: 60 } } } });
+    expect(result.connectors.social.syncHours).toBe(12);
+    expect(result.connectors.social.spam.uiHideThreshold).toBe(60);
+    // untouched nested spam fields retained
+    expect(result.connectors.social.spam.copypastaAuthorMin).toBe(3);
+    expect(result.connectors.social.spam.weights).toEqual(DEFAULT_SETTINGS.connectors.social.spam.weights);
+    expect(result.connectors.social.velocityWindowsMin).toEqual([60, 360, 1440]);
+    // sibling connectors sub-configs untouched
+    expect(result.connectors.dune).toEqual(DEFAULT_SETTINGS.connectors.dune);
+    expect(result.connectors.sourcesEnabled).toEqual(DEFAULT_SETTINGS.connectors.sourcesEnabled);
+  });
+
+  it('parseSettings throws on an invalid social type', () => {
+    expect(() => parseSettings({ connectors: { social: { syncHours: 'x' } } })).toThrow();
+  });
+});

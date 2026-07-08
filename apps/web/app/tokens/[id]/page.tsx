@@ -13,6 +13,10 @@ import { WalletBuyersTable } from '@/components/tokens/WalletBuyersTable';
 import type { BuyerWalletLabel, BuyerWalletRow } from '@/components/tokens/WalletBuyersTable';
 import { RiskPanel } from '@/components/tokens/RiskPanel';
 import type { RiskFlagRow } from '@/components/tokens/RiskPanel';
+import { getTokenSocialMentions } from '@flowradar/db';
+import { computeMentionVelocity, DEFAULT_SETTINGS } from '@flowradar/core';
+import { SocialSection } from '@/components/tokens/SocialSection';
+import type { SocialMentionRowVM } from '@/components/tokens/SocialSection';
 import { fmtAge, fmtUsd } from '@/lib/format';
 
 // DB-backed detail page — must render per-request, never freeze at build time
@@ -73,25 +77,27 @@ export default async function TokenDetailPage({ params }: TokenDetailPageProps) 
 
   if (!token) notFound();
 
-  const [chain, latestMarket, latestFlow, marketSeries, flowHistory, trades] = await Promise.all([
-    prisma.chain.findUnique({ where: { id: token.chain } }),
-    prisma.tokenMarketSnapshot.findFirst({ where: { tokenId: token.id }, orderBy: { ts: 'desc' } }),
-    prisma.tokenFlowSnapshot.findFirst({ where: { tokenId: token.id }, orderBy: { ts: 'desc' } }),
-    prisma.tokenMarketSnapshot.findMany({ where: { tokenId: token.id }, orderBy: { ts: 'asc' } }),
-    prisma.tokenFlowSnapshot.findMany({ where: { tokenId: token.id }, orderBy: { ts: 'asc' } }),
-    prisma.walletTokenTrade.findMany({
-      where: { tokenId: token.id, action: { in: ['BUY', 'SELL'] } },
-      orderBy: { ts: 'asc' },
-      include: {
-        wallet: {
-          include: {
-            classifications: true,
-            stats: { orderBy: { computedAt: 'desc' }, take: 1 },
+  const [chain, latestMarket, latestFlow, marketSeries, flowHistory, trades, socialMentions] =
+    await Promise.all([
+      prisma.chain.findUnique({ where: { id: token.chain } }),
+      prisma.tokenMarketSnapshot.findFirst({ where: { tokenId: token.id }, orderBy: { ts: 'desc' } }),
+      prisma.tokenFlowSnapshot.findFirst({ where: { tokenId: token.id }, orderBy: { ts: 'desc' } }),
+      prisma.tokenMarketSnapshot.findMany({ where: { tokenId: token.id }, orderBy: { ts: 'asc' } }),
+      prisma.tokenFlowSnapshot.findMany({ where: { tokenId: token.id }, orderBy: { ts: 'asc' } }),
+      prisma.walletTokenTrade.findMany({
+        where: { tokenId: token.id, action: { in: ['BUY', 'SELL'] } },
+        orderBy: { ts: 'asc' },
+        include: {
+          wallet: {
+            include: {
+              classifications: true,
+              stats: { orderBy: { computedAt: 'desc' }, take: 1 },
+            },
           },
         },
-      },
-    }),
-  ]);
+      }),
+      getTokenSocialMentions(prisma, token.id),
+    ]);
 
   // ---------------------------------------------------------------------
   // Header block
@@ -177,6 +183,42 @@ export default async function TokenDetailPage({ params }: TokenDetailPageProps) 
   // RiskPanel props
   // ---------------------------------------------------------------------
   const riskFlags: RiskFlagRow[] = Array.isArray(token.riskFlags) ? (token.riskFlags as unknown as RiskFlagRow[]) : [];
+
+  // ---------------------------------------------------------------------
+  // SocialSection props (Task F) — shadow-only. Velocity is computed on read
+  // from THIS token's mentions (spam excluded above spamMaxScore), never
+  // stored. Spam is filtered for display in the component, not dropped here.
+  // ---------------------------------------------------------------------
+  const socialCfg = DEFAULT_SETTINGS.connectors.social;
+  const mentionVelocity = computeMentionVelocity(
+    socialMentions.map((m) => ({
+      tokenId: m.tokenId,
+      tokenAddress: m.tokenAddress,
+      authorHash: m.authorHash,
+      postedAt: m.postedAt,
+      spamScore: m.spamScore,
+    })),
+    new Date(),
+    // spamMaxScore = uiHideThreshold - 1 so velocity keeps EXACTLY the mentions
+    // the feed shows (feed greys spamScore >= uiHideThreshold) — same cutoff as
+    // /social page.tsx, avoiding an off-by-one where a mention scored exactly at
+    // the threshold is greyed in the feed yet counted in velocity.
+    { windowsMin: socialCfg.velocityWindowsMin, spamMaxScore: socialCfg.spam.uiHideThreshold - 1 },
+  );
+  const socialMentionRows: SocialMentionRowVM[] = socialMentions.map((m) => ({
+    id: m.id,
+    sourceName: m.source.name,
+    platform: m.platform,
+    trustTier: m.source.trustTier,
+    postedAt: m.postedAt,
+    contentSnippet: m.contentSnippet,
+    mentionType: m.mentionType,
+    tokenId: m.tokenId,
+    tokenAddress: m.tokenAddress,
+    tokenSymbol: m.tokenSymbol,
+    spamScore: m.spamScore,
+    spamReason: m.spamReason,
+  }));
 
   return (
     <div className="flex flex-col gap-6">
@@ -278,6 +320,16 @@ export default async function TokenDetailPage({ params }: TokenDetailPageProps) 
       <div>
         <h2 className="mb-3 text-lg font-medium tracking-tight">Risk &amp; context</h2>
         <RiskPanel flags={riskFlags} />
+      </div>
+
+      {/* Social mentions (shadow-only confluence — Task F) */}
+      <div>
+        <h2 className="mb-3 text-lg font-medium tracking-tight">Social mentions</h2>
+        <SocialSection
+          mentions={socialMentionRows}
+          velocity={mentionVelocity}
+          uiHideThreshold={socialCfg.spam.uiHideThreshold}
+        />
       </div>
 
       <p className="text-xs text-muted-foreground">
