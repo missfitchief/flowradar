@@ -172,13 +172,29 @@ const SocialConfigSchema = z.object({
   velocityWindowsMin: z.array(z.number())
 });
 
+// Task A (External Confluence, design doc "Module B / Settings additions") —
+// shadow-only confluence config. syncHours reuses the hours→seconds *3600 worker
+// convention. liquidityRisk holds the pure computeLiquidityRisk position size + the
+// display-only band thresholds; NONE of these feed FlowScore or the signal engine.
+const LiquidityRiskSettingsSchema = z.object({
+  positionSizeUsd: z.number(),
+  absoluteLiquidityBandsUsd: z.tuple([z.number(), z.number(), z.number()]),
+  ratioFragilityBands: z.tuple([z.number(), z.number(), z.number()])
+});
+
+const ExternalConfluenceConfigSchema = z.object({
+  syncHours: z.number(),
+  liquidityRisk: LiquidityRiskSettingsSchema
+});
+
 const ConnectorsSchema = z.object({
   sourcesEnabled: z.record(z.string(), z.boolean()),
   syncHours: z.number(),
   validationBatchSize: z.number(),
   topTraderBackfill: TopTraderBackfillSchema,
   dune: DuneConnectorSchema,
-  social: SocialConfigSchema
+  social: SocialConfigSchema,
+  externalConfluence: ExternalConfluenceConfigSchema
 });
 
 export const SettingsSchema = z
@@ -342,6 +358,17 @@ export const DEFAULT_SETTINGS: Settings = {
         uiHideThreshold: 70
       },
       velocityWindowsMin: [60, 360, 1440]
+    },
+    // External confluence (design doc "Module B / Settings additions"). Shadow-only.
+    // positionSizeUsd feeds the pure LiquidityRisk slippage estimate; the two band
+    // arrays are display-only fragility heuristics (NOT FlowScore inputs).
+    externalConfluence: {
+      syncHours: 6,
+      liquidityRisk: {
+        positionSizeUsd: 1000,
+        absoluteLiquidityBandsUsd: [10000, 50000, 250000],
+        ratioFragilityBands: [0.02, 0.05, 0.15]
+      }
     }
   }
 };
