@@ -311,6 +311,11 @@ model Token {
   sourceRotations   ProfitRotationSignal[] @relation("ProfitRotationSourceToken")
   destRotations     ProfitRotationSignal[] @relation("ProfitRotationDestToken")
   socialMentions    SocialMention[]
+  /// Task B (External Confluence) — reverse side of TokenConfluenceSnapshot.token.
+  /// Shadow-only evidence rows; nullable FK with onDelete: SetNull, so deleting a
+  /// Token orphans (never deletes) its confluence snapshots — they keep pointing at
+  /// the (chain, tokenAddress) pair. NEVER feeds FlowScore / signals / wallet scoring.
+  confluenceSnapshots TokenConfluenceSnapshot[]
 
   @@unique([chain, address])
   @@map("tokens")
@@ -1083,4 +1088,82 @@ model SocialMention {
   @@index([postedAt])
   @@index([contentHash])
   @@map("social_mentions")
+}
+
+// ---------------------------------------------------------------------------
+// 28. ExternalConfluenceSource (External Confluence — Task B; operator-managed registry)
+// ---------------------------------------------------------------------------
+
+/// One operator-registered external confluence/evidence provider (holderscan,
+/// clobr, gmgn, ag_paper) or a keyless `manual` entry. Mirrors
+/// ExternalWalletSource/SocialSource's registry role but is ENTIRELY SEPARATE:
+/// confluence data is SHADOW-ONLY and never feeds FlowScore, signal rules,
+/// wallet scoring, the candidate pipeline, or production alerts. `apiKeyEnvName`
+/// stores the env VAR NAME of the provider credential (e.g. "HOLDERSCAN_API_KEY")
+/// — NEVER a value; null for keyless (manual/internal) providers. The internal
+/// LiquidityRisk snapshot has NO source row (TokenConfluenceSnapshot.sourceId is
+/// null for it). `status` uses the source-level taxonomy
+/// idle|live|mock|missing_key|plan_required|stub|unavailable|rate_limited|error.
+model ExternalConfluenceSource {
+  id                 String    @id @default(cuid())
+  name               String    @unique
+  provider           String    // holderscan | clobr | gmgn | ag_paper | manual
+  enabled            Boolean   @default(true)
+  apiKeyEnvName      String?   // env var NAME only; null for keyless (manual/internal)
+  rateLimitPerMinute Int       @default(30)
+  status             String    @default("idle") // idle|live|mock|missing_key|plan_required|stub|unavailable|rate_limited|error
+  lastSyncAt         DateTime?
+  lastError          String?
+  failCount          Int       @default(0)
+  metadataJson       Json?
+  addedAt            DateTime  @default(now())
+
+  snapshots          TokenConfluenceSnapshot[]
+
+  @@map("external_confluence_sources")
+}
+
+// ---------------------------------------------------------------------------
+// 29. TokenConfluenceSnapshot (External Confluence — Task B; shadow-only point-in-time evidence)
+// ---------------------------------------------------------------------------
+
+/// One point-in-time confluence/evidence observation for a token, from either an
+/// external provider (sourceId set) or the INTERNAL LiquidityRisk computation
+/// (sourceId null, provider "internal"). SHADOW-ONLY: there is NO column that
+/// participates in FlowScore — all metrics live in `dataJson`, which is
+/// DISPLAY-SAFE ONLY and MUST contain no secret values. `tokenId` is nullable
+/// with onDelete: SetNull: external providers NEVER create Token rows, so a
+/// not-yet-known token yields an "unlinked" snapshot keyed to (chain,
+/// tokenAddress); deleting a Token nulls (never deletes) its snapshots. `status`
+/// is honest per-fetch state — ok | unavailable | missing_key | plan_required |
+/// rate_limited | error | stub — and is NEVER coerced to a reassuring value when
+/// data is absent (unavailable != safe). `dedupeKey` is NON-NULL
+/// (`${provider}:${snapshotType}:${tokenAddress}:${observedHourBucket}`), so
+/// @@unique([sourceId, tokenAddress, snapshotType, dedupeKey]) makes re-ingest
+/// idempotent. `snapshotType` includes `paper_trade` (AG Paper is manual/stub
+/// only — there is deliberately NO separate PaperTradeObservation table).
+model TokenConfluenceSnapshot {
+  id           String    @id @default(cuid())
+  tokenId      String?
+  chain        ChainId
+  tokenAddress String
+  sourceId     String?
+  provider     String    // holderscan | clobr | gmgn | ag_paper | manual | internal
+  snapshotType String    // holder_risk | liquidity_risk | liquidity_map | external_intel | paper_trade
+  status       String    // ok | unavailable | missing_key | plan_required | rate_limited | error | stub
+  dataJson     Json      // computed/provider-claimed metrics — DISPLAY-SAFE, no secrets
+  observedAt   DateTime
+  ingestedAt   DateTime  @default(now())
+  dedupeKey    String
+  metadataJson Json?
+
+  token        Token?                    @relation(fields: [tokenId], references: [id], onDelete: SetNull)
+  source       ExternalConfluenceSource? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+
+  @@unique([sourceId, tokenAddress, snapshotType, dedupeKey])
+  @@index([tokenId])
+  @@index([chain, tokenAddress])
+  @@index([provider, snapshotType])
+  @@index([observedAt])
+  @@map("token_confluence_snapshots")
 }
