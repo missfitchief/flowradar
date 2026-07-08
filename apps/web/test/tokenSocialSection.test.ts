@@ -37,6 +37,14 @@ describe('token-detail Social mentions section (Task F)', () => {
     expect(pageSrc).toMatch(/velocityWindowsMin/);
   });
 
+  it('velocity spam cutoff = uiHideThreshold - 1 (aligned with /social + the feed collapse; M1)', () => {
+    // The feed greys spamScore >= uiHideThreshold, so velocity must keep
+    // spamScore <= uiHideThreshold - 1 to count EXACTLY the shown mentions —
+    // matching apps/web/app/social/page.tsx and avoiding the off-by-one where a
+    // mention scored exactly at the threshold is greyed yet still counted.
+    expect(pageSrc).toMatch(/spamMaxScore:\s*socialCfg\.spam\.uiHideThreshold\s*-\s*1/);
+  });
+
   it('page renders <SocialSection /> and passes uiHideThreshold', () => {
     expect(pageSrc).toMatch(/<SocialSection\b/);
     expect(pageSrc).toMatch(/uiHideThreshold=\{/);

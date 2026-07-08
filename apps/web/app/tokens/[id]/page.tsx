@@ -199,7 +199,11 @@ export default async function TokenDetailPage({ params }: TokenDetailPageProps) 
       spamScore: m.spamScore,
     })),
     new Date(),
-    { windowsMin: socialCfg.velocityWindowsMin, spamMaxScore: socialCfg.spam.uiHideThreshold },
+    // spamMaxScore = uiHideThreshold - 1 so velocity keeps EXACTLY the mentions
+    // the feed shows (feed greys spamScore >= uiHideThreshold) — same cutoff as
+    // /social page.tsx, avoiding an off-by-one where a mention scored exactly at
+    // the threshold is greyed in the feed yet counted in velocity.
+    { windowsMin: socialCfg.velocityWindowsMin, spamMaxScore: socialCfg.spam.uiHideThreshold - 1 },
   );
   const socialMentionRows: SocialMentionRowVM[] = socialMentions.map((m) => ({
     id: m.id,
