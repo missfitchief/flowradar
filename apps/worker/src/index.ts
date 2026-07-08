@@ -73,6 +73,7 @@ import * as walletCandidateValidation from './jobs/walletCandidateValidation';
 import * as tokenTopTraderBackfill from './jobs/tokenTopTraderBackfill';
 import * as duneQuery from './jobs/duneQuery';
 import * as socialIngest from './jobs/socialIngest';
+import * as externalConfluence from './jobs/externalConfluence';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const HOUR_MS = 60 * 60 * 1000;
@@ -252,6 +253,18 @@ async function main(): Promise<void> {
       name: 'socialIngest',
       run: socialIngest.run,
       intervalSec: settings.connectors.social.syncHours * 3600
+    },
+    // externalConfluence (Task D, External Confluence): shadow-only confluence
+    // enrichment. Registered on settings.connectors.externalConfluence.syncHours
+    // (6h default) — same *3600 hours->seconds conversion as every other
+    // hours-denominated interval above. SHADOW-ONLY: computes internal
+    // LiquidityRisk from existing market data + reads external provider data for
+    // known tokens only; never creates a Token/Signal/Alert/CandidateWallet and
+    // never touches FlowScore/signal thresholds/wallet scoring.
+    {
+      name: 'externalConfluence',
+      run: externalConfluence.run,
+      intervalSec: settings.connectors.externalConfluence.syncHours * 3600
     }
   ];
 
