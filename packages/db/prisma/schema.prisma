@@ -569,6 +569,21 @@ model ImportJob {
 // 14. MoneyFlowEdge
 // ---------------------------------------------------------------------------
 
+/// MoneyFlowEdge.valuationStatus — HONEST value provenance (Wave A, Capital
+/// Lineage). Distinguishes a genuine zero from an unavailable valuation, and
+/// a current-price estimate from an exact historical price. `valuedUsd` is
+/// NULL whenever status is `unavailable` — never coerced to 0 (hard rule 9).
+/// The legacy `amountUsd` column is left untouched for existing FlowScore-path
+/// consumers; the lineage/shadow path reads valuedUsd + valuationStatus.
+enum ValuationStatus {
+  exact_provider_historical
+  nearest_prior_snapshot
+  stablecoin_nominal
+  current_price_estimate
+  unavailable
+  not_applicable
+}
+
 model MoneyFlowEdge {
   id                 String              @id @default(cuid())
   sourceAddress      String
@@ -576,7 +591,12 @@ model MoneyFlowEdge {
   sourceChain        ChainId
   destinationChain   ChainId
   asset              String
+  /// SPL mint address when known (token_transfer); NULL for native SOL. Used
+  /// to classify the asset by REGISTRY (not symbol text) during valuation.
+  assetMint          String?
   amountToken        Decimal             @db.Decimal(38, 18)
+  /// Legacy nominal USD (existing consumers; may be 0 for unpriced). NOT the
+  /// honest value — read valuedUsd/valuationStatus for that.
   amountUsd          Decimal             @db.Decimal(20, 4)
   ts                 DateTime
   txHash             String
@@ -586,7 +606,24 @@ model MoneyFlowEdge {
   providerSource     String
   metadata           Json
 
+  // --- Honest valuation (Wave A) — all nullable/additive ---
+  /// Honest USD value; NULL == unavailable (never 0-for-unknown).
+  valuedUsd          Decimal?            @db.Decimal(20, 4)
+  /// Unit price used; NULL when unavailable/not_applicable.
+  priceUsd           Decimal?            @db.Decimal(24, 12)
+  /// Timestamp of the price observation used (never a future time).
+  priceTimestamp     DateTime?
+  valuationStatus    ValuationStatus?
+  /// Provenance of the price (e.g. 'wsol_prior_snapshot', 'stablecoin_registry', 'dexscreener_current').
+  valuationSource    String?
+  /// 0-100; lower for current-price estimates, higher for exact historical.
+  valuationConfidence Float?
+  /// Age of the price observation relative to the transfer, seconds.
+  valuationAgeSeconds Int?
+  valuationReason    String?
+
   @@unique([txHash, sourceAddress, destinationAddress, actionType])
+  @@index([valuationStatus])
   @@index([sourceAddress, ts])
   @@index([destinationAddress, ts])
   @@index([txHash])

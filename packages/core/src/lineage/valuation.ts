@@ -1,0 +1,127 @@
+// FlowRadar — Capital Lineage (Wave A): pure honest transfer valuation.
+//
+// The HONEST value model (operator directive): an unknown price is NEVER
+// numeric zero, a genuine zero stays a genuine zero, a current-price estimate
+// never masquerades as an exact historical price, and a FUTURE snapshot is
+// never used to value a past transfer. Pure: price sources are resolved in the
+// DB layer and passed in as plain data; this function only decides which
+// source wins and produces the valuation record.
+
+export type ValuationStatus =
+  | 'exact_provider_historical'
+  | 'nearest_prior_snapshot'
+  | 'stablecoin_nominal'
+  | 'current_price_estimate'
+  | 'unavailable'
+  | 'not_applicable';
+
+/** How the transfer's asset is classified — decided by REGISTRY, not symbol. */
+export type AssetKind = 'native_sol' | 'stablecoin' | 'spl' | 'service' | 'unknown';
+
+export interface PricePoint {
+  priceUsd: number;
+  ts: Date;
+}
+
+export interface ValuationInput {
+  assetKind: AssetKind;
+  /** Raw token amount (always preserved regardless of valuation). */
+  amountToken: number;
+  transferTs: Date;
+  /** Max age of a "nearest prior snapshot" to still be usable, seconds. */
+  maxSnapshotAgeSec: number;
+  /** Exact historical price at/just before transfer (highest precedence). */
+  historicalExact?: PricePoint | null;
+  /** Nearest LOCAL market snapshot at or before the transfer. */
+  priorSnapshot?: PricePoint | null;
+  /** A snapshot AFTER the transfer — accepted only to prove it is REJECTED. */
+  futureSnapshot?: PricePoint | null;
+  /** Current provider price — last-resort estimate, clearly labeled. */
+  currentPrice?: PricePoint | null;
+}
+
+export interface ValuationResult {
+  valuedUsd: number | null;
+  priceUsd: number | null;
+  priceTimestamp: Date | null;
+  status: ValuationStatus;
+  source: string | null;
+  confidence: number; // 0-100
+  ageSeconds: number | null;
+  reason: string | null;
+}
+
+const STABLECOIN_NOMINAL_USD = 1;
+
+function ageSec(transferTs: Date, priceTs: Date): number {
+  return Math.round(Math.abs(transferTs.getTime() - priceTs.getTime()) / 1000);
+}
+
+export function computeValuation(inp: ValuationInput): ValuationResult {
+  // Service / internal / bridge legs are never valued as direct wallet funding.
+  if (inp.assetKind === 'service') {
+    return { valuedUsd: null, priceUsd: null, priceTimestamp: null, status: 'not_applicable', source: null, confidence: 0, ageSeconds: null, reason: 'service/internal movement — not direct wallet funding' };
+  }
+
+  // Verified stablecoin (registry-confirmed mint): nominal $1 with an explicit
+  // possible-depeg caveat and sub-100 confidence.
+  if (inp.assetKind === 'stablecoin') {
+    return {
+      valuedUsd: inp.amountToken * STABLECOIN_NOMINAL_USD,
+      priceUsd: STABLECOIN_NOMINAL_USD,
+      priceTimestamp: inp.transferTs,
+      status: 'stablecoin_nominal',
+      source: 'stablecoin_registry',
+      confidence: 90,
+      ageSeconds: 0,
+      reason: 'verified stablecoin mint valued at nominal $1 (possible depeg not accounted for)'
+    };
+  }
+
+  // Precedence for native SOL and SPL: exact historical > nearest prior
+  // snapshot (within max age) > current-price estimate > unavailable.
+  if (inp.historicalExact) {
+    return {
+      valuedUsd: inp.amountToken * inp.historicalExact.priceUsd,
+      priceUsd: inp.historicalExact.priceUsd,
+      priceTimestamp: inp.historicalExact.ts,
+      status: 'exact_provider_historical',
+      source: 'provider_historical',
+      confidence: 95,
+      ageSeconds: ageSec(inp.transferTs, inp.historicalExact.ts),
+      reason: 'exact historical price at/just before transfer'
+    };
+  }
+
+  if (inp.priorSnapshot && inp.priorSnapshot.ts.getTime() <= inp.transferTs.getTime()) {
+    const age = ageSec(inp.transferTs, inp.priorSnapshot.ts);
+    if (age <= inp.maxSnapshotAgeSec) {
+      return {
+        valuedUsd: inp.amountToken * inp.priorSnapshot.priceUsd,
+        priceUsd: inp.priorSnapshot.priceUsd,
+        priceTimestamp: inp.priorSnapshot.ts,
+        status: 'nearest_prior_snapshot',
+        source: inp.assetKind === 'native_sol' ? 'wsol_prior_snapshot' : 'spl_prior_snapshot',
+        confidence: 75,
+        ageSeconds: age,
+        reason: `nearest prior local snapshot within ${inp.maxSnapshotAgeSec}s`
+      };
+    }
+    // Stale prior snapshot: fall through to current estimate / unavailable.
+  }
+
+  if (inp.currentPrice) {
+    return {
+      valuedUsd: inp.amountToken * inp.currentPrice.priceUsd,
+      priceUsd: inp.currentPrice.priceUsd,
+      priceTimestamp: inp.currentPrice.ts,
+      status: 'current_price_estimate',
+      source: 'provider_current',
+      confidence: 40,
+      ageSeconds: ageSec(inp.transferTs, inp.currentPrice.ts),
+      reason: 'no historical source — CURRENT price estimate only (not exact; may differ from value at transfer time)'
+    };
+  }
+
+  return { valuedUsd: null, priceUsd: null, priceTimestamp: null, status: 'unavailable', source: null, confidence: 0, ageSeconds: null, reason: 'no historical, prior-snapshot, or current price source available' };
+}
