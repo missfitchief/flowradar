@@ -17,7 +17,7 @@ import type { MarketPoint } from '../src/backtest/evaluate';
 const MIN_MS = 60_000;
 
 function wallet(id: string): WalletInfoInput {
-  return { walletId: id, isWatched: true, walletScore: 80, labels: ['smart_money'], meetsProfitable: true };
+  return { walletId: id, isWatched: true, walletScore: 80, labels: ['smart_money'], meetsProfitable: true, status: 'signal_eligible' };
 }
 function buy(walletId: string, ts: Date, amountUsd: number, mcap = 500_000): TradeRowInput {
   return { walletId, action: 'BUY', amountUsd, ts, blockOrSlot: BigInt(Math.floor(ts.getTime())), marketCapAtTrade: mcap };

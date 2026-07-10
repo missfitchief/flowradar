@@ -24,6 +24,9 @@ function wallet(walletId: string, overrides: Partial<WalletInfoInput> = {}): Wal
     walletScore: 50,
     labels: [],
     meetsProfitable: false,
+    // Pre-taxonomy tests exercise watched/profitable semantics WITHIN the
+    // eligible cohort; the status gate has its own suite (aggregateStatusGate).
+    status: 'signal_eligible',
     ...overrides
   };
 }

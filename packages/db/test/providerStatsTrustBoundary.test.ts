@@ -78,11 +78,21 @@ const CLEARLY_PROFITABLE = {
 async function makeWalletWithStats(
   suffix: string,
   isWatched: boolean,
-  source: 'csv' | 'computed' | 'provider'
+  source: 'csv' | 'computed' | 'provider',
+  // Phase 0 taxonomy: vetted fixtures are signal_eligible unless a test
+  // exercises another status explicitly.
+  status:
+    | 'observation_only'
+    | 'signal_eligible'
+    | 'public_kol'
+    | 'public_promoter'
+    | 'copytrader'
+    | 'bot_or_service'
+    | 'excluded' = 'signal_eligible'
 ): Promise<string> {
   const now = new Date();
   const wallet = await prisma.wallet.create({
-    data: { address: `${ADDR_PREFIX}_${suffix}`, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched }
+    data: { address: `${ADDR_PREFIX}_${suffix}`, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched, status }
   });
   await prisma.walletStats.create({
     data: {
@@ -188,5 +198,53 @@ describe.skipIf(!(await probePort('localhost', 5439)))('provider-claimed stats t
     // 3 buyers, but only 2 smart: the unwatched provider-claimed wallet is out.
     expect(agg.buyers).toHaveLength(3);
     expect(agg.smartWalletCount).toBe(2);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 0 status gate (feat/pre-public-accumulation), DB round-trip: the
+  // spec's regression cases proven THROUGH fetchAggregateInputs, not just at
+  // the pure-aggregate layer. Public KOL entry is a late-stage crowd signal —
+  // it must never raise the early smart-money count, however excellent the
+  // stats and even when an operator watches the wallet for display purposes.
+  // ---------------------------------------------------------------------------
+  it('STATUS GATE: public_kol wallet with excellent operator-approved stats and isWatched=true NEVER counts as early smart money', async () => {
+    const kol = await makeWalletWithStats('kol', true, 'csv', 'public_kol');
+    const eligible = await makeWalletWithStats('kol_peer', true, 'csv', 'signal_eligible');
+    const tokenId = await makeTokenWithBuysFrom([kol, eligible]);
+
+    const inputs = await fetchAggregateInputs(prisma, tokenId, DEFAULT_SETTINGS);
+    const agg = aggregateWindow({
+      trades: inputs.trades,
+      wallets: inputs.wallets,
+      clusters: inputs.clusters,
+      market: inputs.market,
+      windowMinutes: 1440,
+      now: new Date()
+    });
+
+    expect(agg.buyers).toHaveLength(2); // KOL activity is persisted and visible
+    expect(agg.smartWalletCount).toBe(1); // but only the eligible peer counts
+  });
+
+  it('STATUS GATE: bot_or_service and observation_only wallets contribute zero smart weight; their trades still persist', async () => {
+    const bot = await makeWalletWithStats('bot', false, 'computed', 'bot_or_service');
+    const obs = await makeWalletWithStats('obs', false, 'computed', 'observation_only');
+    const tokenId = await makeTokenWithBuysFrom([bot, obs]);
+
+    const inputs = await fetchAggregateInputs(prisma, tokenId, DEFAULT_SETTINGS);
+    const agg = aggregateWindow({
+      trades: inputs.trades,
+      wallets: inputs.wallets,
+      clusters: inputs.clusters,
+      market: inputs.market,
+      windowMinutes: 1440,
+      now: new Date()
+    });
+
+    expect(agg.smartWalletCount).toBe(0);
+    expect(agg.buyers).toHaveLength(2);
+    // Observation persisted at the DB layer too: trades remain queryable.
+    const tradeCount = await prisma.walletTokenTrade.count({ where: { tokenId } });
+    expect(tradeCount).toBe(2);
   });
 });

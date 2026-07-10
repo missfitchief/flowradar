@@ -104,6 +104,8 @@
 //     sellUsd > 0.
 
 import type { TokenWindowAggregate } from '../types';
+import { isSignalEligibleStatus } from '../wallets/status';
+import type { WalletStatus } from '../wallets/status';
 
 // ---------------------------------------------------------------------------
 // Input row types
@@ -126,6 +128,15 @@ export interface WalletInfoInput {
   labels: string[];
   /** Result of @flowradar/core's isProfitableWallet for this wallet's latest stats row (false if no stats row exists). */
   meetsProfitable: boolean;
+  /**
+   * Wallet.status (Phase 0, feat/pre-public-accumulation) — THE signal-
+   * eligibility gate. Smartness additionally requires
+   * isSignalEligibleStatus(status): public_kol / public_promoter /
+   * copytrader / bot_or_service / observation_only / excluded wallets never
+   * count toward early smart-money metrics, however good their stats look.
+   * REQUIRED (no default) so every producer decides eligibility explicitly.
+   */
+  status: WalletStatus;
 }
 
 export interface ClusterMembershipInput {
@@ -290,10 +301,15 @@ export function aggregateWindow(input: AggregateWindowInput): TokenWindowAggrega
     trackedSellVolumeUsd > 0 ? trackedBuyVolumeUsd / trackedSellVolumeUsd : trackedBuyVolumeUsd > 0 ? 999 : 0;
 
   // -- smartWalletCount / humanLikeCount / possibleBotCount ---------------
+  // Status gate first (Phase 0, feat/pre-public-accumulation): only
+  // signal_eligible wallets can be smart — public KOL/promoter/copytrader/
+  // bot/observation/excluded carry zero early-signal weight by definition,
+  // even when watched or profitable. Their trades still count in buyers[]
+  // and volume fields above (observation persists; weight does not).
   const isSmart = (walletId: string): boolean => {
     const info = walletById.get(walletId);
     if (!info) return false;
-    return info.isWatched || info.meetsProfitable;
+    return isSignalEligibleStatus(info.status) && (info.isWatched || info.meetsProfitable);
   };
   const smartBuyerIds = buyerWalletIds.filter(isSmart);
   const smartWalletCount = smartBuyerIds.length;

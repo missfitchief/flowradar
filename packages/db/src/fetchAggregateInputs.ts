@@ -24,7 +24,7 @@
 
 import type { PrismaClient } from '@prisma/client';
 import { isProfitableWallet, resolveWindowBounds } from '@flowradar/core';
-import type { Settings } from '@flowradar/core';
+import type { Settings, WalletStatus } from '@flowradar/core';
 import type {
   ClusterMembershipInput,
   MarketPointInput,
@@ -156,7 +156,7 @@ export async function fetchAggregateInputs(
   const [walletRows, statsRows, classificationRows, clusterRows, marketRows] = await Promise.all([
     prisma.wallet.findMany({
       where: { id: { in: walletIds } },
-      select: { id: true, isWatched: true }
+      select: { id: true, isWatched: true, status: true }
     }),
     prisma.walletStats.findMany({
       where: { walletId: { in: walletIds } },
@@ -184,6 +184,7 @@ export async function fetchAggregateInputs(
   ]);
 
   const isWatchedByWallet = new Map(walletRows.map((w) => [w.id, w.isWatched]));
+  const statusByWallet = new Map(walletRows.map((w) => [w.id, w.status]));
 
   // Latest WalletStats row per wallet (rows already ordered computedAt
   // desc, so first occurrence per walletId wins) — same reduction pattern
@@ -230,7 +231,11 @@ export async function fetchAggregateInputs(
       isWatched,
       walletScore: stats?.walletScore ?? 0,
       labels: labelsByWallet.get(walletId) ?? [],
-      meetsProfitable
+      meetsProfitable,
+      // Wallet.status is NOT NULL with default observation_only, so a wallet
+      // that appears in trade history but somehow lacks a row here (deleted
+      // mid-flight) degrades to zero signal weight — the safe direction.
+      status: (statusByWallet.get(walletId) ?? 'observation_only') as WalletStatus
     };
   });
 
