@@ -47,6 +47,8 @@ export interface ReceiverContext {
   isNativeSol: boolean;
   /** Raw native-SOL amount (for the raw-SOL gas path when USD is unavailable); null otherwise. */
   rawSolAmount?: number | null;
+  /** True when the transfer's USD value could NOT be determined — the ONLY case the raw-SOL gas path may fire (a valued transfer uses the USD min/dust logic). */
+  usdUnavailable?: boolean;
   /** Receiver is fresh / empty / previously unknown / long-inactive. */
   receiverIsFreshOrInactive: boolean;
   /** Receiver is a service/program/router/pool/bridge/CEX (never hot-enroll). */
@@ -94,9 +96,12 @@ export function classifyReceiverEnrollment(ctx: ReceiverContext, config: Lineage
   // value is UNAVAILABLE (Helius doesn't price native SOL) can still enroll on
   // the RAW SOL amount alone — bounded to [gasFundingMinSol, gasFundingMaxSol]
   // — when the receiver is fresh, this is its first meaningful inbound, and it
-  // becomes active within the window. Checked BEFORE the USD dust cutoff so an
-  // unpriced ($0-classified) gas funding is not swallowed as dust.
+  // becomes active within the window. Gated on usdUnavailable (Codex Wave-B
+  // P1): a VALUED transfer must NOT use this path — it goes through the USD
+  // min/dust logic below, so a valued sub-threshold or dust transfer can't
+  // sneak in via the raw amount.
   if (
+    ctx.usdUnavailable === true &&
     ctx.isNativeSol &&
     ctx.rawSolAmount != null &&
     ctx.rawSolAmount >= config.gasFundingMinSol &&

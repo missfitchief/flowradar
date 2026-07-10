@@ -247,6 +247,22 @@ describe.skipIf(!(await probePort('localhost', 5439)))('enrollReceiverFromTransf
     expect(b!.status).not.toBe('signal_eligible');
   });
 
+  it('RAW-GAS GATE: a VALUED sub-threshold native-SOL transfer does NOT enroll via the raw-SOL path (usdUnavailable=false)', async () => {
+    const { wallet: rootWallet, root } = await makeRoot('valuedgas');
+    const receiver = `${PREFIX}_valuedgasB`;
+    const t = transfer({ fromAddress: rootWallet.address, toAddress: receiver, amountUsd: 0 });
+    t.amountToken = 0.2; // in the gas SOL bounds [0.001, 0.5]
+    t.isNativeSol = true;
+    // A REAL valuation of $30 (below minTransferUsd $50, above dust) — usdUnavailable is FALSE,
+    // so the raw-SOL gas path must not fire; $30 is below the $50 min => no enroll.
+    t.valuation = { valuedUsd: 30, priceUsd: 150, priceTimestamp: NOW, status: 'current_price_estimate', source: 'provider_current', confidence: 40, ageSeconds: 0, reason: 'est' };
+
+    const result = await enrollReceiverFromTransfer(prisma, t, root.id, 0, DEFAULT_SETTINGS, NOW);
+    expect(result.enrolled).toBe(false); // valued, below threshold, NOT raw-gas
+    const b = await prisma.wallet.findUnique({ where: { address_chain: { address: receiver, chain: 'SOLANA' } } });
+    expect(b).toBeNull();
+  });
+
   it('NOT_APPLICABLE valuation (service/swap leg) never enrolls, even with a positive legacy amountUsd', async () => {
     const { wallet: rootWallet, root } = await makeRoot('napp');
     const receiver = `${PREFIX}_nappB`;

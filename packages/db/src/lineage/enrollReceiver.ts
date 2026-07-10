@@ -180,14 +180,21 @@ export async function enrollReceiverFromTransfer(
         select: { ts: true }
       }))?.ts ?? null
     : null;
+  // "Meaningful" by HONEST value (Codex Wave-B P1): above-dust valuedUsd, OR
+  // an unpriced native-SOL edge whose RAW amount is gas-scale-or-above. The
+  // legacy amountUsd (0 for unpriced SOL) must NOT be used or a prior unpriced
+  // SOL funding would wrongly look non-meaningful and re-trigger enrollment.
+  const meaningfulValueOr = [
+    { valuedUsd: { gt: settings.lineage.dustMaxUsd } },
+    { valuedUsd: null, asset: 'SOL', assetMint: null, amountToken: { gte: settings.lineage.gasFundingMinSol } }
+  ];
   const lastMeaningfulEdgeBefore = (
     await prisma.moneyFlowEdge.findFirst({
       where: {
-        OR: [
-          { destinationAddress: transfer.toAddress, destinationChain: 'SOLANA' },
-          { sourceAddress: transfer.toAddress, sourceChain: 'SOLANA' }
+        AND: [
+          { OR: [{ destinationAddress: transfer.toAddress, destinationChain: 'SOLANA' }, { sourceAddress: transfer.toAddress, sourceChain: 'SOLANA' }] },
+          { OR: meaningfulValueOr }
         ],
-        amountUsd: { gt: settings.lineage.dustMaxUsd },
         ts: { lt: transfer.ts }
       },
       orderBy: { ts: 'desc' },
@@ -200,14 +207,14 @@ export async function enrollReceiverFromTransfer(
   const inactiveDays = lastActiveBeforeTransfer
     ? (transfer.ts.getTime() - lastActiveBeforeTransfer.getTime()) / (24 * 60 * 60 * 1000)
     : Infinity;
-  // "First meaningful inbound": no ABOVE-DUST inbound transfer predates this
-  // one (dust doesn't count as meaningful — Codex review).
+  // "First meaningful inbound": no meaningful inbound transfer predates this
+  // one (by honest value — dust doesn't count).
   const priorMeaningfulInbound = await prisma.moneyFlowEdge.count({
     where: {
       destinationAddress: transfer.toAddress,
       destinationChain: 'SOLANA',
       actionType: { in: ['transfer', 'cex_withdrawal', 'bridge_withdrawal'] },
-      amountUsd: { gt: settings.lineage.dustMaxUsd },
+      OR: meaningfulValueOr,
       ts: { lt: transfer.ts }
     }
   });
@@ -241,11 +248,16 @@ export async function enrollReceiverFromTransfer(
     return { edgePersisted, enrolled: false, replay: false, newReceiver: false, enqueued: false, viaGasException: false, dust: false, reason: 'not_applicable (service/internal leg) — edge persisted, never enrolled' };
   }
   const classificationUsd = transfer.valuation ? (transfer.valuation.valuedUsd ?? 0) : transfer.amountUsd;
+  // USD is unavailable when a valuation is present but valuedUsd is null, or
+  // (no valuation object) the legacy amountUsd is non-positive. Gates the
+  // raw-SOL gas path so a VALUED transfer never uses it (Codex Wave-B P1).
+  const usdUnavailable = transfer.valuation ? transfer.valuation.valuedUsd === null : transfer.amountUsd <= 0;
   const ctx: ReceiverContext = {
     senderTrusted,
     transferUsd: classificationUsd,
     isNativeSol: transfer.isNativeSol,
     rawSolAmount: transfer.isNativeSol ? transfer.amountToken : null,
+    usdUnavailable,
     receiverIsFreshOrInactive,
     receiverIsServiceOrProgram: receiverIsService,
     isReceiverFirstMeaningfulInbound: priorMeaningfulInbound === 0,
