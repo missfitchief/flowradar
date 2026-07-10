@@ -10,3 +10,4 @@ build/
 coverage/
 .superpowers/
 *.tsbuildinfo
+db-backups/
