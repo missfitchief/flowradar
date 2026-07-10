@@ -27,9 +27,13 @@ export interface TransferObservation {
   fromAddress: string;
   toAddress: string;
   asset: string;
+  /** SPL mint address when known; null for native SOL (Wave A valuation). */
+  assetMint?: string | null;
   amountToken: number;
   amountUsd: number;
   isNativeSol: boolean;
+  /** Honest valuation of this transfer (Wave A); undefined when not yet valued. */
+  valuation?: import('@flowradar/core').ValuationResult;
   /** Provider that surfaced this transfer (audit). */
   provider: string;
 }
@@ -360,6 +364,7 @@ async function persistFlowEdge(prisma: PrismaClient, t: TransferObservation): Pr
   });
   if (existing) return false;
   try {
+    const v = t.valuation;
     await prisma.moneyFlowEdge.create({
       data: {
         sourceAddress: t.fromAddress,
@@ -367,14 +372,25 @@ async function persistFlowEdge(prisma: PrismaClient, t: TransferObservation): Pr
         sourceChain: 'SOLANA',
         destinationChain: 'SOLANA',
         asset: t.asset,
+        assetMint: t.assetMint ?? null,
         amountToken: t.amountToken,
+        // Legacy nominal column (existing consumers); honest value in valuedUsd.
         amountUsd: t.amountUsd,
         ts: t.ts,
         txHash: t.txHash,
         actionType: TRANSFER_FAMILY_ACTION,
         confidence: 100,
         providerSource: t.provider,
-        metadata: { lineage: true }
+        metadata: { lineage: true },
+        // Honest valuation provenance (Wave A), when the caller valued it.
+        valuedUsd: v?.valuedUsd ?? null,
+        priceUsd: v?.priceUsd ?? null,
+        priceTimestamp: v?.priceTimestamp ?? null,
+        valuationStatus: v?.status ?? null,
+        valuationSource: v?.source ?? null,
+        valuationConfidence: v?.confidence ?? null,
+        valuationAgeSeconds: v?.ageSeconds ?? null,
+        valuationReason: v?.reason ?? null
       }
     });
     return true;

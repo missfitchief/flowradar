@@ -226,7 +226,12 @@ const LineageConfigSchema = z.object({
   /** Bounded shallow backfill: provider pages fetched per node per pass. */
   backfillMaxPagesPerNode: z.number().int().min(1),
   /** A wallet inactive this many days counts as long-inactive (re-funding it re-triggers enrollment). */
-  freshInactiveDays: z.number().min(1)
+  freshInactiveDays: z.number().min(1),
+  /** Max age of a "nearest prior" market snapshot still usable to value a transfer, seconds (Wave A). */
+  priceMaxSnapshotAgeSec: z.number().min(60),
+  /** Gas-funding raw-SOL bounds (Wave B): a first native-SOL funding within [min,max] lamports-as-SOL may enroll without USD pricing. */
+  gasFundingMinSol: z.number().min(0),
+  gasFundingMaxSol: z.number().min(0)
 });
 
 export const SettingsSchema = z
@@ -419,7 +424,15 @@ export const DEFAULT_SETTINGS: Settings = {
     hotWindowHours: 48,
     serviceDegreeThreshold: 200,
     backfillMaxPagesPerNode: 3,
-    freshInactiveDays: 30
+    freshInactiveDays: 30,
+    priceMaxSnapshotAgeSec: 3600,
+    // Gas-funding raw-SOL window (Wave B). Initial defaults; observed dataset
+    // distribution to be recorded in the overnight report. Solana account
+    // rent-exemption is ~0.002 SOL and typical gas top-ups are small, so a
+    // 0.001-0.5 SOL window captures genuine first-gas funding without
+    // admitting dust (below) or real value transfers priced separately.
+    gasFundingMinSol: 0.001,
+    gasFundingMaxSol: 0.5
   }
 };
 

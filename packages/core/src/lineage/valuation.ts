@@ -53,6 +53,30 @@ export interface ValuationResult {
 
 const STABLECOIN_NOMINAL_USD = 1;
 
+// Verified canonical Solana mints (classification is by ADDRESS, not symbol
+// text — hard rule A3). A token merely NAMED USDC/USDT does not qualify.
+export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+export const VERIFIED_SOLANA_STABLE_MINTS = new Set<string>([
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC (Solana mint)
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB' // USDT (Solana mint)
+]);
+
+/**
+ * Classifies a transfer's asset for valuation, by mint ADDRESS (never symbol
+ * text). Native SOL = wSOL mint or a null mint with symbol SOL. A verified
+ * stablecoin mint => stablecoin. Any other mint => spl. `isServiceLeg` (from
+ * the caller's action-type/registry knowledge) forces `service`.
+ */
+export function classifyAsset(params: { symbol: string; assetMint: string | null; isServiceLeg?: boolean }): AssetKind {
+  if (params.isServiceLeg) return 'service';
+  if (params.assetMint === null) {
+    return params.symbol === 'SOL' ? 'native_sol' : 'unknown';
+  }
+  if (params.assetMint === WSOL_MINT) return 'native_sol';
+  if (VERIFIED_SOLANA_STABLE_MINTS.has(params.assetMint)) return 'stablecoin';
+  return 'spl';
+}
+
 function ageSec(transferTs: Date, priceTs: Date): number {
   return Math.round(Math.abs(transferTs.getTime() - priceTs.getTime()) / 1000);
 }
