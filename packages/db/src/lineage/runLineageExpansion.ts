@@ -314,10 +314,13 @@ export async function runLineageExpansion(
         // RESUME (Codex round-1/3): leave the node PENDING when more pages
         // remain OR the edge cap fired mid-page (a fresh per-run budget next
         // pass resumes it) — marking it done would permanently lose later
-        // pages/transfers. Stop reason is durable: never overwrite a prior
-        // reason with null (Codex round-3), and carry the reason forward on a
-        // resumed node. processedNodeIds prevents re-picking within THIS pass.
-        const durableStopReason = nodeStopReason ?? node.stopReason ?? null;
+        // pages/transfers. Stop reason is durable for legitimate CAP reasons
+        // (carried forward), but a prior ERROR reason is CLEARED on a
+        // successful pass (Wave-C round 3): otherwise the monitoring scheduler
+        // reads a stale 'error' forever and never resets backoff. A new error
+        // this pass (nodeStopReason) still wins.
+        const priorNonError = node.stopReason && !node.stopReason.startsWith('error') ? node.stopReason : null;
+        const durableStopReason = nodeStopReason ?? priorNonError;
         const resumable = (lastCursor !== undefined || hitEdgeCap);
         if (resumable) {
           await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'pending', stopReason: durableStopReason } });

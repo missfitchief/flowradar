@@ -151,6 +151,16 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runLineageExpansion', ()
     const badNode = await prisma.lineageExpansionNode.findFirst({ where: { lineageRootId: failRoot.id, walletAddress: badRoot } });
     expect(badNode!.status).toBe('skipped');
     expect(badNode!.stopReason).toMatch(/error/i);
+
+    // RECOVERY (Wave-C round 3): reopen the errored node and re-run with a
+    // NON-failing provider — the successful pass must CLEAR the error stop
+    // reason (else the monitoring scheduler reads a stale error forever).
+    await prisma.lineageExpansionNode.updateMany({ where: { id: badNode!.id }, data: { status: 'pending', cursor: null } });
+    const okProvider: LineageProvider = { async getWalletTransactions() { return { txs: [], nextCursor: undefined }; } };
+    await runLineageExpansion(prisma, okProvider, DEFAULT_SETTINGS, { rootId: failRoot.id, now: NOW });
+    const recovered = await prisma.lineageExpansionNode.findUnique({ where: { id: badNode!.id } });
+    expect(recovered!.status).toBe('done');
+    expect(recovered!.stopReason).toBeNull(); // error cleared on success
   });
 
   it('CAP: maxNewReceiversPerRootPerDay actually stops enrollment (not just enqueue) — edges still persist', async () => {
