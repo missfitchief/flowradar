@@ -460,10 +460,12 @@ async function promoteCandidate(
       firstSeenAt: now,
       lastActiveAt: now,
       isWatched: true,
+      status: 'signal_eligible',
       notes: `promoted from ${candidate.source}`
     },
     update: {
       isWatched: true,
+      status: 'signal_eligible',
       notes: `promoted from ${candidate.source}`
     },
     select: { id: true }

@@ -933,9 +933,10 @@ async function seedComputedWalletStats(world: MockWorld): Promise<number> {
         chain: mockWallet.chain,
         firstSeenAt: mockWallet.firstTxTs ?? now,
         lastActiveAt: mockWallet.firstTxTs ?? now,
-        isWatched: true
+        isWatched: true,
+        status: 'signal_eligible'
       },
-      update: { isWatched: true },
+      update: { isWatched: true, status: 'signal_eligible' },
       select: { id: true }
     });
 

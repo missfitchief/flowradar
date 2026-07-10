@@ -146,6 +146,10 @@ async function upsertCandidateWallet(
       firstSeenAt: now,
       lastActiveAt: now,
       isWatched: false,
+      // Explicit even though it's the column default (Phase 0 taxonomy):
+      // provider-discovered wallets are observation-only — polled and
+      // persisted, zero signal weight until validated+promoted.
+      status: 'observation_only',
       notes: note
     },
     select: { id: true }

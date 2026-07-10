@@ -498,6 +498,9 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runCandidateValidation',
 
     const walletAfter = await prisma.wallet.findUnique({ where: { id: freshWallet.id } });
     expect(walletAfter!.isWatched).toBe(true);
+    // Phase 0 taxonomy: promotion is one of the only paths that confers
+    // signal eligibility.
+    expect(walletAfter!.status).toBe('signal_eligible');
 
     // --- AFTER promotion: re-aggregate and assert it NOW counts ---
     const inputsAfter = await fetchAggregateInputs(prisma, token.id, DEFAULT_SETTINGS);
