@@ -32,10 +32,32 @@ enum ChainId {
 }
 
 /// WalletStats.source — where a stats window's numbers ultimately came from.
+/// Trust mapping (Phase 0, feat/pre-public-accumulation; see
+/// @flowradar/core statsTrustOf): csv=operator_approved,
+/// computed=locally_verified, provider=provider_claimed,
+/// synthetic=synthetic (reserved for backtest continuations — no writer yet).
 enum StatsSource {
   csv
   computed
   provider
+  synthetic
+}
+
+/// Wallet.status — THE single signal-eligibility gate (Phase 0,
+/// feat/pre-public-accumulation). Only 'signal_eligible' wallets can ever
+/// count toward early smart-money metrics (enforced at ONE point:
+/// @flowradar/core isSignalEligibleStatus inside aggregateWindow's isSmart).
+/// public_kol / public_promoter / copytrader feed late-stage crowd-arrival
+/// metrics only (Phases 1-3). observation_only wallets are still polled and
+/// their activity persisted — they just carry zero signal weight.
+enum WalletStatus {
+  observation_only
+  signal_eligible
+  public_kol
+  public_promoter
+  copytrader
+  bot_or_service
+  excluded
 }
 
 /// WalletClassification.label — 11 values.
@@ -223,9 +245,16 @@ model Wallet {
   firstSeenAt     DateTime
   lastActiveAt    DateTime
   isWatched       Boolean   @default(false)
+  /// DEPRECATED (Phase 0, feat/pre-public-accumulation): superseded by
+  /// status='excluded'. Zero code references existed when status landed;
+  /// column kept only to avoid a destructive drop in the same migration.
   isExcluded      Boolean   @default(false)
   exclusionReason String?
   notes           String?
+  /// Single signal-eligibility gate — see WalletStatus enum docs. Default
+  /// observation_only: a wallet earns eligibility ONLY via operator CSV
+  /// import, candidate promotion, or explicit operator action.
+  status          WalletStatus @default(observation_only)
 
   stats           WalletStats[]
   classifications WalletClassification[]
@@ -237,6 +266,7 @@ model Wallet {
   promotedFromCandidates CandidateWallet[]
 
   @@unique([address, chain])
+  @@index([status])
   @@map("wallets")
 }
 
