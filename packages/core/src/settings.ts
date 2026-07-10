@@ -197,6 +197,38 @@ const ConnectorsSchema = z.object({
   externalConfluence: ExternalConfluenceConfigSchema
 });
 
+// Capital Lineage Engine (Phase 6b) — bounded recursive expansion knobs.
+// Every cap is an explicit operational bound (no hidden fixed limits); the
+// engine persists a stop reason whenever one bites.
+const LineageConfigSchema = z.object({
+  /** Recursive expansion depth from each root. Operator-bounded 1-4. */
+  maxDepth: z.number().int().min(1).max(4),
+  /** Transfers below this USD value neither enroll receivers nor enqueue expansion (dust/gas exceptions aside). */
+  minTransferUsd: z.number().min(0),
+  /** Gas-funding exception ceiling: a small FIRST meaningful native-SOL funding from a trusted sender may enroll below minTransferUsd. */
+  gasFundingMaxUsd: z.number().min(0),
+  /** Receiver must become active within this many hours of the gas funding for the exception to qualify. */
+  gasFundingActivationHours: z.number().min(1),
+  /** At or below this USD value an inbound is dust: edge stored, no enrollment, no relationship strength. */
+  dustMaxUsd: z.number().min(0),
+  /** Max children enqueued per expanded node. */
+  maxChildrenPerNode: z.number().int().min(1),
+  /** Max frontier nodes per root (expansion stops with stop reason). */
+  maxNodesPerRoot: z.number().int().min(1),
+  /** Max persisted flow edges attributed per root per expansion run. */
+  maxEdgesPerRoot: z.number().int().min(1),
+  /** Max NEW hot-enrolled receivers per root per UTC day. */
+  maxNewReceiversPerRootPerDay: z.number().int().min(1),
+  /** fresh_receiver_hot subscriptions stay hot for this many hours. */
+  hotWindowHours: z.number().min(1),
+  /** Distinct-counterparty count above which an unregistered address is treated as a high-degree service node (no expansion). */
+  serviceDegreeThreshold: z.number().int().min(10),
+  /** Bounded shallow backfill: provider pages fetched per node per pass. */
+  backfillMaxPagesPerNode: z.number().int().min(1),
+  /** A wallet inactive this many days counts as long-inactive (re-funding it re-triggers enrollment). */
+  freshInactiveDays: z.number().min(1)
+});
+
 export const SettingsSchema = z
   .object({
     chainsEnabled: ChainsEnabledSchema,
@@ -206,7 +238,8 @@ export const SettingsSchema = z
     entityConfidenceThreshold: z.number(),
     alerts: AlertsSchema,
     intervals: IntervalsSchema,
-    connectors: ConnectorsSchema
+    connectors: ConnectorsSchema,
+    lineage: LineageConfigSchema
   })
   // .strict() on the TOP-LEVEL object: a PUT /api/settings body carrying an
   // unknown top-level key (typo like `interval`, or a stale/removed field) now
@@ -370,6 +403,23 @@ export const DEFAULT_SETTINGS: Settings = {
         ratioFragilityBands: [0.02, 0.05, 0.15]
       }
     }
+  },
+  // Capital Lineage Engine (Phase 6b). Conservative first-run bounds — every
+  // one operator-tunable; the engine records a stop reason when a cap bites.
+  lineage: {
+    maxDepth: 2,
+    minTransferUsd: 50,
+    gasFundingMaxUsd: 20,
+    gasFundingActivationHours: 48,
+    dustMaxUsd: 1,
+    maxChildrenPerNode: 25,
+    maxNodesPerRoot: 500,
+    maxEdgesPerRoot: 5000,
+    maxNewReceiversPerRootPerDay: 50,
+    hotWindowHours: 48,
+    serviceDegreeThreshold: 200,
+    backfillMaxPagesPerNode: 3,
+    freshInactiveDays: 30
   }
 };
 

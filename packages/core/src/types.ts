@@ -84,6 +84,19 @@ export type LegKind =
   | 'bridge_withdrawal'
   | 'contract_interaction';
 
+/**
+ * Capital Lineage Engine (Phase 6b) relationship vocabulary — MUST stay in
+ * sync with the Prisma WalletRelationshipKind enum. Probabilistic on-chain
+ * relationship, never an identity claim.
+ */
+export type WalletRelationshipKind =
+  | 'first_funder'
+  | 'direct_funding'
+  | 'repeated_transfer'
+  | 'fresh_wallet_activation'
+  | 'service_interrupted'
+  | 'unknown';
+
 export interface TxLeg {
   kind: LegKind;
   from: string;
