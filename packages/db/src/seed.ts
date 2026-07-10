@@ -2260,10 +2260,31 @@ async function printSummaryTable(): Promise<void> {
 // Orchestration
 // ---------------------------------------------------------------------------
 
+/**
+ * Lineage-root wipe guard (2026-07-10 Capital Lineage review): operator-
+ * imported roots are PERMANENT by contract, but wipeAllTables() deletes every
+ * wallet and LineageRoot/MonitoringSubscription cascade from Wallet — so a
+ * routine `npm run db:seed` on the shared LITE DB would silently destroy the
+ * operator's real root imports. Refuse when roots exist unless the operator
+ * explicitly opts in (SEED_WIPE_LINEAGE=true). Exported for tests; same
+ * fail-closed guard style as seedBacktestContinuation's MOCK_MODE refusal.
+ */
+export async function assertNoLineageRootsOrExplicitOverride(): Promise<void> {
+  const rootCount = await prisma.lineageRoot.count();
+  if (rootCount > 0 && process.env.SEED_WIPE_LINEAGE !== 'true') {
+    throw new Error(
+      `db:seed refused: ${rootCount} permanent lineage root(s) exist in this database — seeding wipes ALL wallets ` +
+        `and their roots/subscriptions cascade away. Re-run with SEED_WIPE_LINEAGE=true ONLY if you intend to ` +
+        `destroy the imported roots (they can be re-imported from the operator file afterwards).`
+    );
+  }
+}
+
 async function main(): Promise<void> {
   loadEnv();
   const startedAt = Date.now();
 
+  await assertNoLineageRootsOrExplicitOverride();
   await wipeAllTables();
 
   await bootstrapChains();

@@ -58,10 +58,31 @@ export interface RootImportResult {
 }
 
 function resolveMaxRoots(optValue: number | undefined): number {
-  if (optValue !== undefined) return optValue;
+  if (optValue !== undefined) {
+    // An explicit override must be a real positive number — NaN/Infinity
+    // would silently disable the limit (roots.length > NaN is always false).
+    if (!Number.isFinite(optValue) || optValue < 1) {
+      throw new Error(`importRootWallets: invalid maxRoots override ${optValue} — must be a finite number >= 1`);
+    }
+    return Math.floor(optValue);
+  }
   const raw = process.env.LINEAGE_IMPORT_MAX_ROOTS;
-  const parsed = raw !== undefined ? Number(raw) : NaN;
-  return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : DEFAULT_MAX_ROOTS;
+  if (raw === undefined || raw === '') return DEFAULT_MAX_ROOTS;
+  const parsed = Number(raw);
+  // A SET-but-unparseable env value must FAIL CLOSED (2026-07-10 review):
+  // an operator writing LINEAGE_IMPORT_MAX_ROOTS=5,000 to TIGHTEN the limit
+  // must not silently get the looser 10k default.
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    throw new Error(
+      `importRootWallets: LINEAGE_IMPORT_MAX_ROOTS='${raw}' is not a finite number >= 1 — refusing to guess (fail-closed on a safety limit)`
+    );
+  }
+  return Math.floor(parsed);
+}
+
+/** True when err is Prisma's unique-constraint violation (P2002). */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === 'P2002';
 }
 
 export async function importRootWallets(
@@ -87,22 +108,20 @@ export async function importRootWallets(
   let subscriptionsCreated = 0;
   let subscriptionsExisting = 0;
 
-  // Sequential per-root upserts: idempotent, resume-safe (a crash mid-file
+  // Sequential per-root writes: idempotent, resume-safe (a crash mid-file
   // heals on re-import), and DB-friendly at hundreds of roots. No global
   // transaction by design — partial progress is valid progress here.
+  //
+  // CONCURRENCY (2026-07-10 Codex review Important): each entity is written
+  // create-first with a unique-violation (P2002) fallback to the existing
+  // row — a plain find-then-create would let two concurrent imports both
+  // observe "missing", and the P2002 loser would ABORT mid-file, silently
+  // skipping the rest of its roots. With catch-and-continue, concurrent
+  // imports of overlapping files both complete; the DB uniques guarantee
+  // single rows; counts stay exact per run.
   for (const root of parsed.roots) {
-    const existingWallet = await prisma.wallet.findUnique({
-      where: { address_chain: { address: root.address, chain: 'SOLANA' } },
-      select: { id: true }
-    });
-
     let walletId: string;
-    if (existingWallet) {
-      // PRESERVATION: no field on an existing wallet is touched — not
-      // status, not isWatched, not notes.
-      walletId = existingWallet.id;
-      walletsExisting += 1;
-    } else {
+    try {
       const created = await prisma.wallet.create({
         data: {
           address: root.address,
@@ -117,17 +136,20 @@ export async function importRootWallets(
       });
       walletId = created.id;
       walletsCreated += 1;
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err;
+      // PRESERVATION: no field on an existing wallet is touched — not
+      // status, not isWatched, not notes.
+      const existing = await prisma.wallet.findUniqueOrThrow({
+        where: { address_chain: { address: root.address, chain: 'SOLANA' } },
+        select: { id: true }
+      });
+      walletId = existing.id;
+      walletsExisting += 1;
     }
 
-    const existingRoot = await prisma.lineageRoot.findUnique({ where: { walletId }, select: { id: true } });
     let lineageRootId: string;
-    if (existingRoot) {
-      // Idempotent re-import: only the telemetry timestamp advances; label,
-      // provenance, and permanence are first-import-wins.
-      await prisma.lineageRoot.update({ where: { id: existingRoot.id }, data: { lastSeenInImportAt: now } });
-      lineageRootId = existingRoot.id;
-      existingRoots += 1;
-    } else {
+    try {
       const createdRoot = await prisma.lineageRoot.create({
         data: {
           walletId,
@@ -142,16 +164,17 @@ export async function importRootWallets(
       });
       lineageRootId = createdRoot.id;
       newRoots += 1;
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err;
+      // Idempotent re-import: only the telemetry timestamp advances; label,
+      // provenance, and permanence are first-import-wins.
+      const existingRoot = await prisma.lineageRoot.findUniqueOrThrow({ where: { walletId }, select: { id: true } });
+      await prisma.lineageRoot.update({ where: { id: existingRoot.id }, data: { lastSeenInImportAt: now } });
+      lineageRootId = existingRoot.id;
+      existingRoots += 1;
     }
 
-    const existingSub = await prisma.monitoringSubscription.findUnique({
-      where: { walletId_priority: { walletId, priority: 'root_permanent' } },
-      select: { id: true }
-    });
-    if (existingSub) {
-      // PRESERVATION: an operator-deactivated subscription stays deactivated.
-      subscriptionsExisting += 1;
-    } else {
+    try {
       await prisma.monitoringSubscription.create({
         data: {
           walletId,
@@ -162,6 +185,10 @@ export async function importRootWallets(
         }
       });
       subscriptionsCreated += 1;
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err;
+      // PRESERVATION: an operator-deactivated subscription stays deactivated.
+      subscriptionsExisting += 1;
     }
   }
 

@@ -183,10 +183,52 @@ describe.skipIf(!(await probePort('localhost', 5439)))('importRootWallets', () =
     ).toBe(2);
   });
 
-  it('enforces the configurable operational safety limit (explicit opt), rejecting rather than partially importing', async () => {
+  it('enforces the configurable operational safety limit (explicit opt), rejecting with ZERO writes to any table', async () => {
     const addresses = Array.from({ length: 5 }, (_, i) => addr(6000 + i));
     await expect(importRootWallets(prisma, addresses.join('\n'), { maxRoots: 3 })).rejects.toThrow(/safety limit/i);
+    expect(await prisma.wallet.count({ where: { address: { in: addresses }, chain: 'SOLANA' } })).toBe(0);
     expect(await prisma.lineageRoot.count({ where: { wallet: { address: { in: addresses } } } })).toBe(0);
+    expect(await prisma.monitoringSubscription.count({ where: { wallet: { address: { in: addresses } } } })).toBe(0);
+  });
+
+  it('rejects an invalid explicit maxRoots override (NaN/Infinity must not disable the limit)', async () => {
+    const a = addr(6100);
+    await expect(importRootWallets(prisma, a, { maxRoots: Number.NaN })).rejects.toThrow(/invalid maxRoots/i);
+    await expect(importRootWallets(prisma, a, { maxRoots: Number.POSITIVE_INFINITY })).rejects.toThrow(/invalid maxRoots/i);
+  });
+
+  it('fails CLOSED on a set-but-unparseable LINEAGE_IMPORT_MAX_ROOTS env value', async () => {
+    const a = addr(6200);
+    const prior = process.env.LINEAGE_IMPORT_MAX_ROOTS;
+    process.env.LINEAGE_IMPORT_MAX_ROOTS = '5,000';
+    try {
+      await expect(importRootWallets(prisma, a)).rejects.toThrow(/fail-closed/i);
+    } finally {
+      if (prior === undefined) delete process.env.LINEAGE_IMPORT_MAX_ROOTS;
+      else process.env.LINEAGE_IMPORT_MAX_ROOTS = prior;
+    }
+  });
+
+  it('CONCURRENCY: two overlapping imports racing on the same fresh file both complete; no duplicates, no aborts', async () => {
+    const addresses = Array.from({ length: 12 }, (_, i) => addr(6300 + i));
+    const content = addresses.join('\n');
+
+    const [r1, r2] = await Promise.all([
+      importRootWallets(prisma, content, { fileProvenance: 'race-a.txt' }),
+      importRootWallets(prisma, content, { fileProvenance: 'race-b.txt' })
+    ]);
+
+    // Both runs finished the whole file (no mid-file P2002 abort) and between
+    // them every root was created exactly once.
+    expect(r1.validRoots).toBe(12);
+    expect(r2.validRoots).toBe(12);
+    expect(r1.newRoots + r2.newRoots).toBe(12);
+    expect(r1.existingRoots + r2.existingRoots).toBe(12);
+
+    expect(await prisma.lineageRoot.count({ where: { wallet: { address: { in: addresses } } } })).toBe(12);
+    expect(
+      await prisma.monitoringSubscription.count({ where: { wallet: { address: { in: addresses } }, priority: 'root_permanent' } })
+    ).toBe(12);
   });
 
   it('preserves inline labels onto the LineageRoot record', async () => {

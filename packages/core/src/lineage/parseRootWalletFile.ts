@@ -91,8 +91,15 @@ export function parseRootWalletFile(content: string): ParsedRootWalletFile {
     const address = (match?.[1] ?? '').trim();
     const label = match?.[2]?.trim() || undefined;
 
-    if (/^0x[0-9a-fA-F]{40}$/.test(address)) {
-      evmParked.push({ address, line: lineNo, ...(label !== undefined ? { label } : {}) });
+    // Case-insensitive prefix (2026-07-10 review: some explorers/spreadsheets
+    // emit '0X…' or checksummed hex — those must still park as EVM, never
+    // fall through to a misleading "not base58" reason).
+    if (/^0x/i.test(address)) {
+      if (/^0x[0-9a-fA-F]{40}$/i.test(address)) {
+        evmParked.push({ address, line: lineNo, ...(label !== undefined ? { label } : {}) });
+      } else {
+        malformed.push({ raw: trimmed, line: lineNo, reason: 'looks like an EVM (0x…) row but is not 40 hex chars' });
+      }
       continue;
     }
     if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) {

@@ -95,5 +95,15 @@ describe('parseRootWalletFile', () => {
     const result = parseRootWalletFile(`  ${a}  \r\n`);
     expect(result.roots).toHaveLength(1);
     expect(result.roots[0]!.address).toBe(a);
+    expect(result.totalLines).toBe(1); // trailing newline is not a phantom line
+  });
+
+  it('parks uppercase-prefixed EVM rows (0X…) and gives 0x-shaped-but-wrong-length rows an EVM-specific reason', () => {
+    const result = parseRootWalletFile(
+      ['0XCD83F4C3A4B96D56367E482A3774802877B82E13', '0xcd83f4c3a4b96d56367e482a3774802877b82e1'].join('\n')
+    );
+    expect(result.evmParked).toHaveLength(1); // uppercase prefix still parks
+    expect(result.malformed).toHaveLength(1); // 39 hex chars: malformed, but honestly labeled
+    expect(result.malformed[0]!.reason).toMatch(/EVM/);
   });
 });
