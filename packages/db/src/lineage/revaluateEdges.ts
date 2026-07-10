@@ -74,9 +74,9 @@ export async function revaluateEdges(
       lastId: null
     };
 
-    // Senders whose edges NEWLY gained a value — their completed expansion
-    // nodes are reopened after the pass so the next expansion re-enrolls.
-    const newlyValuedSenders = new Set<string>();
+    // Registry service categories — a destination in one of these makes the
+    // leg a service/internal movement (legacy A5 inference; Codex round-3).
+    const SERVICE_CATEGORIES = new Set(['CEX', 'BRIDGE', 'ROUTER', 'POOL', 'TOKEN_CONTRACT', 'MIXER']);
     let cursorId: string | undefined = opts.startAfterId;
     for (;;) {
       if (result.edgesExamined >= maxEdges) break;
@@ -93,7 +93,7 @@ export async function revaluateEdges(
         // with the previous run's lastId rather than restarting at id 0).
         orderBy: { id: 'asc' },
         take: Math.min(50, maxEdges - result.edgesExamined),
-        select: { id: true, asset: true, assetMint: true, amountToken: true, amountUsd: true, ts: true, sourceAddress: true, valuedUsd: true }
+        select: { id: true, asset: true, assetMint: true, amountToken: true, amountUsd: true, ts: true, sourceAddress: true, destinationAddress: true, valuedUsd: true }
       });
       if (batch.length === 0) break;
 
@@ -102,11 +102,20 @@ export async function revaluateEdges(
         cursorId = edge.id;
         const hadValue = edge.valuedUsd !== null;
         try {
+          // Legacy A5 (Codex round-3): a destination registered as a service
+          // makes the leg a service/internal movement -> not_applicable.
+          const destReg = await prisma.addressRegistry.findFirst({
+            where: { address: edge.destinationAddress, chain: 'SOLANA' },
+            select: { category: true }
+          });
+          const isServiceLeg = destReg !== null && SERVICE_CATEGORIES.has(destReg.category);
+
           const valuation = await resolveTransferValuation(
             prisma,
             {
               asset: edge.asset,
               assetMint: edge.assetMint,
+              isServiceLeg,
               amountToken: Number(edge.amountToken),
               transferTs: edge.ts,
               // Legacy positive amountUsd is a provider ingest valuation.
@@ -116,47 +125,44 @@ export async function revaluateEdges(
           );
           result.byStatus[valuation.status] = (result.byStatus[valuation.status] ?? 0) + 1;
 
-          // Update ONLY valuation fields — never the raw amount or identity.
-          await prisma.moneyFlowEdge.update({
-            where: { id: edge.id },
-            data: {
-              valuedUsd: valuation.valuedUsd,
-              priceUsd: valuation.priceUsd,
-              priceTimestamp: valuation.priceTimestamp,
-              valuationStatus: valuation.status,
-              valuationSource: valuation.source,
-              valuationConfidence: valuation.confidence,
-              valuationAgeSeconds: valuation.ageSeconds,
-              valuationReason: valuation.reason
-            }
-          });
+          const edgeData = {
+            valuedUsd: valuation.valuedUsd,
+            priceUsd: valuation.priceUsd,
+            priceTimestamp: valuation.priceTimestamp,
+            valuationStatus: valuation.status,
+            valuationSource: valuation.source,
+            valuationConfidence: valuation.confidence,
+            valuationAgeSeconds: valuation.ageSeconds,
+            valuationReason: valuation.reason
+          };
+          const newlyValued = valuation.valuedUsd !== null && !hadValue;
 
-          if (valuation.valuedUsd !== null) {
+          if (newlyValued) {
+            // ATOMIC (Codex round-3): the edge valuation update and the node
+            // reopen commit together, so a crash can't leave a valued edge
+            // (excluded from future revaluation) with a permanently-done node.
+            // Reopen BOTH done and pending nodes (a pending node's cursor may
+            // have advanced past this earlier edge) with cursor reset so the
+            // wallet is re-scanned from the start.
+            const [, reopened] = await prisma.$transaction([
+              prisma.moneyFlowEdge.update({ where: { id: edge.id }, data: edgeData }),
+              prisma.lineageExpansionNode.updateMany({
+                where: { walletAddress: edge.sourceAddress, chain: 'SOLANA', status: { in: ['done', 'pending', 'skipped'] } },
+                data: { status: 'pending', cursor: null, stopReason: null }
+              })
+            ]);
+            result.nodesReopened += reopened.count;
             result.edgesValued += 1;
-            if (!hadValue) {
-              result.newlyValued += 1;
-              newlyValuedSenders.add(edge.sourceAddress);
-            }
+            result.newlyValued += 1;
           } else {
-            result.stillUnavailable += 1;
+            await prisma.moneyFlowEdge.update({ where: { id: edge.id }, data: edgeData });
+            if (valuation.valuedUsd !== null) result.edgesValued += 1;
+            else result.stillUnavailable += 1;
           }
         } catch {
           result.errors += 1;
         }
       }
-    }
-
-    // Reopen completed expansion nodes for senders whose edges NEWLY gained a
-    // value, so the next expansion pass re-processes them and enrolls
-    // receivers that were previously skipped as unavailable/$0 (Codex Wave-A
-    // round 2). Cursor reset so the wallet is re-scanned from the start;
-    // idempotent (edges + relationships dedupe).
-    if (newlyValuedSenders.size > 0) {
-      const reopened = await prisma.lineageExpansionNode.updateMany({
-        where: { walletAddress: { in: [...newlyValuedSenders] }, status: 'done' },
-        data: { status: 'pending', cursor: null, stopReason: null }
-      });
-      result.nodesReopened = reopened.count;
     }
 
     result.lastId = cursorId ?? null;

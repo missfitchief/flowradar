@@ -28,6 +28,9 @@ beforeAll(async () => { dbReachable = await probePort('localhost', 5439); });
 
 async function cleanup() {
   await prisma.moneyFlowEdge.deleteMany({ where: { OR: [{ sourceAddress: { startsWith: PREFIX } }, { destinationAddress: { startsWith: PREFIX } }] } });
+  await prisma.lineageExpansionNode.deleteMany({ where: { walletAddress: { startsWith: PREFIX } } });
+  await prisma.lineageRoot.deleteMany({ where: { wallet: { address: { startsWith: PREFIX } } } });
+  await prisma.wallet.deleteMany({ where: { address: { startsWith: PREFIX } } });
   await prisma.tokenMarketSnapshot.deleteMany({ where: { token: { address: { in: [WSOL_MINT, USDC_MINT, `${PREFIX}_spl`] } } } });
   await prisma.token.deleteMany({ where: { address: { in: [WSOL_MINT, `${PREFIX}_spl`] } } });
 }
@@ -189,10 +192,11 @@ describe.skipIf(!(await probePort('localhost', 5439)))('revaluateEdges + resolve
     const sorted = [...ids].sort();
     const r1 = await revaluateEdges(prisma, settings, { maxEdgesPerPass: 2, sourceAddressStartsWith: PREFIX });
     expect(r1.lastId).not.toBeNull();
+    expect(r1.lastId).toBe(sorted[1]); // examined the two lowest ids
     const r2 = await revaluateEdges(prisma, settings, { maxEdgesPerPass: 2, startAfterId: r1.lastId!, sourceAddressStartsWith: PREFIX });
-    // r2 only sees ids strictly greater than r1.lastId — no re-examination.
-    expect(r2.edgesExamined).toBeLessThanOrEqual(2);
-    void sorted;
+    // r2 pages FORWARD: only ids > r1.lastId — proves no restart/re-examination.
+    expect(r2.lastId).toBe(sorted[3]);
+    expect(r2.edgesExamined).toBe(2);
   });
 
   it('LEGACY positive amountUsd is treated as a provider valuation (exact_provider_historical)', async () => {

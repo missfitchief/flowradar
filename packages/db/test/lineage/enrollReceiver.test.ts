@@ -247,6 +247,20 @@ describe.skipIf(!(await probePort('localhost', 5439)))('enrollReceiverFromTransf
     expect(b!.status).not.toBe('signal_eligible');
   });
 
+  it('NOT_APPLICABLE valuation (service/swap leg) never enrolls, even with a positive legacy amountUsd', async () => {
+    const { wallet: rootWallet, root } = await makeRoot('napp');
+    const receiver = `${PREFIX}_nappB`;
+    const t = transfer({ fromAddress: rootWallet.address, toAddress: receiver, amountUsd: 100 });
+    // A swap-internal leg: legacy amountUsd is positive but valuation is not_applicable.
+    t.valuation = { valuedUsd: null, priceUsd: null, priceTimestamp: null, status: 'not_applicable', source: null, confidence: 0, ageSeconds: null, reason: 'service leg' };
+
+    const result = await enrollReceiverFromTransfer(prisma, t, root.id, 0, DEFAULT_SETTINGS, NOW);
+    expect(result.enrolled).toBe(false);
+    expect(result.reason).toMatch(/not_applicable|service/i);
+    const b = await prisma.wallet.findUnique({ where: { address_chain: { address: receiver, chain: 'SOLANA' } } });
+    expect(b).toBeNull(); // never enrolled despite legacy $100
+  });
+
   it('untrusted sender does not enroll', async () => {
     const sender = await prisma.wallet.create({
       data: { address: `${PREFIX}_untrusted`, chain: 'SOLANA', firstSeenAt: NOW, lastActiveAt: NOW, status: 'observation_only' }

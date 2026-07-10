@@ -230,12 +230,17 @@ export async function enrollReceiverFromTransfer(
       })) > 0
     : false;
 
-  // Classification USD comes from the HONEST valuation when present, NOT from
-  // the legacy amountUsd column (Wave A Codex-Critical: the legacy column
-  // feeds the existing FlowScore/Rule-E path and must stay untouched). An
-  // unavailable valuation falls back to the legacy provider value (usually 0
-  // for Helius native SOL) — treated as sub-dust, the safe direction.
-  const classificationUsd = transfer.valuation?.valuedUsd ?? transfer.amountUsd;
+  // Classification USD comes from the HONEST valuation when present, NOT the
+  // legacy amountUsd column (feeds the FlowScore/Rule-E path). Distinguish
+  // "no valuation object" (legacy caller — use legacy amountUsd) from
+  // "valuation present but valuedUsd null" (unavailable/not_applicable — value
+  // is UNKNOWN, treat as $0, NEVER fall back to the legacy column; Codex
+  // round-3). A not_applicable (service/internal-swap leg) is never funding —
+  // persist the edge and stop before enrollment.
+  if (transfer.valuation?.status === 'not_applicable') {
+    return { edgePersisted, enrolled: false, replay: false, newReceiver: false, enqueued: false, viaGasException: false, dust: false, reason: 'not_applicable (service/internal leg) — edge persisted, never enrolled' };
+  }
+  const classificationUsd = transfer.valuation ? (transfer.valuation.valuedUsd ?? 0) : transfer.amountUsd;
   const ctx: ReceiverContext = {
     senderTrusted,
     transferUsd: classificationUsd,
