@@ -295,6 +295,11 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runCandidateValidation',
     expect(row!.validationStatus).toBe('promoted');
     expect(row!.promotedWalletId).not.toBeNull();
 
+    // Create-branch status (Phase 0): a promotion that CREATES the wallet
+    // row must mint it signal_eligible.
+    const createdWallet = await prisma.wallet.findUnique({ where: { id: row!.promotedWalletId! } });
+    expect(createdWallet!.status).toBe('signal_eligible');
+
     const stats = await prisma.walletStats.findFirst({ where: { walletId: row!.promotedWalletId! } });
     expect(stats).not.toBeNull();
     expect(stats!.source).toBe('provider');
@@ -710,5 +715,50 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runCandidateValidation',
     expect(result.errors).toBeGreaterThanOrEqual(1);
     const row = await prisma.candidateWallet.findFirst({ where: { walletAddress: address } });
     expect(row!.validationStatus).toBe('promoted');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Classification survives promotion (Phase 0 review, both reviewers):
+  // a wallet an operator/classifier marked public_kol (or excluded, bot,
+  // copytrader...) must NOT be re-enabled just because a candidate for the
+  // same address later clears automated validation. Classification wins;
+  // promotion may only upgrade observation_only.
+  // ---------------------------------------------------------------------------
+  it('CLASSIFICATION WINS: promoting a candidate whose wallet is public_kol leaves the status untouched (no re-enable)', async () => {
+    const now = new Date();
+    const address = `${ADDR_PREFIX}_kolpromo`;
+    await prisma.wallet.create({
+      data: { address, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: false, status: 'public_kol' }
+    });
+    await makeCandidate({ walletAddress: address, claimedPnlUsd: 9500, claimedWinRate: 0.6, claimedTradeCount: 20 });
+
+    const result = await runCandidateValidation(prisma, DEFAULT_SETTINGS, async (chain, walletAddress) => {
+      if (walletAddress !== address) return null;
+      return { pnl30d: 9500, realizedPnlUsd: 6000, winRate: 0.6, tradeCount: 20, avgTradeSizeUsd: 500, confidence: 80 };
+    });
+    expect(result.promoted).toBeGreaterThanOrEqual(1);
+
+    const wallet = await prisma.wallet.findUnique({ where: { address_chain: { address, chain: CHAIN } } });
+    expect(wallet!.status).toBe('public_kol'); // classification survives
+    const candidate = await prisma.candidateWallet.findFirst({ where: { walletAddress: address } });
+    expect(candidate!.validationStatus).toBe('promoted'); // evidence was valid — bookkeeping records it
+  });
+
+  it('CLASSIFICATION WINS: an observation_only wallet IS upgraded to signal_eligible by promotion', async () => {
+    const now = new Date();
+    const address = `${ADDR_PREFIX}_obspromo`;
+    await prisma.wallet.create({
+      data: { address, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: false, status: 'observation_only' }
+    });
+    await makeCandidate({ walletAddress: address, claimedPnlUsd: 9500, claimedWinRate: 0.6, claimedTradeCount: 20 });
+
+    await runCandidateValidation(prisma, DEFAULT_SETTINGS, async (chain, walletAddress) => {
+      if (walletAddress !== address) return null;
+      return { pnl30d: 9500, realizedPnlUsd: 6000, winRate: 0.6, tradeCount: 20, avgTradeSizeUsd: 500, confidence: 80 };
+    });
+
+    const wallet = await prisma.wallet.findUnique({ where: { address_chain: { address, chain: CHAIN } } });
+    expect(wallet!.status).toBe('signal_eligible');
+    expect(wallet!.isWatched).toBe(true);
   });
 });

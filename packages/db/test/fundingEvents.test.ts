@@ -301,4 +301,88 @@ describe.skipIf(!(await probePort('localhost', 5439)))('buildFundingEvents', () 
     const match = events.find((e) => e.funderWalletId === funder.id && e.fundedWalletId === funded.id);
     expect(match).toBeUndefined();
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase 0 status gate (2026-07-10 review): Rule E's funder qualification
+  // consumes THE eligibility gate — it was a second, contradictory smartness
+  // predicate (isWatched || profitable, no status, no stats-source trust).
+  // ---------------------------------------------------------------------------
+  async function seedFundingScenario(tag: string, funderData: { isWatched: boolean; status: string; statsSource?: 'computed' | 'provider' }) {
+    const funderAddr = `${ADDR_PREFIX}_funder_${tag}`;
+    const fundedAddr = `${ADDR_PREFIX}_funded_${tag}`;
+    const tokenAddr = `${ADDR_PREFIX}_token_${tag}`;
+    const now = new Date('2026-07-05T12:00:00Z');
+
+    const funder = await prisma.wallet.create({
+      data: {
+        address: funderAddr,
+        chain: CHAIN,
+        firstSeenAt: now,
+        lastActiveAt: now,
+        isWatched: funderData.isWatched,
+        status: funderData.status as never
+      }
+    });
+    if (funderData.statsSource) {
+      await prisma.walletStats.create({
+        data: {
+          walletId: funder.id,
+          window: '30d',
+          pnlUsd: 9500,
+          realizedPnlUsd: 6000,
+          unrealizedPnlUsd: 3500,
+          winRate: 0.6,
+          tradeCount: 20,
+          avgTradeSizeUsd: 500,
+          walletScore: 70,
+          scoreComponents: {},
+          pnlConfidence: 80,
+          source: funderData.statsSource,
+          computedAt: now
+        }
+      });
+    }
+    const funded = await prisma.wallet.create({
+      data: { address: fundedAddr, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: false }
+    });
+    const token = await prisma.token.create({
+      data: { chain: CHAIN, address: tokenAddr, symbol: 'T15F', name: 'gate token', decimals: 9, firstSeenAt: now, riskFlags: [] }
+    });
+    await prisma.moneyFlowEdge.create({
+      data: {
+        sourceAddress: funderAddr,
+        destinationAddress: fundedAddr,
+        sourceChain: CHAIN,
+        destinationChain: CHAIN,
+        asset: 'SOL',
+        amountToken: 5,
+        amountUsd: 1000,
+        ts: new Date(now.getTime() - 30 * 60_000),
+        txHash: `${ADDR_PREFIX}_tx_${tag}`,
+        actionType: 'transfer',
+        confidence: 100,
+        providerSource: 'test',
+        metadata: {}
+      }
+    });
+    const windowFrom = new Date(now.getTime() - 2 * 60 * 60_000);
+    const events = await buildFundingEvents(prisma, token.id, windowFrom, now, DEFAULT_SETTINGS);
+    return events.some((e) => e.funderWalletId === funder.id);
+  }
+
+  it('STATUS GATE: an EXCLUDED funder with isWatched=true residue (backfill leaves the flag) produces NO FundingEvent', async () => {
+    expect(await seedFundingScenario('excl', { isWatched: true, status: 'excluded' })).toBe(false);
+  });
+
+  it('STATUS GATE: an observation_only funder with profitable COMPUTED stats produces NO FundingEvent', async () => {
+    expect(await seedFundingScenario('obs', { isWatched: false, status: 'observation_only', statsSource: 'computed' })).toBe(false);
+  });
+
+  it('STATUS GATE: a signal_eligible unwatched funder with profitable PROVIDER-claimed stats produces NO FundingEvent (trust gate)', async () => {
+    expect(await seedFundingScenario('prov', { isWatched: false, status: 'signal_eligible', statsSource: 'provider' })).toBe(false);
+  });
+
+  it('STATUS GATE: a signal_eligible unwatched funder with profitable COMPUTED stats still qualifies', async () => {
+    expect(await seedFundingScenario('comp', { isWatched: false, status: 'signal_eligible', statsSource: 'computed' })).toBe(true);
+  });
 });

@@ -32,6 +32,10 @@ interface FakeWallet {
   chain: 'SOLANA' | 'BSC';
   /** Phase 0 taxonomy — defaults to signal_eligible in the fake findMany. */
   status?: string;
+  /** Defaults true (legacy fixtures model watched wallets). */
+  isWatched?: boolean;
+  /** Defaults true (legacy fixtures model wallets with stats rows). */
+  hasStats?: boolean;
 }
 
 function makeTx(seq = 0): NormalizedTx {
@@ -89,14 +93,39 @@ function makeCtx(wallets: FakeWallet[], provider: unknown) {
   const cursors = new Map<string, string | null>();
   const prisma = {
     wallet: {
-      // Honors the one where-shape walletActivity uses for the Phase 0
-      // exclusion filter (status: { not: ... }); everything else passes
-      // through — same honest-minimal-fake convention as providerSyncState.
-      findMany: vi.fn(async ({ where }: { where?: { status?: { not?: string } } } = {}) => {
-        const notStatus = where?.status?.not;
-        if (!notStatus) return wallets;
-        return wallets.filter((w) => (w.status ?? 'signal_eligible') !== notStatus);
-      })
+      // Honors the FULL where-shape walletActivity actually sends
+      // (status: { not } + OR [isWatched / stats.some / status equality]) so
+      // the selection assertions exercise real Prisma semantics rather than
+      // a fake that returns everything (2026-07-10 Phase 0 review: a fake
+      // ignoring the OR predicate made the observation-polling test vacuous).
+      findMany: vi.fn(
+        async (
+          {
+            where
+          }: {
+            where?: {
+              status?: { not?: string };
+              OR?: ({ isWatched?: boolean } | { stats?: { some: object } } | { status?: string })[];
+            };
+          } = {}
+        ) => {
+          return wallets.filter((w) => {
+            const status = w.status ?? 'signal_eligible';
+            const isWatched = w.isWatched ?? true;
+            const hasStats = w.hasStats ?? true;
+            if (where?.status?.not !== undefined && status === where.status.not) return false;
+            if (where?.OR) {
+              return where.OR.some((clause) => {
+                if ('isWatched' in clause) return isWatched === clause.isWatched;
+                if ('stats' in clause) return hasStats;
+                if ('status' in clause) return status === clause.status;
+                return false;
+              });
+            }
+            return true;
+          });
+        }
+      )
     },
     providerSyncState: {
       findUnique: vi.fn(async ({ where }: { where: { provider_chain_scope: { scope: string } } }) => {
@@ -287,13 +316,18 @@ describe('walletActivity — bounded backfill (F7)', () => {
 });
 
 describe('walletActivity — status exclusion (Phase 0, pre-public-accumulation)', () => {
-  it('excluded wallets are never polled; observation_only wallets ARE (activity persisted, zero signal weight)', async () => {
-    const { provider, calls } = makeFakeProvider({ NORMAL: 3, OBSERVED: 3, BANNED: 3 });
+  it('excluded wallets are never polled; observation_only wallets ARE — even with no stats row at all', async () => {
+    const { provider, calls } = makeFakeProvider({ NORMAL: 3, OBSERVED: 3, FRESHOBS: 3, BANNED: 3 });
     const { ctx } = makeCtx(
       [
-        { id: 'w1', address: 'NORMAL', chain: 'SOLANA', status: 'signal_eligible' },
-        { id: 'w2', address: 'OBSERVED', chain: 'SOLANA', status: 'observation_only' },
-        { id: 'w3', address: 'BANNED', chain: 'SOLANA', status: 'excluded' }
+        { id: 'w1', address: 'NORMAL', chain: 'SOLANA', status: 'signal_eligible', isWatched: true, hasStats: true },
+        { id: 'w2', address: 'OBSERVED', chain: 'SOLANA', status: 'observation_only', isWatched: false, hasStats: true },
+        // The spec guarantee: a stats-less observation wallet (flow-graph
+        // receiver, fresh discovery) is STILL polled so its activity is
+        // persisted — the legacy watched-or-has-stats predicate alone
+        // would silently skip it.
+        { id: 'w3', address: 'FRESHOBS', chain: 'SOLANA', status: 'observation_only', isWatched: false, hasStats: false },
+        { id: 'w4', address: 'BANNED', chain: 'SOLANA', status: 'excluded', isWatched: true, hasStats: true }
       ],
       provider
     );
@@ -303,6 +337,7 @@ describe('walletActivity — status exclusion (Phase 0, pre-public-accumulation)
     const polledAddresses = new Set(calls.map((c) => c.address));
     expect(polledAddresses.has('NORMAL')).toBe(true);
     expect(polledAddresses.has('OBSERVED')).toBe(true); // observation persists
+    expect(polledAddresses.has('FRESHOBS')).toBe(true); // ...even stats-less
     expect(polledAddresses.has('BANNED')).toBe(false); // excluded is never polled
   });
 });

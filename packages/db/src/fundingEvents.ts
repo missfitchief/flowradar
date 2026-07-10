@@ -33,8 +33,8 @@
 // no Wallet counterpart to report a FundingEvent for).
 
 import type { PrismaClient } from '@prisma/client';
-import { isProfitableWallet } from '@flowradar/core';
-import type { FundingEvent, Settings } from '@flowradar/core';
+import { isProfitableWallet, isSignalEligibleStatus, statsTrustOf } from '@flowradar/core';
+import type { FundingEvent, Settings, WalletStatus } from '@flowradar/core';
 
 export async function buildFundingEvents(
   prisma: PrismaClient,
@@ -65,7 +65,7 @@ export async function buildFundingEvents(
 
   const walletRows = await prisma.wallet.findMany({
     where: { address: { in: allAddresses } },
-    select: { id: true, address: true, chain: true, isWatched: true }
+    select: { id: true, address: true, chain: true, isWatched: true, status: true }
   });
   const walletByAddressChain = new Map(walletRows.map((w) => [`${w.address}:${w.chain}`, w]));
   const allWalletIds = walletRows.map((w) => w.id);
@@ -80,7 +80,8 @@ export async function buildFundingEvents(
         realizedPnlUsd: true,
         winRate: true,
         tradeCount: true,
-        avgTradeSizeUsd: true
+        avgTradeSizeUsd: true,
+        source: true
       }
     }),
     // First-ever trade per wallet (any action, any token) — used to decide
@@ -113,10 +114,20 @@ export async function buildFundingEvents(
     if (!firstBuyOfTokenByWallet.has(row.walletId)) firstBuyOfTokenByWallet.set(row.walletId, row);
   }
 
-  function isFunderQualified(walletId: string, isWatched: boolean): boolean {
+  // Rule E's funder gate consumes THE eligibility gate (Phase 0 review,
+  // 2026-07-10 — this function was a second, contradictory smartness
+  // predicate): a funder qualifies only when signal_eligible AND (watched OR
+  // profitable on TRUSTED stats). Mirrors fetchAggregateInputs exactly —
+  // provider-claimed figures never qualify an unwatched funder, synthetic
+  // never qualifies anyone, and a wallet whose status is excluded/public/
+  // bot keeps isWatched residue without regaining signal weight here.
+  function isFunderQualified(walletId: string, isWatched: boolean, status: WalletStatus): boolean {
+    if (!isSignalEligibleStatus(status)) return false;
     if (isWatched) return true;
     const stats = latestStatsByWallet.get(walletId);
     if (!stats) return false;
+    const trust = statsTrustOf(stats.source);
+    if (trust === 'synthetic' || trust === 'provider_claimed') return false;
     return isProfitableWallet(
       {
         pnlUsd: Number(stats.pnlUsd),
@@ -136,7 +147,7 @@ export async function buildFundingEvents(
     const funded = walletByAddressChain.get(`${edge.destinationAddress}:${edge.destinationChain}`);
     if (!funder || !funded) continue; // one side isn't a known Wallet row — not representable as a FundingEvent
 
-    if (!isFunderQualified(funder.id, funder.isWatched)) continue;
+    if (!isFunderQualified(funder.id, funder.isWatched, funder.status as WalletStatus)) continue;
 
     const fundedFirstTradeTs = firstTradeTsByWallet.get(funded.id);
     // Freshness: the funded wallet's first-ever trade (if any) must be AFTER

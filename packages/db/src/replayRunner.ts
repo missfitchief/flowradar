@@ -129,7 +129,7 @@ export interface RunHistoricalReplayResult {
 }
 
 const LIMITATIONS = [
-  'Wallet profitability (isWatched/meetsProfitable) and entity-cluster membership are current-state snapshots, ' +
+  'Wallet profitability (isWatched/meetsProfitable), wallet STATUS (Phase 0 eligibility gate — a later public_kol/excluded classification retroactively removes that wallet from replayed smart counts), and entity-cluster membership are current-state snapshots, ' +
     'NOT time-reconstructed to what they would have looked like as of each simulated replay step T — a known ' +
     'approximation (see @flowradar/core replay.ts header, Task 41 binding decision 1).'
 ];

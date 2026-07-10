@@ -203,4 +203,59 @@ describe.skipIf(!(await probePort('localhost', 5439)))('importWalletsCsv', () =>
     expect(importJob!.status).toBe('completed_with_errors');
     expect(importJob!.errorRows).toBe(4);
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase 0 status taxonomy (2026-07-10 review — all three import-side
+  // status mutations were untested): fresh create mints signal_eligible;
+  // re-import upgrades observation_only (and grants isWatched in the same
+  // write); classified statuses survive re-import.
+  // ---------------------------------------------------------------------------
+  // This file cleans up in afterAll only (tests above share upsert
+  // semantics); the STATUS tests need a pristine wallet row, so each resets
+  // the fixture addresses itself.
+  async function resetFixtureWallets() {
+    await prisma.walletClassification.deleteMany({ where: { wallet: { address: { in: [SOLANA_ADDR_A, BSC_ADDR] } } } });
+    await prisma.walletStats.deleteMany({ where: { wallet: { address: { in: [SOLANA_ADDR_A, BSC_ADDR] } } } });
+    await prisma.wallet.deleteMany({ where: { address: { in: [SOLANA_ADDR_A, BSC_ADDR] } } });
+  }
+
+  it('STATUS: a freshly created wallet is signal_eligible + isWatched (operator-vouched Layer-1)', async () => {
+    await resetFixtureWallets();
+    await importWalletsCsv(prisma, validCsvFixture(), 'T6TEST-status-fresh.csv');
+    const wallet = await prisma.wallet.findUnique({
+      where: { address_chain: { address: SOLANA_ADDR_A, chain: 'SOLANA' } }
+    });
+    expect(wallet!.status).toBe('signal_eligible');
+    expect(wallet!.isWatched).toBe(true);
+  });
+
+  it('STATUS: re-importing a pre-existing observation_only wallet upgrades it to signal_eligible + isWatched', async () => {
+    await resetFixtureWallets();
+    const now = new Date();
+    await prisma.wallet.create({
+      data: { address: SOLANA_ADDR_A, chain: 'SOLANA', firstSeenAt: now, lastActiveAt: now, isWatched: false, status: 'observation_only' }
+    });
+    await importWalletsCsv(prisma, validCsvFixture(), 'T6TEST-status-upgrade.csv');
+    const wallet = await prisma.wallet.findUnique({
+      where: { address_chain: { address: SOLANA_ADDR_A, chain: 'SOLANA' } }
+    });
+    expect(wallet!.status).toBe('signal_eligible');
+    expect(wallet!.isWatched).toBe(true);
+  });
+
+  it('STATUS: a classified wallet (public_kol) keeps its status on re-import — import supplies figures, classification decides weight', async () => {
+    await resetFixtureWallets();
+    const now = new Date();
+    await prisma.wallet.create({
+      data: { address: SOLANA_ADDR_A, chain: 'SOLANA', firstSeenAt: now, lastActiveAt: now, isWatched: false, status: 'public_kol' }
+    });
+    const result = await importWalletsCsv(prisma, validCsvFixture(), 'T6TEST-status-kol.csv');
+    expect(result.okRows).toBe(2); // the import itself succeeds — stats are written
+    const wallet = await prisma.wallet.findUnique({
+      where: { address_chain: { address: SOLANA_ADDR_A, chain: 'SOLANA' } }
+    });
+    expect(wallet!.status).toBe('public_kol'); // classification survives
+    const stats = await prisma.walletStats.findFirst({ where: { walletId: wallet!.id } });
+    expect(stats).not.toBeNull(); // figures still imported
+  });
 });

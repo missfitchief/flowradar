@@ -156,10 +156,17 @@ function pairBridgeLegs(
  * pass).
  */
 export async function buildRotationInputs(prisma: PrismaClient, windowFrom: Date, now: Date): Promise<RotationInputs> {
-  // -- ProfitExit: every SELL in-window, walletId+tokenId scoped, with
-  // cumulative FIFO realized PnL as of that SELL. --------------------------
+  // -- ProfitExit: every SELL in-window from a SIGNAL-ELIGIBLE wallet,
+  // walletId+tokenId scoped, with cumulative FIFO realized PnL as of that
+  // SELL. The status filter is the Phase 0 eligibility gate (2026-07-10
+  // review): Rule F's premise is "a SMART wallet rotated profits into a new
+  // token" — exits by public KOL/copytrader/bot/observation/excluded
+  // wallets must not seed rotation candidates or fire HIGH profit_rotation
+  // signals. (The DEST side stays unfiltered by design: the receiving
+  // wallet of a rotation is often a fresh/observation wallet — Phase 6's
+  // receiver tracking — and the signal's eligibility rests on the exiter.)
   const sellsInWindow = await prisma.walletTokenTrade.findMany({
-    where: { action: 'SELL', ts: { gte: windowFrom, lte: now } },
+    where: { action: 'SELL', ts: { gte: windowFrom, lte: now }, wallet: { status: 'signal_eligible' } },
     select: { walletId: true, tokenId: true, ts: true },
     orderBy: { ts: 'asc' }
   });

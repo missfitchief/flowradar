@@ -1150,7 +1150,7 @@ async function seedQualifyingCandidateTrades(
   for (const candidate of goodCandidates) {
     const wallet = await prisma.wallet.upsert({
       where: { address_chain: { address: candidate.walletAddress, chain: 'SOLANA' } },
-      create: { address: candidate.walletAddress, chain: 'SOLANA', firstSeenAt: now, lastActiveAt: now, isWatched: false },
+      create: { address: candidate.walletAddress, chain: 'SOLANA', firstSeenAt: now, lastActiveAt: now, isWatched: false, status: 'observation_only' },
       update: {}
     });
 

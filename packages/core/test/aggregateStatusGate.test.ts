@@ -86,4 +86,26 @@ describe('aggregateWindow status gate', () => {
     const agg = aggregate([walletInfo('w_plain', 'signal_eligible', { meetsProfitable: false })]);
     expect(agg.smartWalletCount).toBe(0);
   });
+
+  it('windowed accumulation counts (smartWalletCount30m/1h/6h) are smart-gated too — a KOL/copytrader crowd cannot inflate Rule A tiering', () => {
+    // 1440-min window so the accumulation block computes; all buys 5 minutes
+    // ago so every trailing window (30m/1h/6h) contains them.
+    const wallets = [
+      walletInfo('w_smart', 'signal_eligible', { meetsProfitable: true }),
+      walletInfo('w_kol', 'public_kol', { isWatched: true, meetsProfitable: true }),
+      walletInfo('w_copy', 'copytrader', { meetsProfitable: true })
+    ];
+    const agg = aggregateWindow({
+      trades: wallets.map((w) => buyTrade(w.walletId, 5)),
+      wallets,
+      clusters: [],
+      market: [],
+      windowMinutes: 1440,
+      now: NOW
+    });
+    expect(agg.accumulation).toBeDefined();
+    expect(agg.accumulation!.smartWalletCount30m).toBe(1);
+    expect(agg.accumulation!.smartWalletCount1h).toBe(1);
+    expect(agg.accumulation!.smartWalletCount6h).toBe(1);
+  });
 });

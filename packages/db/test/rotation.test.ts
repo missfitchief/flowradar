@@ -455,4 +455,44 @@ describe.skipIf(!(await probePort('localhost', 5439)))('buildRotationInputs / ru
     expect(candidate2!.destWalletId).toBe(dest2.id);
     expect(candidate2!.destTokenId).toBe(gammaToken.id);
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase 0 status gate (2026-07-10 review): Rule F's premise is "a SMART
+  // wallet rotated profits" — exits by non-eligible wallets (public KOL,
+  // copytrader, bot, observation, excluded) must not seed rotation
+  // candidates, however profitable the exit.
+  // ---------------------------------------------------------------------------
+  it('STATUS GATE: a profitable in-window SELL by a public_kol wallet produces NO ProfitExit', async () => {
+    const now = new Date('2026-07-05T12:00:00Z');
+    const windowFrom = new Date(now.getTime() - 48 * 60 * 60_000);
+    const tokenAddr = `${ADDR_PREFIX}_kol_token`;
+    const kolAddr = `${ADDR_PREFIX}_kol_exiter`;
+
+    const token = await prisma.token.create({
+      data: { chain: 'SOLANA', address: tokenAddr, symbol: 'T23K', name: 'KOL exit token', decimals: 9, firstSeenAt: windowFrom, riskFlags: [] }
+    });
+    const kol = await prisma.wallet.create({
+      data: { address: kolAddr, chain: 'SOLANA', firstSeenAt: windowFrom, lastActiveAt: now, isWatched: true, status: 'public_kol' }
+    });
+    const buyTs = new Date(now.getTime() - 20 * 60 * 60_000);
+    await prisma.walletTokenTrade.create({
+      data: {
+        walletId: kol.id, tokenId: token.id, chain: 'SOLANA', action: 'BUY',
+        amountToken: 200_000, amountUsd: 2000, txHash: `${ADDR_PREFIX}_tx_kol_buy`,
+        blockOrSlot: BigInt(11), ts: buyTs, priceUsd: 0.01, marketCapAtTrade: 600_000,
+        walletScoreAtTime: 80, provider: 'test'
+      }
+    });
+    await prisma.walletTokenTrade.create({
+      data: {
+        walletId: kol.id, tokenId: token.id, chain: 'SOLANA', action: 'SELL',
+        amountToken: 200_000, amountUsd: 5000, txHash: `${ADDR_PREFIX}_tx_kol_sell`,
+        blockOrSlot: BigInt(12), ts: new Date(buyTs.getTime() + 6 * 60 * 60_000), priceUsd: 0.025,
+        marketCapAtTrade: 900_000, walletScoreAtTime: 80, provider: 'test'
+      }
+    });
+
+    const inputs = await buildRotationInputs(prisma, windowFrom, now);
+    expect(inputs.exits.some((e) => e.walletId === kol.id)).toBe(false);
+  });
 });

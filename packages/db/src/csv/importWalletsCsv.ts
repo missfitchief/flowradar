@@ -499,12 +499,20 @@ async function upsertWalletFromCsvRow(prisma: PrismaClient, row: ParsedRow): Pro
 
   // Phase 0 taxonomy: re-importing a pre-existing wallet upgrades ONLY
   // observation_only -> signal_eligible (the operator vouched for it by
-  // putting it in the CSV). Any classified status — public_kol,
-  // public_promoter, copytrader, bot_or_service, excluded — survives
-  // re-import: a KOL stays a KOL even when the operator imports its stats;
-  // the import supplies FIGURES, classification decides SIGNAL WEIGHT.
+  // putting it in the CSV), granting isWatched in the same write so a
+  // discovery-created wallet gets identical treatment to a fresh CSV create.
+  // Any classified status — public_kol, public_promoter, copytrader,
+  // bot_or_service, excluded — survives re-import: a KOL stays a KOL even
+  // when the operator imports its stats; the import supplies FIGURES,
+  // classification decides SIGNAL WEIGHT. Compare-and-set on the CURRENT
+  // status (2026-07-10 Phase 0 review): the read above and this write are
+  // not atomic, so the guard lives in the WHERE — a classifier that flips
+  // the wallet to public_kol between the two loses nothing.
   if (wallet.status === 'observation_only') {
-    await prisma.wallet.update({ where: { id: wallet.id }, data: { status: 'signal_eligible' } });
+    await prisma.wallet.updateMany({
+      where: { id: wallet.id, status: 'observation_only' },
+      data: { status: 'signal_eligible', isWatched: true }
+    });
   }
 
   const scoreInput = deriveWalletScoreInput(row);

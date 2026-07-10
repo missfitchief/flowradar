@@ -179,6 +179,16 @@ describe.skipIf(!(await probePort('localhost', 5439)))('provider-claimed stats t
     expect(info!.meetsProfitable).toBe(true);
   });
 
+  it('SYNTHETIC stats NEVER confer meetsProfitable — not even for a watched, signal_eligible wallet', async () => {
+    const unwatched = await makeWalletWithStats('synth_unw', false, 'synthetic' as never, 'signal_eligible');
+    const watched = await makeWalletWithStats('synth_w', true, 'synthetic' as never, 'signal_eligible');
+    const tokenId = await makeTokenWithBuysFrom([unwatched, watched]);
+
+    const inputs = await fetchAggregateInputs(prisma, tokenId, DEFAULT_SETTINGS);
+    expect(inputs.wallets.find((w) => w.walletId === unwatched)!.meetsProfitable).toBe(false);
+    expect(inputs.wallets.find((w) => w.walletId === watched)!.meetsProfitable).toBe(false);
+  });
+
   it('AGGREGATE TIE-IN: smartWalletCount excludes the unwatched provider-stats buyer but counts watched-provider and computed buyers', async () => {
     const provUnwatched = await makeWalletWithStats('agg_prov_unw', false, 'provider');
     const provWatched = await makeWalletWithStats('agg_prov_w', true, 'provider');

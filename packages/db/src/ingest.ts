@@ -125,7 +125,10 @@ async function upsertWallet(
       address,
       chain,
       firstSeenAt: seenAt,
-      lastActiveAt: activeAt
+      lastActiveAt: activeAt,
+      // Explicit (Phase 0 taxonomy): ingest-discovered counterparties are
+      // observation-only until vetted through import or promotion.
+      status: 'observation_only'
     },
     update: {
       // lastActiveAt only ever moves forward; firstSeenAt is set once at

@@ -62,12 +62,14 @@ export async function run(ctx: JobContext): Promise<void> {
   const wallets = await prisma.wallet.findMany({
     where: {
       // Phase 0 taxonomy (feat/pre-public-accumulation): excluded wallets
-      // are never polled. Every OTHER status stays polled when it meets the
-      // original activity criteria — observation_only wallets in particular
-      // keep their activity persisted (they just carry zero signal weight,
-      // enforced downstream in aggregateWindow's status gate).
+      // are never polled; observation_only wallets are ALWAYS polled (the
+      // spec's "polled but zero signal weight" guarantee — a stats-less
+      // receiver/discovery wallet must still have its activity persisted,
+      // which the legacy watched-or-has-stats predicate alone would skip).
+      // Other statuses keep the original activity criteria. Signal weight is
+      // enforced downstream (aggregateWindow status gate, Rule E/F gates).
       status: { not: 'excluded' },
-      OR: [{ isWatched: true }, { stats: { some: {} } }]
+      OR: [{ isWatched: true }, { stats: { some: {} } }, { status: 'observation_only' }]
     },
     select: { id: true, address: true, chain: true }
   });

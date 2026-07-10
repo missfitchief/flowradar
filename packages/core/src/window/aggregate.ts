@@ -35,7 +35,8 @@
 //     wallet's only BUY was earlier — a buyer can sell an out-of-window
 //     entry position within this window). firstBuyTs/blockOrSlot are the
 //     EARLIEST in-window BUY only.
-//   - smartWalletCount = buyers where isWatched OR meetsProfitable (union).
+//   - smartWalletCount = buyers where isSignalEligibleStatus(status) AND
+//     (isWatched OR meetsProfitable) — Phase 0 status gate; see isSmart below.
 //   - humanOrSmartLabelCount (Task 15 Fix A): buyers whose labels include
 //     'human_like' OR 'smart_money' (union) — feeds Rule C's ratio per the
 //     product brief's literal "70%+ buying wallets are human_like OR
@@ -518,6 +519,13 @@ export function aggregateWindow(input: AggregateWindowInput): TokenWindowAggrega
       for (const t of trades) {
         if (t.action !== 'BUY') continue;
         if (!walletById.has(t.walletId)) continue;
+        // Phase 0 status gate (2026-07-10 Codex review Critical): these
+        // counts are NAMED smartWalletCount* and drive Rule A's tiered
+        // accumulation thresholds — they must count SMART buyers, not any
+        // buyer. Pre-taxonomy this was a latent misname (every tracked
+        // buyer was watched or vetted); with public_kol/copytrader statuses
+        // in the model, an ungated count would let a KOL crowd fire Rule A.
+        if (!isSmart(t.walletId)) continue;
         if (t.ts.getTime() >= trailingStart && t.ts.getTime() <= to.getTime()) {
           seen.add(t.walletId);
         }

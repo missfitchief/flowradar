@@ -23,7 +23,7 @@
 // marketWindow (backtest replay, tests) keep the original full-history load.
 
 import type { PrismaClient } from '@prisma/client';
-import { isProfitableWallet, resolveWindowBounds } from '@flowradar/core';
+import { isProfitableWallet, resolveWindowBounds, statsTrustOf } from '@flowradar/core';
 import type { Settings, WalletStatus } from '@flowradar/core';
 import type {
   ClusterMembershipInput,
@@ -206,15 +206,16 @@ export async function fetchAggregateInputs(
   const wallets: WalletInfoInput[] = walletIds.map((walletId) => {
     const stats = latestStatsByWallet.get(walletId);
     const isWatched = isWatchedByWallet.get(walletId) ?? false;
-    // Trust boundary (2026-07-10 audit): provider-REPORTED stats confer
-    // meetsProfitable only for a watched wallet (promotion sets isWatched, so
-    // candidate-validated wallets keep counting). An unwatched wallet whose
-    // only stats row is an external provider's claim (legacy walletDiscovery
-    // path, source='provider') must NOT count as smart money — csv stats are
-    // operator-vouched and computed stats are FIFO over real ingested trades,
-    // so both stay trusted on their own.
+    // Trust boundary (2026-07-10 audit + Phase 0 review): meetsProfitable is
+    // decided through the trust taxonomy, not raw source strings —
+    // operator_approved (csv) and locally_verified (computed) are trusted on
+    // their own; provider_claimed confers only for a watched wallet
+    // (promotion sets isWatched, so candidate-validated wallets keep
+    // counting); synthetic (backtest continuations) is machine-marked
+    // never-evidence and NEVER confers, watched or not.
+    const trust = stats ? statsTrustOf(stats.source) : null;
     const meetsProfitable =
-      stats && (stats.source !== 'provider' || isWatched)
+      stats && trust !== 'synthetic' && (trust !== 'provider_claimed' || isWatched)
         ? isProfitableWallet(
             {
               pnlUsd: Number(stats.pnlUsd),

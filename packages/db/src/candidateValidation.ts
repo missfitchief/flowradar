@@ -463,12 +463,26 @@ async function promoteCandidate(
       status: 'signal_eligible',
       notes: `promoted from ${candidate.source}`
     },
+    // The update branch deliberately does NOT touch status (2026-07-10
+    // Phase 0 review, both reviewers): promotion may only UPGRADE an
+    // observation_only wallet (CAS below). A wallet an operator or
+    // classifier marked public_kol/public_promoter/copytrader/
+    // bot_or_service/excluded keeps that status even when a candidate for
+    // the same address later clears validation — classification wins over
+    // automated promotion, matching importWalletsCsv's re-import rule. The
+    // candidate row is still marked 'promoted' (its evidence WAS valid);
+    // the wallet simply stays non-eligible, carries no signal weight, and
+    // (for excluded) is never polled.
     update: {
       isWatched: true,
-      status: 'signal_eligible',
       notes: `promoted from ${candidate.source}`
     },
     select: { id: true }
+  });
+
+  await prisma.wallet.updateMany({
+    where: { id: wallet.id, status: 'observation_only' },
+    data: { status: 'signal_eligible' }
   });
 
   const latestStats = await prisma.walletStats.findFirst({
