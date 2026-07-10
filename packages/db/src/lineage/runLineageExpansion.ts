@@ -246,7 +246,6 @@ export async function runLineageExpansion(
                 },
                 priceCtx
               );
-              observation.amountUsd = observation.valuation.valuedUsd ?? 0;
               // Caps gate only genuinely-NEW children/receivers; the edge is
               // always persisted, and an existing child/receiver reprocesses
               // regardless (Codex round-7). enroll decides new-vs-existing.

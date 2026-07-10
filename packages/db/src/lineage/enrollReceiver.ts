@@ -228,9 +228,15 @@ export async function enrollReceiverFromTransfer(
       })) > 0
     : false;
 
+  // Classification USD comes from the HONEST valuation when present, NOT from
+  // the legacy amountUsd column (Wave A Codex-Critical: the legacy column
+  // feeds the existing FlowScore/Rule-E path and must stay untouched). An
+  // unavailable valuation falls back to the legacy provider value (usually 0
+  // for Helius native SOL) — treated as sub-dust, the safe direction.
+  const classificationUsd = transfer.valuation?.valuedUsd ?? transfer.amountUsd;
   const ctx: ReceiverContext = {
     senderTrusted,
-    transferUsd: transfer.amountUsd,
+    transferUsd: classificationUsd,
     isNativeSol: transfer.isNativeSol,
     receiverIsFreshOrInactive,
     receiverIsServiceOrProgram: receiverIsService,
@@ -320,7 +326,7 @@ export async function enrollReceiverFromTransfer(
         lineageRootId,
         address: transfer.toAddress,
         depth: depth + 1,
-        priority: expansionPriorityFor(kind, verdict.viaGasException, transfer.amountUsd, settings.lineage.minTransferUsd),
+        priority: expansionPriorityFor(kind, verdict.viaGasException, classificationUsd, settings.lineage.minTransferUsd),
         discoveredVia: `${kind} of ${senderAddr}`,
         canCreate: allowEnqueue,
         now

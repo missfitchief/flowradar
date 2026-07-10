@@ -75,7 +75,7 @@ describe.skipIf(!(await probePort('localhost', 5439)))('revaluateEdges + resolve
     const edge = await makeEdge('sol', { asset: 'SOL', assetMint: null, amountToken: 2 });
     const noPrice = await makeEdge('nosol', { asset: 'SOL', assetMint: null, amountToken: 1, ts: new Date('2020-01-01T00:00:00Z') });
 
-    const result = await revaluateEdges(prisma, settings, { reEnroll: false, sourceAddressStartsWith: PREFIX });
+    const result = await revaluateEdges(prisma, settings, { sourceAddressStartsWith: PREFIX });
     expect(result.edgesExamined).toBeGreaterThanOrEqual(2);
 
     const valued = await prisma.moneyFlowEdge.findUnique({ where: { id: edge.id } });
@@ -91,7 +91,7 @@ describe.skipIf(!(await probePort('localhost', 5439)))('revaluateEdges + resolve
     const usdc = await makeEdge('usdc', { asset: 'USDC', assetMint: USDC_MINT, amountToken: 500 });
     const fake = await makeEdge('fake', { asset: 'USDC', assetMint: `${PREFIX}_notusdc`, amountToken: 500 });
 
-    await revaluateEdges(prisma, settings, { reEnroll: false, sourceAddressStartsWith: PREFIX });
+    await revaluateEdges(prisma, settings, { sourceAddressStartsWith: PREFIX });
 
     const real = await prisma.moneyFlowEdge.findUnique({ where: { id: usdc.id } });
     expect(real!.valuationStatus).toBe('stablecoin_nominal');
@@ -103,7 +103,7 @@ describe.skipIf(!(await probePort('localhost', 5439)))('revaluateEdges + resolve
 
   it('current-price estimate is used only when no snapshot, clearly labeled', async () => {
     const edge = await makeEdge('curr', { asset: 'SOL', assetMint: null, amountToken: 1, ts: new Date('2020-01-01T00:00:00Z') });
-    await revaluateEdges(prisma, settings, { reEnroll: false, solCurrentPriceUsd: 160, solCurrentPriceTs: NOW, sourceAddressStartsWith: PREFIX });
+    await revaluateEdges(prisma, settings, { solCurrentPriceUsd: 160, solCurrentPriceTs: NOW, sourceAddressStartsWith: PREFIX });
     const valued = await prisma.moneyFlowEdge.findUnique({ where: { id: edge.id } });
     expect(valued!.valuationStatus).toBe('current_price_estimate');
     expect(Number(valued!.valuationConfidence)).toBeLessThan(60);
@@ -113,10 +113,10 @@ describe.skipIf(!(await probePort('localhost', 5439)))('revaluateEdges + resolve
     await seedWsolSnapshot(150, new Date(NOW.getTime() - 60_000));
     const edge = await makeEdge('idem', { asset: 'SOL', assetMint: null, amountToken: 2 });
 
-    await revaluateEdges(prisma, settings, { reEnroll: false, sourceAddressStartsWith: PREFIX });
+    await revaluateEdges(prisma, settings, { sourceAddressStartsWith: PREFIX });
     const first = await prisma.moneyFlowEdge.findUnique({ where: { id: edge.id } });
     // Second pass re-selects only null/unavailable; a now-valued edge is skipped.
-    const second = await revaluateEdges(prisma, settings, { reEnroll: false, sourceAddressStartsWith: PREFIX });
+    const second = await revaluateEdges(prisma, settings, { sourceAddressStartsWith: PREFIX });
     const after = await prisma.moneyFlowEdge.findUnique({ where: { id: edge.id } });
 
     expect(Number(after!.valuedUsd)).toBe(Number(first!.valuedUsd));
@@ -129,9 +129,9 @@ describe.skipIf(!(await probePort('localhost', 5439)))('revaluateEdges + resolve
     await seedWsolSnapshot(150, new Date(NOW.getTime() - 60_000));
     for (let i = 0; i < 5; i++) await makeEdge(`page_${i}`, { asset: 'SOL', assetMint: null, amountToken: 1 });
 
-    const p1 = await revaluateEdges(prisma, settings, { reEnroll: false, maxEdgesPerPass: 2, sourceAddressStartsWith: PREFIX });
+    const p1 = await revaluateEdges(prisma, settings, { maxEdgesPerPass: 2, sourceAddressStartsWith: PREFIX });
     expect(p1.edgesExamined).toBe(2);
-    const p2 = await revaluateEdges(prisma, settings, { reEnroll: false, maxEdgesPerPass: 10, sourceAddressStartsWith: PREFIX });
+    const p2 = await revaluateEdges(prisma, settings, { maxEdgesPerPass: 10, sourceAddressStartsWith: PREFIX });
     // Remaining 3 (the first 2 are now valued, excluded).
     expect(p2.edgesExamined).toBe(3);
     const remaining = await prisma.moneyFlowEdge.count({ where: { txHash: { startsWith: `${PREFIX}_tx_page_` }, valuationStatus: null } });
@@ -142,5 +142,37 @@ describe.skipIf(!(await probePort('localhost', 5439)))('revaluateEdges + resolve
     const v = await resolveTransferValuation(prisma, { asset: 'SOL', assetMint: null, amountToken: 5, transferTs: NOW, isServiceLeg: true }, { solCurrentPriceUsd: 160, solCurrentPriceTs: NOW, maxSnapshotAgeSec: 3600 });
     expect(v.status).toBe('not_applicable');
     expect(v.valuedUsd).toBeNull();
+  });
+
+  it('LEGACY amountUsd is NEVER overwritten by revaluation (trust boundary); valuedUsd carries honest value', async () => {
+    await seedWsolSnapshot(150, new Date(NOW.getTime() - 60_000));
+    const edge = await prisma.moneyFlowEdge.create({
+      data: {
+        sourceAddress: `${PREFIX}_src_legacy`, destinationAddress: `${PREFIX}_dst_legacy`,
+        sourceChain: 'SOLANA', destinationChain: 'SOLANA', asset: 'SOL', assetMint: null,
+        amountToken: 2, amountUsd: 0, ts: NOW, txHash: `${PREFIX}_tx_legacy`, actionType: 'transfer',
+        confidence: 100, providerSource: 'test', metadata: {}
+      }
+    });
+    await revaluateEdges(prisma, settings, { sourceAddressStartsWith: PREFIX });
+    const after = await prisma.moneyFlowEdge.findUnique({ where: { id: edge.id } });
+    expect(Number(after!.amountUsd)).toBe(0); // legacy column UNTOUCHED
+    expect(Number(after!.valuedUsd)).toBeCloseTo(300, 4); // honest value in the new field
+  });
+
+  it('LEGACY positive amountUsd is treated as a provider valuation (exact_provider_historical)', async () => {
+    const edge = await prisma.moneyFlowEdge.create({
+      data: {
+        sourceAddress: `${PREFIX}_src_prov`, destinationAddress: `${PREFIX}_dst_prov`,
+        sourceChain: 'SOLANA', destinationChain: 'SOLANA', asset: 'SOL', assetMint: null,
+        amountToken: 2, amountUsd: 500, ts: NOW, txHash: `${PREFIX}_tx_prov`, actionType: 'transfer',
+        confidence: 100, providerSource: 'test', metadata: {}
+      }
+    });
+    await revaluateEdges(prisma, settings, { sourceAddressStartsWith: PREFIX });
+    const after = await prisma.moneyFlowEdge.findUnique({ where: { id: edge.id } });
+    expect(after!.valuationStatus).toBe('exact_provider_historical');
+    expect(Number(after!.valuedUsd)).toBeCloseTo(500, 4);
+    expect(Number(after!.amountUsd)).toBe(500);
   });
 });

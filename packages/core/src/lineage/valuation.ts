@@ -89,10 +89,32 @@ function ageSec(transferTs: Date, priceTs: Date): number {
   return Math.round(Math.abs(transferTs.getTime() - priceTs.getTime()) / 1000);
 }
 
+/** A usable price is finite and strictly positive (Codex round: a zero/NaN/inf price must not create a false genuine $0). */
+function usablePrice(p: PricePoint | null | undefined): p is PricePoint {
+  return p != null && Number.isFinite(p.priceUsd) && p.priceUsd > 0;
+}
+
 export function computeValuation(inp: ValuationInput): ValuationResult {
   // Service / internal / bridge legs are never valued as direct wallet funding.
   if (inp.assetKind === 'service') {
     return { valuedUsd: null, priceUsd: null, priceTimestamp: null, status: 'not_applicable', source: null, confidence: 0, ageSeconds: null, reason: 'service/internal movement — not direct wallet funding' };
+  }
+
+  // A positive provider-supplied USD value is an exact historical valuation
+  // (the provider priced it at the transfer). Precedes stablecoin nominal so a
+  // provider-valued USDC transfer is exact, not nominal. A 0/non-finite value
+  // is "unpriced" and ignored.
+  if (inp.providerValueUsd != null && Number.isFinite(inp.providerValueUsd) && inp.providerValueUsd > 0) {
+    return {
+      valuedUsd: inp.providerValueUsd,
+      priceUsd: inp.amountToken !== 0 ? inp.providerValueUsd / inp.amountToken : null,
+      priceTimestamp: inp.transferTs,
+      status: 'exact_provider_historical',
+      source: 'provider_ingest_valuation',
+      confidence: 90,
+      ageSeconds: 0,
+      reason: 'provider-supplied USD value at ingest'
+    };
   }
 
   // Verified stablecoin (registry-confirmed mint): nominal $1 with an explicit
@@ -110,24 +132,10 @@ export function computeValuation(inp: ValuationInput): ValuationResult {
     };
   }
 
-  // A positive provider-supplied USD value is an exact historical valuation
-  // (the provider priced it at the transfer). A 0 is "unpriced" — ignored.
-  if (inp.providerValueUsd != null && inp.providerValueUsd > 0) {
-    return {
-      valuedUsd: inp.providerValueUsd,
-      priceUsd: inp.amountToken !== 0 ? inp.providerValueUsd / inp.amountToken : null,
-      priceTimestamp: inp.transferTs,
-      status: 'exact_provider_historical',
-      source: 'provider_ingest_valuation',
-      confidence: 90,
-      ageSeconds: 0,
-      reason: 'provider-supplied USD value at ingest'
-    };
-  }
-
   // Precedence for native SOL and SPL: exact historical > nearest prior
   // snapshot (within max age) > current-price estimate > unavailable.
-  if (inp.historicalExact) {
+  // historicalExact must be at/before the transfer (no lookahead) and usable.
+  if (usablePrice(inp.historicalExact) && inp.historicalExact.ts.getTime() <= inp.transferTs.getTime()) {
     return {
       valuedUsd: inp.amountToken * inp.historicalExact.priceUsd,
       priceUsd: inp.historicalExact.priceUsd,
@@ -140,7 +148,7 @@ export function computeValuation(inp: ValuationInput): ValuationResult {
     };
   }
 
-  if (inp.priorSnapshot && inp.priorSnapshot.ts.getTime() <= inp.transferTs.getTime()) {
+  if (usablePrice(inp.priorSnapshot) && inp.priorSnapshot.ts.getTime() <= inp.transferTs.getTime()) {
     const age = ageSec(inp.transferTs, inp.priorSnapshot.ts);
     if (age <= inp.maxSnapshotAgeSec) {
       return {
@@ -157,7 +165,7 @@ export function computeValuation(inp: ValuationInput): ValuationResult {
     // Stale prior snapshot: fall through to current estimate / unavailable.
   }
 
-  if (inp.currentPrice) {
+  if (usablePrice(inp.currentPrice)) {
     return {
       valuedUsd: inp.amountToken * inp.currentPrice.priceUsd,
       priceUsd: inp.currentPrice.priceUsd,

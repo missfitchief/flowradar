@@ -12,14 +12,12 @@
 import type { PrismaClient } from '@prisma/client';
 import type { Settings } from '@flowradar/core';
 import { resolveTransferValuation, type PriceContext } from './resolveValuation';
-import { enrollReceiverFromTransfer, type TransferObservation } from './enrollReceiver';
 import { withGlobalJobLock } from '../locks/globalJobLock';
 
 export interface RevaluateResult {
   edgesExamined: number;
   edgesValued: number;
   stillUnavailable: number;
-  reEnrollmentsRun: number;
   errors: number;
   byStatus: Record<string, number>;
   lastId: string | null;
@@ -31,8 +29,14 @@ export interface RevaluateOptions {
   solCurrentPriceUsd?: number | null;
   solCurrentPriceTs?: Date | null;
   now?: Date;
-  /** When true, re-run receiver enrollment for valued edges (default true). */
-  reEnroll?: boolean;
+  /**
+   * Resume cursor: only edges with id > startAfterId are considered. Pass the
+   * previous run's `lastId` back to page FORWARD across runs — without it a
+   * bounded run always restarts at the lowest id and a persistently
+   * `unavailable` earliest batch would be retried forever, starving later
+   * never-valued edges (Codex Wave-A review).
+   */
+  startAfterId?: string;
   /** Narrow to edges whose sourceAddress starts with this prefix (targeted revaluation of one wallet/root's outflows). */
   sourceAddressStartsWith?: string;
 }
@@ -44,8 +48,6 @@ export async function revaluateEdges(
 ): Promise<RevaluateResult> {
   return withGlobalJobLock('revaluate-edges', async () => {
     const maxEdges = opts.maxEdgesPerPass ?? 200;
-    const now = opts.now ?? new Date();
-    const reEnroll = opts.reEnroll ?? true;
     const ctx: PriceContext = {
       solCurrentPriceUsd: opts.solCurrentPriceUsd ?? null,
       solCurrentPriceTs: opts.solCurrentPriceTs ?? null,
@@ -56,13 +58,17 @@ export async function revaluateEdges(
       edgesExamined: 0,
       edgesValued: 0,
       stillUnavailable: 0,
-      reEnrollmentsRun: 0,
       errors: 0,
       byStatus: {},
       lastId: null
     };
 
-    let cursorId: string | undefined;
+    // This job ONLY re-values edges. Re-enrollment is deliberately NOT done
+    // here (Codex Wave-A review): the frontier RESUME (runLineageExpansion,
+    // Wave B) re-processes each wallet, re-values inline, and enrolls with the
+    // correct depth/cap accounting — doing enrollment here with a defaulted
+    // depth would bypass node/child/day bounds.
+    let cursorId: string | undefined = opts.startAfterId;
     for (;;) {
       if (result.edgesExamined >= maxEdges) break;
       const batch = await prisma.moneyFlowEdge.findMany({
@@ -73,9 +79,12 @@ export async function revaluateEdges(
           ...(opts.sourceAddressStartsWith ? { sourceAddress: { startsWith: opts.sourceAddressStartsWith } } : {}),
           ...(cursorId ? { id: { gt: cursorId } } : {})
         },
+        // Stable id-cursor ordering so paging never skips an edge. Cross-run
+        // starvation is prevented by startAfterId (the caller pages forward
+        // with the previous run's lastId rather than restarting at id 0).
         orderBy: { id: 'asc' },
         take: Math.min(50, maxEdges - result.edgesExamined),
-        select: { id: true, asset: true, assetMint: true, amountToken: true, ts: true, sourceAddress: true, destinationAddress: true, txHash: true, valuationSource: true }
+        select: { id: true, asset: true, assetMint: true, amountToken: true, amountUsd: true, ts: true }
       });
       if (batch.length === 0) break;
 
@@ -85,7 +94,14 @@ export async function revaluateEdges(
         try {
           const valuation = await resolveTransferValuation(
             prisma,
-            { asset: edge.asset, assetMint: edge.assetMint, amountToken: Number(edge.amountToken), transferTs: edge.ts },
+            {
+              asset: edge.asset,
+              assetMint: edge.assetMint,
+              amountToken: Number(edge.amountToken),
+              transferTs: edge.ts,
+              // Legacy positive amountUsd is a provider ingest valuation.
+              providerValueUsd: Number(edge.amountUsd) > 0 ? Number(edge.amountUsd) : null
+            },
             ctx
           );
           result.byStatus[valuation.status] = (result.byStatus[valuation.status] ?? 0) + 1;
@@ -107,14 +123,6 @@ export async function revaluateEdges(
 
           if (valuation.valuedUsd !== null) result.edgesValued += 1;
           else result.stillUnavailable += 1;
-
-          // Re-run receiver enrollment idempotently for valued edges whose
-          // sender is lineage-tracked. Only when we actually have a value —
-          // an unavailable edge must not enroll (unknown != above threshold).
-          if (reEnroll && valuation.valuedUsd !== null) {
-            const ran = await reEnrollForEdge(prisma, edge, valuation.valuedUsd, settings, now);
-            result.reEnrollmentsRun += ran;
-          }
         } catch {
           result.errors += 1;
         }
@@ -124,59 +132,4 @@ export async function revaluateEdges(
     result.lastId = cursorId ?? null;
     return result;
   });
-}
-
-/**
- * Re-runs enrollment for one valued edge across every lineage root the SENDER
- * belongs to (as a root, or via a subscription). Idempotent; returns the
- * number of (root) enrollment calls made.
- */
-async function reEnrollForEdge(
-  prisma: PrismaClient,
-  edge: { asset: string; assetMint: string | null; amountToken: unknown; ts: Date; sourceAddress: string; destinationAddress: string; txHash: string },
-  valuedUsd: number,
-  settings: Settings,
-  now: Date
-): Promise<number> {
-  const senderWallet = await prisma.wallet.findUnique({
-    where: { address_chain: { address: edge.sourceAddress, chain: 'SOLANA' } },
-    select: { id: true, lineageRoot: { select: { id: true } } }
-  });
-  if (!senderWallet) return 0;
-
-  const rootIds = new Set<string>();
-  if (senderWallet.lineageRoot) rootIds.add(senderWallet.lineageRoot.id);
-  const subs = await prisma.monitoringSubscription.findMany({
-    where: { walletId: senderWallet.id, lineageRootId: { not: null } },
-    select: { lineageRootId: true }
-  });
-  for (const s of subs) if (s.lineageRootId) rootIds.add(s.lineageRootId);
-  if (rootIds.size === 0) return 0;
-
-  const transfer: TransferObservation = {
-    txHash: edge.txHash,
-    slot: 0n,
-    ts: edge.ts,
-    fromAddress: edge.sourceAddress,
-    toAddress: edge.destinationAddress,
-    asset: edge.asset,
-    amountToken: Number(edge.amountToken),
-    amountUsd: valuedUsd,
-    isNativeSol: edge.assetMint === null && edge.asset === 'SOL',
-    provider: 'revaluation'
-  };
-
-  let ran = 0;
-  for (const rootId of rootIds) {
-    // Depth = the sender's own expansion-node depth in this root (0 for a
-    // root); a receiver enrolled here lands at depth+1.
-    const node = await prisma.lineageExpansionNode.findUnique({
-      where: { lineageRootId_walletAddress: { lineageRootId: rootId, walletAddress: edge.sourceAddress } },
-      select: { depth: true }
-    });
-    const depth = node?.depth ?? 0;
-    await enrollReceiverFromTransfer(prisma, transfer, rootId, depth, settings, now);
-    ran += 1;
-  }
-  return ran;
 }
