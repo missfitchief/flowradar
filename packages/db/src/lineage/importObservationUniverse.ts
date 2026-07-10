@@ -16,6 +16,7 @@
 
 import type { PrismaClient } from '@prisma/client';
 import { parseRootWalletFile } from '@flowradar/core';
+import { withGlobalJobLock } from '../locks/globalJobLock';
 
 export interface ObservationRow {
   address: string;
@@ -37,7 +38,9 @@ export interface ObservationParseResult {
   duplicates: number;
 }
 
-/** Splits a CSV line honoring simple quotes (no embedded commas in our schema). */
+// NOT quote-aware: splits on bare commas. Our schema has no comma-bearing
+// fields (addresses are base58, tags are '|'-separated), so quoting is
+// unsupported — a quoted field containing a comma would shift columns.
 function splitCsv(line: string): string[] {
   return line.split(',').map((c) => c.trim());
 }
@@ -54,6 +57,11 @@ export function parseObservationUniverse(csv: string): ObservationParseResult {
   const header = splitCsv(lines[0]!).map((h) => h.toLowerCase());
   const col = (name: string) => header.indexOf(name);
   const iAddr = col('wallet_address');
+  // Hard-require the address header — never silently treat column 0 as the
+  // address, which would import garbage from a mis-shaped file.
+  if (iAddr < 0) {
+    throw new Error('observation-universe CSV requires a "wallet_address" header column');
+  }
   const iSource = col('source');
   const iPnl = col('pnl_30d');
   const iWin = col('win_rate');
@@ -64,17 +72,21 @@ export function parseObservationUniverse(csv: string): ObservationParseResult {
   for (let i = 1; i < lines.length; i++) {
     const raw = lines[i]!;
     const cells = splitCsv(raw);
-    const address = iAddr >= 0 ? cells[iAddr] ?? '' : cells[0] ?? '';
-    if (/^0x[0-9a-fA-F]{40}$/i.test(address)) {
-      evmParked.push(address);
+    const rawAddr = (cells[iAddr] ?? '').trim();
+    if (/^0x[0-9a-fA-F]{40}$/i.test(rawAddr)) {
+      evmParked.push(rawAddr);
       continue;
     }
-    // Reuse the canonical Solana base58 32-byte validator.
-    const check = parseRootWalletFile(address);
+    // Reuse the canonical Solana base58 32-byte validator. It also strips any
+    // inline `addr|label` / `addr#label` decoration; we store the CANONICAL
+    // address it returns (never the raw cell), so a label cannot smuggle an
+    // unvalidated string past validation or dedupe.
+    const check = parseRootWalletFile(rawAddr);
     if (check.roots.length !== 1) {
       malformed.push({ line: i + 1, raw, reason: 'not a valid Solana address' });
       continue;
     }
+    const address = check.roots[0]!.address;
     if (seen.has(address)) {
       duplicates += 1;
       continue;
@@ -83,7 +95,9 @@ export function parseObservationUniverse(csv: string): ObservationParseResult {
 
     const num = (idx: number): number | null => {
       if (idx < 0) return null;
-      const v = Number(cells[idx]);
+      const cell = (cells[idx] ?? '').trim();
+      if (cell === '') return null; // blank cell = unknown, NEVER 0 (hard rule 9)
+      const v = Number(cell);
       return Number.isFinite(v) ? v : null;
     };
     const pnl = num(iPnl);
@@ -91,9 +105,16 @@ export function parseObservationUniverse(csv: string): ObservationParseResult {
     const trades = num(iTrades);
     const avg = num(iAvg);
     let providerStats: ObservationRow['providerStats'] | undefined;
-    // Only build a provider-stats block when ALL four are present AND win_rate
-    // is a valid fraction — never fabricate a partial/zero stat.
-    if (pnl !== null && win !== null && trades !== null && avg !== null && win >= 0 && win <= 1) {
+    // Only build a provider-stats block when ALL four are present AND sane:
+    // win_rate a fraction 0..1, trade_count a non-negative integer, avg a
+    // non-negative size. A blank/negative/garbage cell => no stats — never
+    // fabricate a zero (hard rule 9: missing means unknown, not zero/safe).
+    if (
+      pnl !== null && win !== null && trades !== null && avg !== null &&
+      win >= 0 && win <= 1 &&
+      Number.isInteger(trades) && trades >= 0 &&
+      avg >= 0
+    ) {
       providerStats = { pnl30d: pnl, winRate: win, tradeCount: trades, avgTradeSizeUsd: avg };
     }
     const tags = iTags >= 0 && cells[iTags] ? cells[iTags]!.split('|').map((t) => t.trim()).filter(Boolean) : [];
@@ -133,6 +154,9 @@ export async function importObservationUniverse(
     duplicates: parsed.duplicates
   };
 
+  // Hold the global job lock for the whole write phase: serializes concurrent
+  // imports (closing the count→create stats race) and against worker jobs.
+  await withGlobalJobLock('importObservationUniverse', async () => {
   for (const row of parsed.rows) {
     const existing = await prisma.wallet.findUnique({
       where: { address_chain: { address: row.address, chain: 'SOLANA' } },
@@ -191,6 +215,7 @@ export async function importObservationUniverse(
       }
     }
   }
+  });
 
   return result;
 }

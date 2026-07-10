@@ -61,6 +61,40 @@ describe('parseObservationUniverse (pure)', () => {
     expect(r.rows[0]!.providerStats).toBeUndefined();
     expect(r.rows[1]!.providerStats).toBeUndefined(); // win_rate 5 is not a fraction
   });
+
+  it('does NOT fabricate zero stats from blank cells (Number("")===0 trap)', () => {
+    // All stats headers present but cells blank / negative — must NOT create
+    // a zeroed provider-stats block (hard rule 9: missing = unknown, not 0).
+    const csv = [
+      'wallet_address,pnl_30d,win_rate,trade_count_30d,avg_trade_size_usd',
+      `${A1},,,,`,           // all blank
+      `${A2},50000,0.6,,500`, // one blank (trade_count)
+      `${A3},50000,0.6,-4,500` // negative trade_count
+    ].join('\n');
+    const r = parseObservationUniverse(csv);
+    expect(r.rows).toHaveLength(3);
+    expect(r.rows[0]!.providerStats).toBeUndefined();
+    expect(r.rows[1]!.providerStats).toBeUndefined();
+    expect(r.rows[2]!.providerStats).toBeUndefined();
+  });
+
+  it('canonicalizes an inline addr|label cell and dedupes it against the bare address', () => {
+    const csv = [
+      'wallet_address,source',
+      `${A1},plain`,
+      `${A1}|smart-money,labeled` // same address, decorated — must dedupe, not create a malformed row
+    ].join('\n');
+    const r = parseObservationUniverse(csv);
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0]!.address).toBe(A1); // canonical, label stripped
+    expect(r.malformed).toHaveLength(0);
+    expect(r.duplicates).toBe(1);
+  });
+
+  it('throws when the wallet_address header is missing (no silent column-0 guess)', () => {
+    const csv = [`addr,source`, `${A1},x`].join('\n');
+    expect(() => parseObservationUniverse(csv)).toThrow(/wallet_address/);
+  });
 });
 
 describe.skipIf(!(await probePort('localhost', 5439)))('importObservationUniverse', () => {
