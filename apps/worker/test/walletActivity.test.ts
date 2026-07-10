@@ -30,6 +30,8 @@ interface FakeWallet {
   id: string;
   address: string;
   chain: 'SOLANA' | 'BSC';
+  /** Phase 0 taxonomy — defaults to signal_eligible in the fake findMany. */
+  status?: string;
 }
 
 function makeTx(seq = 0): NormalizedTx {
@@ -86,7 +88,16 @@ function makeCtx(wallets: FakeWallet[], provider: unknown) {
   const log = { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() };
   const cursors = new Map<string, string | null>();
   const prisma = {
-    wallet: { findMany: vi.fn(async () => wallets) },
+    wallet: {
+      // Honors the one where-shape walletActivity uses for the Phase 0
+      // exclusion filter (status: { not: ... }); everything else passes
+      // through — same honest-minimal-fake convention as providerSyncState.
+      findMany: vi.fn(async ({ where }: { where?: { status?: { not?: string } } } = {}) => {
+        const notStatus = where?.status?.not;
+        if (!notStatus) return wallets;
+        return wallets.filter((w) => (w.status ?? 'signal_eligible') !== notStatus);
+      })
+    },
     providerSyncState: {
       findUnique: vi.fn(async ({ where }: { where: { provider_chain_scope: { scope: string } } }) => {
         const scope = where.provider_chain_scope.scope;
@@ -272,5 +283,26 @@ describe('walletActivity — bounded backfill (F7)', () => {
     const secondPollFirstCall = calls[firstPollCalls];
     expect(secondPollFirstCall).toBeDefined();
     expect(secondPollFirstCall!.since).toBeInstanceOf(Date); // cursor from poll 1 used as `since` on poll 2
+  });
+});
+
+describe('walletActivity — status exclusion (Phase 0, pre-public-accumulation)', () => {
+  it('excluded wallets are never polled; observation_only wallets ARE (activity persisted, zero signal weight)', async () => {
+    const { provider, calls } = makeFakeProvider({ NORMAL: 3, OBSERVED: 3, BANNED: 3 });
+    const { ctx } = makeCtx(
+      [
+        { id: 'w1', address: 'NORMAL', chain: 'SOLANA', status: 'signal_eligible' },
+        { id: 'w2', address: 'OBSERVED', chain: 'SOLANA', status: 'observation_only' },
+        { id: 'w3', address: 'BANNED', chain: 'SOLANA', status: 'excluded' }
+      ],
+      provider
+    );
+
+    await run(ctx);
+
+    const polledAddresses = new Set(calls.map((c) => c.address));
+    expect(polledAddresses.has('NORMAL')).toBe(true);
+    expect(polledAddresses.has('OBSERVED')).toBe(true); // observation persists
+    expect(polledAddresses.has('BANNED')).toBe(false); // excluded is never polled
   });
 });
