@@ -299,6 +299,26 @@ describe('stealth engine — trust-boundary invariants', () => {
     expect(Object.isFrozen(DEFAULT_STEALTH_CONFIG.thresholds)).toBe(true);
   });
 
+  it('monotonicity sweep: adding public/crowd/observation buyers never raises the reported score', () => {
+    // Deterministic grid over eligible baselines and each penalised/neutral
+    // cohort — the reported (0.01-granularity) score must be non-increasing as
+    // that cohort grows.
+    for (const elig of [1, 2, 4, 8, 20]) {
+      for (const cohort of ['publicKol', 'crowd', 'observation'] as const) {
+        let prev = Infinity;
+        for (const add of [0, 1, 2, 5, 13, 40, 137, 1000]) {
+          const w = win('24h', {
+            eligible: flow({ distinctBuyers: elig, buyUsd: 30000, freshBuyers: elig, distinctClusters: elig }),
+            [cohort]: flow({ distinctBuyers: add, buyUsd: add * 1000, distinctClusters: add })
+          });
+          const score = computeStealth(input([w])).stealthScore;
+          expect(score).toBeLessThanOrEqual(prev + 1e-9);
+          prev = score;
+        }
+      }
+    }
+  });
+
   it('carries no profitability/return claim in its output surface', () => {
     const r = computeStealth(stealthFixture());
     const json = JSON.stringify(r).toLowerCase();

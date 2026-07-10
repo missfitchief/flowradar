@@ -232,7 +232,14 @@ function pressureShare(part: number, other: number): number {
   const m = Math.max(part, other);
   const p = part / m;
   const o = other / m;
-  return clamp01(p / (p + o));
+  // Quantise to a 1e-9 grid (Math.round is monotonic non-decreasing, so this
+  // only COARSENS the ordering, never inverts it). Double division of two
+  // finite values can be non-monotone at the last ULP (~1e-16); any residual
+  // inversion is therefore ≤ 1e-9, which — multiplied by a penalty weight and
+  // the score's ×100 scale — moves the reported stealthScore by ≤ 1e-7, far
+  // below its 0.01 output granularity. So the reported score is monotone in
+  // public/crowd counts by construction, for all finite non-negative inputs.
+  return clamp01(Math.round((p / (p + o)) * 1e9) / 1e9);
 }
 
 // ---------------------------------------------------------------------------
