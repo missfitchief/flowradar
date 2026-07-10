@@ -26,6 +26,8 @@ export interface TransferForValuation {
   transferTs: Date;
   /** True when the leg is a router/pool/program/bridge/service movement. */
   isServiceLeg?: boolean;
+  /** A positive USD value the provider attached at ingest (0/absent = unpriced). */
+  providerValueUsd?: number | null;
 }
 
 /**
@@ -58,7 +60,7 @@ export async function resolveTransferValuation(
     if (assetKind === 'service' || assetKind === 'stablecoin' || assetKind === 'unknown') {
       // service / stablecoin decided purely by computeValuation; unknown has no
       // price source => unavailable.
-      return computeValuation({ assetKind, amountToken: transfer.amountToken, transferTs: transfer.transferTs, maxSnapshotAgeSec: ctx.maxSnapshotAgeSec });
+      return computeValuation({ assetKind, amountToken: transfer.amountToken, transferTs: transfer.transferTs, maxSnapshotAgeSec: ctx.maxSnapshotAgeSec, providerValueUsd: transfer.providerValueUsd });
     }
 
     if (assetKind === 'native_sol') {
@@ -72,6 +74,7 @@ export async function resolveTransferValuation(
         amountToken: transfer.amountToken,
         transferTs: transfer.transferTs,
         maxSnapshotAgeSec: ctx.maxSnapshotAgeSec,
+        providerValueUsd: transfer.providerValueUsd,
         priorSnapshot,
         currentPrice
       });
@@ -84,6 +87,7 @@ export async function resolveTransferValuation(
       amountToken: transfer.amountToken,
       transferTs: transfer.transferTs,
       maxSnapshotAgeSec: ctx.maxSnapshotAgeSec,
+      providerValueUsd: transfer.providerValueUsd,
       priorSnapshot
     });
   } catch {

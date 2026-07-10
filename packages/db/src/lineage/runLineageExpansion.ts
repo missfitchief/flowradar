@@ -15,6 +15,7 @@
 import type { PrismaClient } from '@prisma/client';
 import type { Chain, NormalizedTx, Settings } from '@flowradar/core';
 import { enrollReceiverFromTransfer, type TransferObservation } from './enrollReceiver';
+import { resolveTransferValuation, type PriceContext } from './resolveValuation';
 import { withGlobalJobLock } from '../locks/globalJobLock';
 
 export interface LineageProvider {
@@ -48,11 +49,19 @@ export async function runLineageExpansion(
   prisma: PrismaClient,
   provider: LineageProvider,
   settings: Settings,
-  opts: { rootId?: string; maxNodesPerPass?: number; now?: Date } = {}
+  opts: { rootId?: string; maxNodesPerPass?: number; now?: Date; solCurrentPriceUsd?: number | null } = {}
 ): Promise<LineageExpansionResult> {
   return withGlobalJobLock('lineage-expansion', async () => {
     const now = opts.now ?? new Date();
     const maxNodesPerPass = opts.maxNodesPerPass ?? 100;
+    // Price context built ONCE per pass (Wave A): the current SOL price is
+    // fetched by the caller (worker) and reused across all edges rather than
+    // per-edge network calls.
+    const priceCtx: PriceContext = {
+      solCurrentPriceUsd: opts.solCurrentPriceUsd ?? null,
+      solCurrentPriceTs: opts.solCurrentPriceUsd != null ? now : null,
+      maxSnapshotAgeSec: settings.lineage.priceMaxSnapshotAgeSec
+    };
     const result: LineageExpansionResult = {
       rootsProcessed: 0,
       nodesExpanded: 0,
@@ -223,6 +232,21 @@ export async function runLineageExpansion(
               const underNodeCap = (projectedNodesByRoot.get(node.lineageRootId) ?? 0) < settings.lineage.maxNodesPerRoot;
               const underChildCap = childrenEnrolled < settings.lineage.maxChildrenPerNode;
               const underDayCap = dailyReceivers < settings.lineage.maxNewReceiversPerRootPerDay;
+              // Value the transfer HONESTLY before enrollment (Wave A): the
+              // valuation (incl. unavailable) is stored on the edge and drives
+              // the enrollment threshold decision.
+              observation.valuation = await resolveTransferValuation(
+                prisma,
+                {
+                  asset: observation.asset,
+                  assetMint: observation.assetMint ?? null,
+                  amountToken: observation.amountToken,
+                  transferTs: observation.ts,
+                  providerValueUsd: observation.amountUsd > 0 ? observation.amountUsd : null
+                },
+                priceCtx
+              );
+              observation.amountUsd = observation.valuation.valuedUsd ?? 0;
               // Caps gate only genuinely-NEW children/receivers; the edge is
               // always persisted, and an existing child/receiver reprocesses
               // regardless (Codex round-7). enroll decides new-vs-existing.
@@ -330,6 +354,8 @@ function outboundTransfers(tx: NormalizedTx, walletAddress: string): TransferObs
       fromAddress: leg.from,
       toAddress: leg.to,
       asset: symbol,
+      // Preserve the mint so valuation classifies by ADDRESS (Wave A).
+      assetMint: leg.asset.address ?? null,
       amountToken: Number(leg.amountToken),
       amountUsd: leg.amountUsd ?? 0,
       isNativeSol: leg.kind === 'native_transfer' && symbol === NATIVE_SOL,

@@ -30,6 +30,14 @@ export interface ValuationInput {
   transferTs: Date;
   /** Max age of a "nearest prior snapshot" to still be usable, seconds. */
   maxSnapshotAgeSec: number;
+  /**
+   * A USD value the PROVIDER already computed for this transfer at ingest. A
+   * POSITIVE value is an exact_provider_historical valuation (authoritative
+   * for this transfer); a value of 0 means the provider did NOT price it
+   * (e.g. Helius native SOL) and is IGNORED — never treated as a real zero,
+   * so our own sources are tried and it degrades to unavailable if none.
+   */
+  providerValueUsd?: number | null;
   /** Exact historical price at/just before transfer (highest precedence). */
   historicalExact?: PricePoint | null;
   /** Nearest LOCAL market snapshot at or before the transfer. */
@@ -99,6 +107,21 @@ export function computeValuation(inp: ValuationInput): ValuationResult {
       confidence: 90,
       ageSeconds: 0,
       reason: 'verified stablecoin mint valued at nominal $1 (possible depeg not accounted for)'
+    };
+  }
+
+  // A positive provider-supplied USD value is an exact historical valuation
+  // (the provider priced it at the transfer). A 0 is "unpriced" — ignored.
+  if (inp.providerValueUsd != null && inp.providerValueUsd > 0) {
+    return {
+      valuedUsd: inp.providerValueUsd,
+      priceUsd: inp.amountToken !== 0 ? inp.providerValueUsd / inp.amountToken : null,
+      priceTimestamp: inp.transferTs,
+      status: 'exact_provider_historical',
+      source: 'provider_ingest_valuation',
+      confidence: 90,
+      ageSeconds: 0,
+      reason: 'provider-supplied USD value at ingest'
     };
   }
 

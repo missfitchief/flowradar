@@ -97,6 +97,20 @@ describe('computeValuation', () => {
     expect(v.confidence).toBeGreaterThanOrEqual(90);
   });
 
+  it('PROVIDER VALUE: a positive provider USD is exact_provider_historical', () => {
+    const v = computeValuation(input({ assetKind: 'native_sol', amountToken: 2, providerValueUsd: 320 }));
+    expect(v.status).toBe('exact_provider_historical');
+    expect(v.valuedUsd).toBe(320);
+    expect(v.priceUsd).toBeCloseTo(160, 6);
+    expect(v.source).toMatch(/provider/i);
+  });
+
+  it('PROVIDER ZERO is ignored (unpriced != real zero): falls through to unavailable', () => {
+    const v = computeValuation(input({ assetKind: 'native_sol', amountToken: 1, providerValueUsd: 0, priorSnapshot: null, currentPrice: null }));
+    expect(v.status).toBe('unavailable');
+    expect(v.valuedUsd).toBeNull();
+  });
+
   it('precedence: exact historical beats prior snapshot beats current estimate', () => {
     const v = computeValuation(
       input({
