@@ -68,6 +68,7 @@ import * as walletImport from './jobs/walletImport';
 import * as walletGraph from './jobs/walletGraph';
 import * as walletStatsRefresh from './jobs/walletStatsRefresh';
 import * as walletDiscovery from './jobs/walletDiscovery';
+import * as lineageExpansion from './jobs/lineageExpansion';
 import * as externalWalletSource from './jobs/externalWalletSource';
 import * as walletCandidateValidation from './jobs/walletCandidateValidation';
 import * as tokenTopTraderBackfill from './jobs/tokenTopTraderBackfill';
@@ -203,6 +204,14 @@ async function main(): Promise<void> {
       name: 'walletDiscovery',
       run: walletDiscovery.run,
       intervalSec: settings.intervals.walletDiscoveryHours * 3600
+    },
+    // lineageExpansion (Capital Lineage 6b): bounded frontier consumption
+    // driving the same Helius wallet-tx provider — reuses the walletActivity
+    // cadence class. The frontier persists across ticks; each pass is bounded.
+    {
+      name: 'lineageExpansion',
+      run: lineageExpansion.run,
+      intervalSec: settings.intervals.walletActivitySec
     },
     // externalWalletSource (Task 34, Wave 4.5): also expressed in HOURS —
     // same *3600 conversion as backtestHours/walletStatsRefreshHours/

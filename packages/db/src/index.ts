@@ -16,6 +16,7 @@ export * from './confluence/queries';
 export * from './candidateValidation';
 export * from './lineage/importRootWallets';
 export * from './lineage/enrollReceiver';
+export * from './lineage/runLineageExpansion';
 export * from './locks/globalJobLock';
 export * from './tokenTopTraderBackfill';
 export * from './dune/duneOverlap';

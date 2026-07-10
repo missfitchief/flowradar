@@ -76,13 +76,21 @@ export async function enrollReceiverFromTransfer(
   });
   const senderWallet = await prisma.wallet.findUnique({
     where: { address_chain: { address: transfer.fromAddress, chain: 'SOLANA' } },
-    select: { status: true, lineageRoot: { select: { id: true } } }
+    select: { status: true, lineageRoot: { select: { id: true } }, _count: { select: { monitoringSubscriptions: true } } }
   });
 
+  // A sender is trusted when it is a lineage root, signal_eligible, strong-
+  // linked, OR already an enrolled lineage wallet (any monitoring
+  // subscription). The last case is what makes recursive expansion work: once
+  // a receiver B is enrolled (fresh_receiver_hot subscription), B's OWN
+  // onward transfers are in scope per the spec ("monitor whether it sends
+  // funds onward / splits / consolidates"), even though B is only a probable
+  // link to the root until it activates.
   const senderTrusted =
     senderWallet !== null &&
     (senderWallet.lineageRoot !== null ||
       TRUSTED_SENDER_STATUSES.has(senderWallet.status) ||
+      senderWallet._count.monitoringSubscriptions > 0 ||
       (await hasStrongLink(prisma, transfer.fromAddress)));
 
   // A receiver with no prior trades and no prior inbound is fresh; a
