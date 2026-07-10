@@ -157,7 +157,9 @@ export async function revaluateEdges(
           } else {
             await prisma.moneyFlowEdge.update({ where: { id: edge.id }, data: edgeData });
             if (valuation.valuedUsd !== null) result.edgesValued += 1;
-            else result.stillUnavailable += 1;
+            else if (valuation.status === 'unavailable') result.stillUnavailable += 1;
+            // not_applicable is not "still unavailable" — it's a decided
+            // non-funding status (byStatus reports it distinctly).
           }
         } catch {
           result.errors += 1;
