@@ -110,6 +110,14 @@ async function wipeAllTables(): Promise<void> {
   // below (Task D, External Confluence).
   await prisma.tokenConfluenceSnapshot.deleteMany();
   await prisma.externalConfluenceSource.deleteMany();
+  // Second lineage guard at the point of no return (2026-07-10 Codex
+  // re-review): main() checks before the wipe starts, but a concurrent root
+  // import could land between that check and this deleteMany — re-checking
+  // here narrows the data-loss window to milliseconds. Full cross-process
+  // serialization (advisory locks) is deliberately deferred to the lineage
+  // scheduler build; operator practice is to not run seed and imports
+  // simultaneously.
+  await assertNoLineageRootsOrExplicitOverride();
   await prisma.wallet.deleteMany();
   await prisma.token.deleteMany();
   await prisma.importJob.deleteMany();

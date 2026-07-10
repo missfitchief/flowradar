@@ -31,7 +31,9 @@ async function main(): Promise<void> {
   // parked handoff). Deduped; a stale sidecar from an earlier run is removed
   // when this file has no EVM rows.
   const parkedPath = `${file}.evm-parked.txt`;
-  const uniqueEvm = [...new Set(parsed.evmParked.map((r) => r.address))];
+  // Case-insensitive dedupe (EVM hex is case-insensitive; 0xABC == 0xabc) —
+  // stored lowercase, matching the repo's BSC address convention.
+  const uniqueEvm = [...new Set(parsed.evmParked.map((r) => r.address.toLowerCase()))];
   if (!dryRun) {
     if (uniqueEvm.length > 0) {
       writeFileSync(parkedPath, uniqueEvm.join('\n') + '\n');
@@ -62,9 +64,13 @@ async function main(): Promise<void> {
       newlyImportableRoots: parsed.roots.length - existing.filter((w) => w.lineageRoot !== null).length,
       statusesToPreserve: existing.filter((w) => w.status !== 'observation_only').map((w) => ({ address: w.address, status: w.status })),
       // Surface what the REAL run will enforce, so an over-limit file is
-      // visible at dry-run time instead of surprising the import.
+      // visible at dry-run time instead of surprising the import. Mirrors
+      // importRootWallets' fail-closed validation exactly (>=1 and finite).
       safetyLimit,
-      exceedsSafetyLimit: Number.isFinite(safetyLimit) ? parsed.roots.length > safetyLimit : 'INVALID LIMIT — real run will refuse'
+      exceedsSafetyLimit:
+        Number.isFinite(safetyLimit) && safetyLimit >= 1
+          ? parsed.roots.length > Math.floor(safetyLimit)
+          : 'INVALID LIMIT — real run will refuse'
     };
     console.log(JSON.stringify(report, null, 2));
     return;

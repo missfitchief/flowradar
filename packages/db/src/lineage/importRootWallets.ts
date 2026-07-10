@@ -167,9 +167,14 @@ export async function importRootWallets(
     } catch (err) {
       if (!isUniqueViolation(err)) throw err;
       // Idempotent re-import: only the telemetry timestamp advances; label,
-      // provenance, and permanence are first-import-wins.
+      // provenance, and permanence are first-import-wins. The timestamp is
+      // monotonic (guarded updateMany) so a delayed older run racing a newer
+      // one cannot regress it.
       const existingRoot = await prisma.lineageRoot.findUniqueOrThrow({ where: { walletId }, select: { id: true } });
-      await prisma.lineageRoot.update({ where: { id: existingRoot.id }, data: { lastSeenInImportAt: now } });
+      await prisma.lineageRoot.updateMany({
+        where: { id: existingRoot.id, lastSeenInImportAt: { lt: now } },
+        data: { lastSeenInImportAt: now }
+      });
       lineageRootId = existingRoot.id;
       existingRoots += 1;
     }
@@ -187,7 +192,15 @@ export async function importRootWallets(
       subscriptionsCreated += 1;
     } catch (err) {
       if (!isUniqueViolation(err)) throw err;
-      // PRESERVATION: an operator-deactivated subscription stays deactivated.
+      // Verify the row the unique violation implies actually exists (2026-07-10
+      // Codex re-review: a P2002 from anything else, or a concurrent delete,
+      // must surface as an error — not a silent "existing" success without a
+      // subscription). PRESERVATION: the found row is never modified, so an
+      // operator-deactivated subscription stays deactivated.
+      await prisma.monitoringSubscription.findUniqueOrThrow({
+        where: { walletId_priority: { walletId, priority: 'root_permanent' } },
+        select: { id: true }
+      });
       subscriptionsExisting += 1;
     }
   }
