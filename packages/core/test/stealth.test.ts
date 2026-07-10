@@ -306,7 +306,8 @@ describe('stealth engine — trust-boundary invariants', () => {
     for (const elig of [1, 2, 4, 8, 20]) {
       for (const cohort of ['publicKol', 'crowd', 'observation'] as const) {
         let prev = Infinity;
-        for (const add of [0, 1, 2, 5, 13, 40, 137, 1000]) {
+        // includes values straddling the MAX_COHORT_COUNT (1e7) clamp ceiling.
+        for (const add of [0, 1, 2, 5, 13, 40, 137, 1000, 9999999, 1e7, 1e7 + 1, 1e8, 1e308]) {
           const w = win('24h', {
             eligible: flow({ distinctBuyers: elig, buyUsd: 30000, freshBuyers: elig, distinctClusters: elig }),
             [cohort]: flow({ distinctBuyers: add, buyUsd: add * 1000, distinctClusters: add })

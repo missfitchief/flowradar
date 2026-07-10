@@ -226,20 +226,30 @@ function safeShare(part: number, total: number): number {
 // counts, collapsing pressure to 0 and breaking monotonicity). Scaling both by
 // their max yields the algebraically identical value with no intermediate
 // overflow, so pressure stays exactly part/(part+other) — monotonic in `part`.
+// A physical ceiling on distinct-wallet counts per token per window. Distinct
+// buyers are small integers; no token approaches this. Clamping to it is
+// defensive input normalisation that ALSO buys exact monotonicity below (see
+// pressureShare) — and beyond it, "more buyers" maps to the SAME value, which
+// trivially cannot raise the score.
+const MAX_COHORT_COUNT = 1e7;
+
+function clampCount(x: number): number {
+  if (!(x > 0)) return 0; // x <= 0 or NaN
+  return x > MAX_COHORT_COUNT ? MAX_COHORT_COUNT : x;
+}
+
+// Penalty pressure = part/(part+other) with BOTH counts clamped to
+// [0, MAX_COHORT_COUNT]. On that bounded domain the sum cannot overflow AND the
+// IEEE-754 division is EXACTLY monotone non-decreasing in `part` (consecutive
+// integer gaps are ≫ a ULP), so the reported score is monotone in public/crowd
+// counts with no rounding tricks. Above the ceiling the value saturates
+// (equal → non-increasing).
 function pressureShare(part: number, other: number): number {
-  if (!(part > 0)) return 0; // part <= 0 or NaN
-  if (!(other > 0)) return 1; // only the penalised cohort is present
-  const m = Math.max(part, other);
-  const p = part / m;
-  const o = other / m;
-  // Quantise to a 1e-9 grid (Math.round is monotonic non-decreasing, so this
-  // only COARSENS the ordering, never inverts it). Double division of two
-  // finite values can be non-monotone at the last ULP (~1e-16); any residual
-  // inversion is therefore ≤ 1e-9, which — multiplied by a penalty weight and
-  // the score's ×100 scale — moves the reported stealthScore by ≤ 1e-7, far
-  // below its 0.01 output granularity. So the reported score is monotone in
-  // public/crowd counts by construction, for all finite non-negative inputs.
-  return clamp01(Math.round((p / (p + o)) * 1e9) / 1e9);
+  const a = clampCount(part);
+  if (a <= 0) return 0;
+  const b = clampCount(other);
+  if (b <= 0) return 1; // only the penalised cohort is present
+  return a / (a + b);
 }
 
 // ---------------------------------------------------------------------------
