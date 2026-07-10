@@ -43,6 +43,7 @@ export * from './feed/explain';
 export * from './candidates/validate';
 export * from './social/index';
 export * from './confluence/index';
+export * from './stealth/index';
 
 // Graph module: the unused sketch GraphNode/GraphEdge/RawGraphEdge that used
 // to live in ./types (never implemented or consumed — confirmed by repo-wide
