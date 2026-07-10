@@ -45,6 +45,13 @@ export interface EnrollReceiverResult {
    * two receiver slots.
    */
   replay: boolean;
+  /**
+   * True when a NEW global hot subscription was created — i.e. this root
+   * STARTED monitoring a wallet not previously monitored. Drives the daily
+   * "new monitored receivers per root per day" cap (createdAt = processing
+   * time, so it works correctly during historical backfill; Codex round-6).
+   */
+  newReceiver: boolean;
   /** True when a NEW expansion node was created (not deduped, allowEnqueue). */
   enqueued: boolean;
   relationshipKind?: WalletRelationshipKind;
@@ -102,7 +109,7 @@ export async function enrollReceiverFromTransfer(
 
   // Cap-exhausted: persist the edge (observation), skip enrollment entirely.
   if (!allowEnroll) {
-    return { edgePersisted, enrolled: false, replay: false, enqueued: false, viaGasException: false, dust: false, reason: 'enrollment cap reached — edge persisted only' };
+    return { edgePersisted, enrolled: false, replay: false, newReceiver: false, enqueued: false, viaGasException: false, dust: false, reason: 'enrollment cap reached — edge persisted only' };
   }
 
   // 2. Gather the receiver-classification context.
@@ -232,7 +239,7 @@ export async function enrollReceiverFromTransfer(
 
   const verdict = classifyReceiverEnrollment(ctx, settings.lineage);
   if (!verdict.enroll) {
-    return { edgePersisted, enrolled: false, replay: false, enqueued: false, viaGasException: false, dust: verdict.dust, reason: verdict.reason };
+    return { edgePersisted, enrolled: false, replay: false, newReceiver: false, enqueued: false, viaGasException: false, dust: verdict.dust, reason: verdict.reason };
   }
 
   // Steps 3-6 run in ONE transaction (2026-07-10 Codex round-5): receiver +
@@ -247,7 +254,7 @@ export async function enrollReceiverFromTransfer(
   const kind = verdict.relationshipKind!;
   const senderWalletIdForRel = (await walletIdOf(prisma, senderAddr)) ?? null;
 
-  const { newChild, enqueued } = await prisma.$transaction(async (tx) => {
+  const { newChild, newReceiver, enqueued } = await prisma.$transaction(async (tx) => {
     // 3. Receiver observation_only (NEVER signal_eligible), status preserved;
     // lastActiveAt = transfer time, forward-only.
     const receiverId = await upsertObservationReceiver(tx, transfer.toAddress, transfer.ts);
@@ -265,9 +272,10 @@ export async function enrollReceiverFromTransfer(
       now: transfer.ts
     });
 
-    // 5. Hot subscription (global per wallet); self-heals but is not the
-    // budget signal.
-    await upsertSubscription(tx, receiverId, lineageRootId);
+    // 5. Hot subscription (global per wallet). created=true means this root
+    // STARTED monitoring a new wallet — the DAILY-cap signal (processing-time
+    // createdAt).
+    const { created: newReceiver } = await upsertSubscription(tx, receiverId, lineageRootId);
 
     // 6. Enqueue bounded shallow expansion (depth+1). Promotion of an existing
     // deeper node always runs; only NEW node creation is gated by allowEnqueue.
@@ -283,16 +291,18 @@ export async function enrollReceiverFromTransfer(
         now
       });
     }
-    return { newChild, enqueued };
+    return { newChild, newReceiver, enqueued };
   });
 
   return {
     edgePersisted,
-    // Counts toward per-root child + daily budgets only for a genuinely NEW
-    // child (new relationship for this root); a re-processed transfer to an
-    // already-related receiver self-heals but consumes no budget.
+    // enrolled = a NEW child link for this root (drives per-node child cap);
+    // newReceiver = a NEW monitored wallet (drives per-root/day cap). A
+    // re-processed transfer to an already-related receiver self-heals but
+    // consumes neither budget.
     enrolled: newChild,
-    replay: !newChild,
+    replay: !newChild && !newReceiver,
+    newReceiver,
     enqueued,
     relationshipKind: kind,
     viaGasException: verdict.viaGasException,

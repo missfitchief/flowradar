@@ -174,11 +174,13 @@ export async function runLineageExpansion(
           );
         }
 
-        // Daily receiver budget for this root (UTC day). Counts NEW
-        // relationships (per-root child links) created today — the per-root
-        // notion, not the global hot subscription (Codex round-5).
-        const receiversToday = await prisma.walletRelationship.count({
-          where: { lineageRootId: node.lineageRootId, firstSeenAt: { gte: utcDayStart } }
+        // Daily receiver budget for this root (UTC day). Counts NEW hot
+        // subscriptions this root created today by PROCESSING time (createdAt)
+        // — NOT relationship firstSeenAt, which is the historical transfer
+        // time and would read 0 during a backfill of old transfers, defeating
+        // the cap (Codex round-6).
+        const receiversToday = await prisma.monitoringSubscription.count({
+          where: { lineageRootId: node.lineageRootId, priority: 'fresh_receiver_hot', createdAt: { gte: utcDayStart } }
         });
         // CUMULATIVE children of THIS node across passes (Codex round-2:
         // enrolledFromNode reset every resumed pass, defeating the cap). Count
@@ -199,6 +201,7 @@ export async function runLineageExpansion(
         let cursor = node.cursor ?? undefined;
         let pages = 0;
         let childrenEnrolled = priorChildren;
+        const childReceiversThisNode = new Set<string>(); // distinct receivers counted this node/pass
         let dailyReceivers = receiversToday;
         let hitEdgeCap = false;
         let nodeStopReason: string | null = null;
@@ -233,23 +236,29 @@ export async function runLineageExpansion(
                   bump('node_cap');
                 }
               }
-              if (res.enrolled) {
+              // Child cap counts DISTINCT receivers of THIS node (Codex
+              // round-6: a receiver related under two kinds must not consume
+              // two child slots). newReceiver (new global monitoring) drives
+              // the daily cap independently.
+              if (res.enrolled && !childReceiversThisNode.has(observation.toAddress)) {
+                childReceiversThisNode.add(observation.toAddress);
                 result.receiversEnrolled += 1;
                 childrenEnrolled += 1;
-                dailyReceivers += 1;
                 if (childrenEnrolled >= settings.lineage.maxChildrenPerNode) {
                   nodeStopReason = nodeStopReason ?? 'max_children_per_node';
                   bump('max_children_per_node');
                 }
+              }
+              if (res.newReceiver) {
+                dailyReceivers += 1;
                 if (dailyReceivers >= settings.lineage.maxNewReceiversPerRootPerDay) {
                   nodeStopReason = nodeStopReason ?? 'receiver_day_cap';
                   bump('receiver_day_cap');
                 }
-              } else if (res.replay) {
-                // A replayed tx creates nothing new — must NOT consume child
-                // or daily receiver budget (Codex round-3).
+              }
+              if (!res.enrolled && res.replay) {
                 bump('replay_skipped');
-              } else if (res.reason.match(/service/i)) {
+              } else if (!res.enrolled && res.reason.match(/service/i)) {
                 result.serviceNodesSkipped += 1;
               }
               // NB: child/day caps do NOT break the loop — remaining transfers
