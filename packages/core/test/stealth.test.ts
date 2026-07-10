@@ -252,6 +252,29 @@ describe('stealth engine — trust-boundary invariants', () => {
     expect(s1).toBeLessThanOrEqual(s0);
   });
 
+  it('astronomical cohort counts cannot overflow the pressure denominator to raise score', () => {
+    // Codex CRITICAL repro: eligible 1e308, public 7e307 -> 8e307. The naive
+    // k+e denominator overflows to Infinity, collapsing pressure to 0. The
+    // scaled pressureShare keeps it exactly k/(k+e) and monotonic.
+    const base = input([
+      win('24h', {
+        eligible: flow({ distinctBuyers: 1e308, buyUsd: 1e9, freshBuyers: 1e6, distinctClusters: 10 }),
+        publicKol: flow({ distinctBuyers: 7e307 })
+      })
+    ]);
+    const more = input([
+      win('24h', {
+        eligible: flow({ distinctBuyers: 1e308, buyUsd: 1e9, freshBuyers: 1e6, distinctClusters: 10 }),
+        publicKol: flow({ distinctBuyers: 8e307 })
+      })
+    ]);
+    const s0 = computeStealth(base).stealthScore;
+    const s1 = computeStealth(more).stealthScore;
+    expect(Number.isFinite(s0)).toBe(true);
+    expect(Number.isFinite(s1)).toBe(true);
+    expect(s1).toBeLessThanOrEqual(s0); // more public -> not higher
+  });
+
   it('does not treat one burst (present in all nested windows) as persistence', () => {
     // Codex HIGH repro: a single burst appears net-positive in every trailing
     // window; persistenceWindows must be 0 (no OUTER-ring growth), not 6.

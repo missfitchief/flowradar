@@ -221,6 +221,20 @@ function safeShare(part: number, total: number): number {
   return total > 0 ? clamp01(part / total) : 0;
 }
 
+// Penalty pressure = part/(part+other), computed WITHOUT ever forming the sum
+// part+other (which can overflow to Infinity for astronomically large finite
+// counts, collapsing pressure to 0 and breaking monotonicity). Scaling both by
+// their max yields the algebraically identical value with no intermediate
+// overflow, so pressure stays exactly part/(part+other) — monotonic in `part`.
+function pressureShare(part: number, other: number): number {
+  if (!(part > 0)) return 0; // part <= 0 or NaN
+  if (!(other > 0)) return 1; // only the penalised cohort is present
+  const m = Math.max(part, other);
+  const p = part / m;
+  const o = other / m;
+  return clamp01(p / (p + o));
+}
+
 // ---------------------------------------------------------------------------
 // Metric computation
 // ---------------------------------------------------------------------------
@@ -284,11 +298,11 @@ function computeMetrics(input: StealthInput): StealthMetrics {
     publicKolBuyers1h: k1h.distinctBuyers,
     publicKolNetUsd24h: k24.buyUsd - k24.sellUsd,
     publicKolShare24h: safeShare(k24.distinctBuyers, totalDistinctBuyers24h),
-    publicKolPressure: safeShare(k24.distinctBuyers, k24.distinctBuyers + e24.distinctBuyers),
+    publicKolPressure: pressureShare(k24.distinctBuyers, e24.distinctBuyers),
     crowdBuyers24h: c24.distinctBuyers,
     crowdNetUsd24h: c24.buyUsd - c24.sellUsd,
     crowdShare24h: safeShare(c24.distinctBuyers, totalDistinctBuyers24h),
-    crowdPressure: safeShare(c24.distinctBuyers, c24.distinctBuyers + e24.distinctBuyers),
+    crowdPressure: pressureShare(c24.distinctBuyers, e24.distinctBuyers),
     observationBuyers24h: o24.distinctBuyers,
     totalDistinctBuyers24h,
     eligibleBuyerShare24h: safeShare(e24.distinctBuyers, totalDistinctBuyers24h),
