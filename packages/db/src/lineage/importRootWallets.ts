@@ -28,6 +28,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { parseRootWalletFile } from '@flowradar/core';
 import type { ParsedRootWalletFile } from '@flowradar/core';
+import { withGlobalJobLock } from '../locks/globalJobLock';
 
 /** Explicit configurable operational safety limit (requirement 10). */
 const DEFAULT_MAX_ROOTS = 10_000;
@@ -112,13 +113,12 @@ export async function importRootWallets(
   // heals on re-import), and DB-friendly at hundreds of roots. No global
   // transaction by design — partial progress is valid progress here.
   //
-  // CONCURRENCY (2026-07-10 Codex review Important): each entity is written
-  // create-first with a unique-violation (P2002) fallback to the existing
-  // row — a plain find-then-create would let two concurrent imports both
-  // observe "missing", and the P2002 loser would ABORT mid-file, silently
-  // skipping the rest of its roots. With catch-and-continue, concurrent
-  // imports of overlapping files both complete; the DB uniques guarantee
-  // single rows; counts stay exact per run.
+  // SERIALIZATION (Prerequisite B): the whole write phase runs under the
+  // global job lock so an import can never interleave with db:seed's wipe,
+  // a live reset, or a lineage backfill. The create+P2002-fallback logic
+  // below stays as belt-and-braces (it also covers non-lock writers like
+  // the live ingest pipeline creating the same wallet).
+  await withGlobalJobLock(`root-import${opts.fileProvenance ? `:${opts.fileProvenance}` : ''}`, async () => {
   for (const root of parsed.roots) {
     let walletId: string;
     try {
@@ -204,6 +204,7 @@ export async function importRootWallets(
       subscriptionsExisting += 1;
     }
   }
+  });
 
   return {
     totalLines: parsed.totalLines,

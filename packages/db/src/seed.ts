@@ -25,6 +25,7 @@ import { createMockWorld, GRAPH_DEMO_ROOT_ADDRESS, MockCandidateSource, MockSoci
 import type { MockWorld } from '@flowradar/providers';
 import type { Prisma } from '@prisma/client';
 import { prisma } from './client';
+import { withGlobalJobLock } from './locks/globalJobLock';
 import { ingestNormalizedTxs, snapshotMarket } from './ingest';
 import { runFlowScoringPass } from './scoring-pass';
 import { runEntityClustering } from './clustering';
@@ -2292,6 +2293,16 @@ async function main(): Promise<void> {
   loadEnv();
   const startedAt = Date.now();
 
+  // Global job serialization (Prerequisite B): the destructive wipe must
+  // never interleave with a root import, lineage backfill, or live reset.
+  // Held for the entire seed — a concurrent job fails honestly with
+  // GlobalJobLockBusyError instead of racing the wipe.
+  await withGlobalJobLock('db-seed', async () => {
+    await mainLocked(startedAt);
+  });
+}
+
+async function mainLocked(startedAt: number): Promise<void> {
   await assertNoLineageRootsOrExplicitOverride();
   await wipeAllTables();
 
