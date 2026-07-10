@@ -99,12 +99,37 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runMonitoringScheduler',
     expect(after!.consecutiveErrors).toBe(1);
   });
 
-  it('a THROWN poll error is isolated (does not abort the pass)', async () => {
-    await makeSub('throw', { nextPollAt: null });
+  it('a THROWN poll error is isolated, increments consecutiveErrors and advances nextPollAt', async () => {
+    const thr = await makeSub('throw', { nextPollAt: null });
     await makeSub('ok', { nextPollAt: null });
     const res = await runMonitoringScheduler(prisma, { now: NOW, walletAddressStartsWith: PREFIX, poll: async (c) => { if (c.walletAddress.endsWith('_throw')) throw new Error('boom'); return { ok: true }; } });
     expect(res.polled).toBe(2);
     expect(res.pollErrors).toBe(1);
+    const after = await prisma.monitoringSubscription.findUnique({ where: { id: thr.id } });
+    expect(after!.consecutiveErrors).toBe(1);
+    expect(after!.nextPollAt).not.toBeNull(); // advanced — no infinite immediate retry
+  });
+
+  it('HOT EXPIRY is collision-safe: when the wallet already has a probable_link sub, the expired hot one is DEDUPED not P2002', async () => {
+    // One wallet with BOTH a fresh_receiver_hot (expired) and a probable_link.
+    const w = await prisma.wallet.create({ data: { address: `${PREFIX}_dual`, chain: 'SOLANA', firstSeenAt: NOW, lastActiveAt: NOW, status: 'observation_only' } });
+    const hot = await prisma.monitoringSubscription.create({ data: { walletId: w.id, priority: 'fresh_receiver_hot', active: true, reason: 't', hotUntil: new Date(NOW.getTime() - 1000), nextPollAt: null } });
+    await prisma.monitoringSubscription.create({ data: { walletId: w.id, priority: 'probable_link', active: true, reason: 't', nextPollAt: new Date(NOW.getTime() + 3600_000) } });
+
+    const res = await runMonitoringScheduler(prisma, { now: NOW, walletAddressStartsWith: PREFIX, poll: async () => ({ ok: true }) });
+    expect(res.hotExpired).toBeGreaterThanOrEqual(1);
+    // The hot sub was deleted (deduped); the probable_link survives.
+    expect(await prisma.monitoringSubscription.findUnique({ where: { id: hot.id } })).toBeNull();
+    expect(await prisma.monitoringSubscription.count({ where: { walletId: w.id } })).toBe(1);
+  });
+
+  it('COLD DEMOTION: an idle probable_link demotes to standard', async () => {
+    const w = await prisma.wallet.create({ data: { address: `${PREFIX}_cold`, chain: 'SOLANA', firstSeenAt: NOW, lastActiveAt: new Date(NOW.getTime() - 100 * 86_400_000), status: 'observation_only' } });
+    const sub = await prisma.monitoringSubscription.create({ data: { walletId: w.id, priority: 'probable_link', active: true, reason: 't', nextPollAt: new Date(NOW.getTime() + 3600_000) } });
+    const res = await runMonitoringScheduler(prisma, { now: NOW, walletAddressStartsWith: PREFIX, poll: async () => ({ ok: true }) });
+    expect(res.coldDemoted).toBeGreaterThanOrEqual(1);
+    const after = await prisma.monitoringSubscription.findUnique({ where: { id: sub.id } });
+    expect(after!.priority).toBe('standard');
   });
 
   it('NEVER mutates wallet status/eligibility', async () => {

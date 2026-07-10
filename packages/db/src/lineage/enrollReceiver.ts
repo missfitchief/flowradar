@@ -347,7 +347,8 @@ export async function enrollReceiverFromTransfer(
     // 5. Hot subscription (global per wallet). created=true means this root
     // STARTED monitoring a new wallet — the DAILY-cap signal (processing-time
     // createdAt).
-    const { created: newReceiver } = await upsertSubscription(tx, receiverId, lineageRootId);
+    const hotUntil = new Date(now.getTime() + settings.lineage.hotWindowHours * 3600_000);
+    const { created: newReceiver } = await upsertSubscription(tx, receiverId, lineageRootId, hotUntil);
 
     // 6. Enqueue bounded shallow expansion (depth+1). Promotion of an existing
     // deeper node always runs; only NEW node creation is gated by allowEnqueue.
@@ -546,7 +547,12 @@ async function upsertRelationship(
 }
 
 /** Returns { created } — created is true only when a NEW hot subscription was inserted. */
-async function upsertSubscription(tx: Prisma.TransactionClient, walletId: string, lineageRootId: string): Promise<{ created: boolean }> {
+async function upsertSubscription(
+  tx: Prisma.TransactionClient,
+  walletId: string,
+  lineageRootId: string,
+  hotUntil: Date
+): Promise<{ created: boolean }> {
   const existing = await tx.monitoringSubscription.findUnique({
     where: { walletId_priority: { walletId, priority: 'fresh_receiver_hot' } },
     select: { id: true }
@@ -554,7 +560,9 @@ async function upsertSubscription(tx: Prisma.TransactionClient, walletId: string
   if (existing) return { created: false }; // preserve operator changes; never reactivate
   try {
     await tx.monitoringSubscription.create({
-      data: { walletId, priority: 'fresh_receiver_hot', active: true, reason: 'fresh_receiver_enrollment', lineageRootId }
+      // hotUntil ARMS the scheduler's hot-expiry (Wave C Codex P1): after this
+      // the tier demotes to probable_link.
+      data: { walletId, priority: 'fresh_receiver_hot', active: true, reason: 'fresh_receiver_enrollment', lineageRootId, hotUntil }
     });
     return { created: true };
   } catch (err) {

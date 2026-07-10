@@ -15,11 +15,37 @@ import type { PrismaClient } from '@prisma/client';
 import {
   DEFAULT_MONITORING_SCHEDULE,
   computeNextPollAt,
-  tierRank,
+  coldTransition,
   type MonitoringScheduleConfig,
   type MonitoringTier
 } from '@flowradar/core';
 import { withGlobalJobLock } from '../locks/globalJobLock';
+
+/**
+ * Transitions a subscription to a new tier, honoring the
+ * @@unique([walletId, priority]) constraint (Wave C Codex P1): if the target
+ * tier already exists for the wallet, the transitioning row is DELETED
+ * (deduplicate — the wallet is already monitored at the target) rather than
+ * updated into a collision; otherwise it is updated in place. Never throws
+ * P2002.
+ */
+async function transitionTier(
+  prisma: PrismaClient,
+  subId: string,
+  walletId: string,
+  toTier: MonitoringTier
+): Promise<'updated' | 'deduped'> {
+  const collision = await prisma.monitoringSubscription.findUnique({
+    where: { walletId_priority: { walletId, priority: toTier } },
+    select: { id: true }
+  });
+  if (collision && collision.id !== subId) {
+    await prisma.monitoringSubscription.delete({ where: { id: subId } });
+    return 'deduped';
+  }
+  await prisma.monitoringSubscription.update({ where: { id: subId }, data: { priority: toTier } });
+  return 'updated';
+}
 
 export interface MonitoringPollContext {
   walletId: string;
@@ -34,6 +60,7 @@ export type MonitoringPollFn = (ctx: MonitoringPollContext) => Promise<{ ok: boo
 export interface MonitoringSchedulerResult {
   reclaimed: number;
   hotExpired: number;
+  coldDemoted: number;
   due: number;
   polled: number;
   pollErrors: number;
@@ -66,6 +93,7 @@ export async function runMonitoringScheduler(
     const result: MonitoringSchedulerResult = {
       reclaimed: 0,
       hotExpired: 0,
+      coldDemoted: 0,
       due: 0,
       polled: 0,
       pollErrors: 0,
@@ -82,32 +110,63 @@ export async function runMonitoringScheduler(
     });
     result.reclaimed = reclaimed.count;
 
-    // 2. Expire fresh_receiver_hot subscriptions past their hot window.
-    const hotExpired = await prisma.monitoringSubscription.updateMany({
+    // 2. Expire fresh_receiver_hot past its hot window -> probable_link,
+    // per-row (collision-safe, Wave C Codex P1: a bulk updateMany would P2002
+    // against @@unique([walletId,priority]) when the wallet already has a
+    // probable_link sub).
+    const expiring = await prisma.monitoringSubscription.findMany({
       where: { priority: 'fresh_receiver_hot', hotUntil: { lte: now }, ...scope },
-      data: { priority: 'probable_link' }
+      select: { id: true, walletId: true }
     });
-    result.hotExpired = hotExpired.count;
+    for (const s of expiring) {
+      await transitionTier(prisma, s.id, s.walletId, 'probable_link');
+      result.hotExpired += 1;
+    }
 
-    // 3. Select DUE active, unclaimed subscriptions in priority order, bounded
-    // by the request budget. weak_cold/cold_archive still appear (cold, low
-    // frequency) but their long intervals keep them rarely due.
-    const dueSubs = await prisma.monitoringSubscription.findMany({
+    // 3. Cold-demote idle non-permanent subscriptions one step toward
+    // cold_archive (wires the pure coldTransition). Bounded scan.
+    const coldCandidates = await prisma.monitoringSubscription.findMany({
+      where: {
+        active: true,
+        priority: { in: ['strong_link', 'probable_link', 'standard', 'weak_cold'] },
+        ...scope
+      },
+      select: { id: true, priority: true, walletId: true, wallet: { select: { lastActiveAt: true } } },
+      take: 500
+    });
+    for (const s of coldCandidates) {
+      const to = coldTransition(s.priority as MonitoringTier, s.wallet.lastActiveAt, now, config);
+      if (to) {
+        await transitionTier(prisma, s.id, s.walletId, to);
+        result.coldDemoted += 1;
+      }
+    }
+
+    // 4. Select DUE active, unclaimed subscriptions. Ordered by ENUM priority
+    // (declared fresh_receiver_hot..cold_archive = tier order) then due time,
+    // nulls FIRST (never-scheduled == due now). Take exactly the budget — the
+    // DB ordering means the highest-priority due rows are selected, not a
+    // random over-fetch window (Wave C Codex P2).
+    const safeBudget = Number.isFinite(budget) && budget > 0 ? Math.floor(budget) : 100;
+    const batch = await prisma.monitoringSubscription.findMany({
       where: {
         active: true,
         claimedAt: null,
         OR: [{ nextPollAt: null }, { nextPollAt: { lte: now } }],
         ...scope
       },
-      orderBy: [{ nextPollAt: 'asc' }],
-      take: budget * 4, // over-fetch, then priority-sort in memory + trim to budget
+      orderBy: [{ priority: 'asc' }, { nextPollAt: { sort: 'asc', nulls: 'first' } }],
+      take: safeBudget,
       include: { wallet: { select: { id: true, address: true } } }
     });
-    // Priority-sort (tier rank) then due-time; trim to budget.
-    dueSubs.sort((a, b) => tierRank(a.priority as MonitoringTier) - tierRank(b.priority as MonitoringTier) || (a.nextPollAt?.getTime() ?? 0) - (b.nextPollAt?.getTime() ?? 0));
-    result.due = dueSubs.length;
-    const batch = dueSubs.slice(0, budget);
-    if (dueSubs.length > budget) result.budgetExhausted = true;
+    result.due = batch.length;
+    // Exhaustion: is there at least one more due row beyond the budget?
+    if (batch.length === safeBudget) {
+      const more = await prisma.monitoringSubscription.count({
+        where: { active: true, claimedAt: null, OR: [{ nextPollAt: null }, { nextPollAt: { lte: now } }], ...scope }
+      });
+      if (more > safeBudget) result.budgetExhausted = true;
+    }
 
     for (const sub of batch) {
       // Atomic claim — a concurrent/duplicate scheduler cannot double-claim.

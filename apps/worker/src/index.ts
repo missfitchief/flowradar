@@ -69,6 +69,7 @@ import * as walletGraph from './jobs/walletGraph';
 import * as walletStatsRefresh from './jobs/walletStatsRefresh';
 import * as walletDiscovery from './jobs/walletDiscovery';
 import * as lineageExpansion from './jobs/lineageExpansion';
+import * as monitoringScheduler from './jobs/monitoringScheduler';
 import * as externalWalletSource from './jobs/externalWalletSource';
 import * as walletCandidateValidation from './jobs/walletCandidateValidation';
 import * as tokenTopTraderBackfill from './jobs/tokenTopTraderBackfill';
@@ -211,6 +212,13 @@ async function main(): Promise<void> {
     {
       name: 'lineageExpansion',
       run: lineageExpansion.run,
+      intervalSec: settings.intervals.walletActivitySec
+    },
+    // monitoringScheduler (Wave C): queue-based tier scheduler that reopens
+    // due wallets' expansion nodes for lineageExpansion to re-scan.
+    {
+      name: 'monitoringScheduler',
+      run: monitoringScheduler.run,
       intervalSec: settings.intervals.walletActivitySec
     },
     // externalWalletSource (Task 34, Wave 4.5): also expressed in HOURS —
