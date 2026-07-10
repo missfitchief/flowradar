@@ -87,8 +87,8 @@ describe.skipIf(!(await probePort('localhost', 5439)))('signal dedupe (runSignal
       const address = `${ADDR_PREFIX}_wallet_${i}`;
       const wallet = await prisma.wallet.upsert({
         where: { address_chain: { address, chain: CHAIN } },
-        create: { address, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true },
-        update: { isWatched: true }
+        create: { address, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true, status: 'signal_eligible' },
+        update: { isWatched: true, status: 'signal_eligible' }
       });
       await prisma.walletTokenTrade.create({
         data: {

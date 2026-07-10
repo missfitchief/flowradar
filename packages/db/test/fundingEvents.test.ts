@@ -61,8 +61,8 @@ describe.skipIf(!(await probePort('localhost', 5439)))('buildFundingEvents', () 
 
     const funder = await prisma.wallet.upsert({
       where: { address_chain: { address: funderAddr, chain: CHAIN } },
-      create: { address: funderAddr, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true },
-      update: { isWatched: true }
+      create: { address: funderAddr, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true, status: 'signal_eligible' },
+      update: { isWatched: true, status: 'signal_eligible' }
     });
     const funded = await prisma.wallet.upsert({
       where: { address_chain: { address: fundedAddr, chain: CHAIN } },
@@ -144,8 +144,8 @@ describe.skipIf(!(await probePort('localhost', 5439)))('buildFundingEvents', () 
 
     const funder = await prisma.wallet.upsert({
       where: { address_chain: { address: funderAddr, chain: CHAIN } },
-      create: { address: funderAddr, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true },
-      update: { isWatched: true }
+      create: { address: funderAddr, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true, status: 'signal_eligible' },
+      update: { isWatched: true, status: 'signal_eligible' }
     });
     const funded = await prisma.wallet.upsert({
       where: { address_chain: { address: fundedAddr, chain: CHAIN } },

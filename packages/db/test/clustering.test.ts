@@ -87,8 +87,8 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runEntityClustering', ()
 
     const funder = await prisma.wallet.upsert({
       where: { address_chain: { address: funderAddr, chain: CHAIN } },
-      create: { address: funderAddr, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true },
-      update: { isWatched: true }
+      create: { address: funderAddr, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true, status: 'signal_eligible' },
+      update: { isWatched: true, status: 'signal_eligible' }
     });
 
     const token = await prisma.token.upsert({
@@ -222,8 +222,8 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runEntityClustering', ()
     const funderAddr = `${ADDR_PREFIX}_pm_funder`;
     const funder = await prisma.wallet.upsert({
       where: { address_chain: { address: funderAddr, chain: CHAIN } },
-      create: { address: funderAddr, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true },
-      update: { isWatched: true }
+      create: { address: funderAddr, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true, status: 'signal_eligible' },
+      update: { isWatched: true, status: 'signal_eligible' }
     });
 
     const token = await prisma.token.upsert({

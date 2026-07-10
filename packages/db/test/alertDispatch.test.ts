@@ -136,7 +136,7 @@ async function makeRotationSignal(
       chain: CHAIN,
       firstSeenAt: now,
       lastActiveAt: now,
-      isWatched: true
+      isWatched: true, status: 'signal_eligible'
     },
     update: {}
   });

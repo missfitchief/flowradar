@@ -89,7 +89,7 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runHistoricalReplay', ()
         const walletAddr = `${ADDR_PREFIX}_wallet_${i}`;
         const wallet = await prisma.wallet.upsert({
           where: { address_chain: { address: walletAddr, chain: CHAIN } },
-          create: { address: walletAddr, chain: CHAIN, firstSeenAt: genesis, lastActiveAt: buyTs, isWatched: true },
+          create: { address: walletAddr, chain: CHAIN, firstSeenAt: genesis, lastActiveAt: buyTs, isWatched: true, status: 'signal_eligible' },
           update: {}
         });
         await prisma.walletTokenTrade.create({

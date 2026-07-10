@@ -123,7 +123,7 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runWalletDiscovery', () 
         chain: CHAIN,
         firstSeenAt: now,
         lastActiveAt: now,
-        isWatched: true,
+        isWatched: true, status: 'signal_eligible',
         notes: 'manually watched before discovery ran'
       }
     });

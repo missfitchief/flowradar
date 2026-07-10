@@ -91,7 +91,7 @@ describe.skipIf(!(await probePort('localhost', 5439)))('buildRotationInputs / ru
 
     const sourceWallet = await prisma.wallet.upsert({
       where: { address_chain: { address: sourceAddr, chain: 'SOLANA' } },
-      create: { address: sourceAddr, chain: 'SOLANA', firstSeenAt: windowFrom, lastActiveAt: now, isWatched: true },
+      create: { address: sourceAddr, chain: 'SOLANA', firstSeenAt: windowFrom, lastActiveAt: now, isWatched: true, status: 'signal_eligible' },
       update: {}
     });
     const destWallet = await prisma.wallet.upsert({
@@ -306,7 +306,7 @@ describe.skipIf(!(await probePort('localhost', 5439)))('buildRotationInputs / ru
       const address = `${ADDR_PREFIX}_x2_source_${suffix}`;
       const w = await prisma.wallet.upsert({
         where: { address_chain: { address, chain: 'SOLANA' } },
-        create: { address, chain: 'SOLANA', firstSeenAt: now, lastActiveAt: now, isWatched: true },
+        create: { address, chain: 'SOLANA', firstSeenAt: now, lastActiveAt: now, isWatched: true, status: 'signal_eligible' },
         update: {}
       });
       return { id: w.id, address };
