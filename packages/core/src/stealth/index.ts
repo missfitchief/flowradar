@@ -7,7 +7,7 @@
 //
 // HARD BOUNDARIES (why this module is deliberately self-contained):
 //  1. SHADOW-ONLY. It never reads or writes FlowScore, signal thresholds, or
-//     CandidateWallet promotion. It has its OWN config (DEFAULT_STEALTH_CONFIG)
+//     candidate-wallet promotion. It has its OWN config (DEFAULT_STEALTH_CONFIG)
 //     so nothing here can perturb the scoring path. `shadowOnly: true` is
 //     stamped on every result.
 //  2. Only the `signal_eligible` cohort drives POSITIVE score. observation_only
