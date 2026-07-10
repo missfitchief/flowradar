@@ -1256,6 +1256,7 @@ enum MonitoringPriority {
   probable_link
   standard
   weak_cold
+  cold_archive
 }
 
 model LineageRoot {
@@ -1302,9 +1303,24 @@ model MonitoringSubscription {
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
+  // --- Scheduler fields (Wave C) — queue-based, NO per-wallet timers ---
+  /// When this subscription is next due to be polled. NULL = due immediately.
+  nextPollAt        DateTime?
+  lastPolledAt      DateTime?
+  pollCount         Int      @default(0)
+  /// Consecutive poll errors — drives exponential backoff.
+  consecutiveErrors Int      @default(0)
+  /// fresh_receiver_hot expiry: after this the tier demotes to probable_link.
+  hotUntil          DateTime?
+  /// Set when a scheduler batch claims this row; cleared on completion. A
+  /// stale claim (older than the reclaim window) is reclaimable.
+  claimedAt         DateTime?
+
   wallet        Wallet             @relation(fields: [walletId], references: [id], onDelete: Cascade)
   lineageRoot   LineageRoot?       @relation(fields: [lineageRootId], references: [id], onDelete: SetNull)
 
+  /// Scheduler read path: due, active subscriptions by tier.
+  @@index([active, nextPollAt])
   /// One subscription per wallet per tier — re-imports upsert, never stack.
   @@unique([walletId, priority])
   /// The scheduler's read path: active subscriptions by tier, batched.
