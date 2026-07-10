@@ -180,13 +180,24 @@ export async function enrollReceiverFromTransfer(
         select: { ts: true }
       }))?.ts ?? null
     : null;
-  // "Meaningful" by HONEST value (Codex Wave-B P1): above-dust valuedUsd, OR
-  // an unpriced native-SOL edge whose RAW amount is gas-scale-or-above. The
-  // legacy amountUsd (0 for unpriced SOL) must NOT be used or a prior unpriced
-  // SOL funding would wrongly look non-meaningful and re-trigger enrollment.
+  // "Meaningful" prior inbound by HONEST value (Codex Wave-B P1/P2). An edge
+  // counts when EITHER:
+  //   - valuedUsd > dust (a real valued transfer), OR
+  //   - it is NOT yet valued OR unavailable (never not_applicable — a
+  //     service/internal leg is not funding), AND it looks meaningful by its
+  //     legacy provider USD (amountUsd > dust, covers non-SOL legacy edges)
+  //     OR by unpriced native-SOL raw amount (>= gas min).
+  const dust = settings.lineage.dustMaxUsd;
+  const gasMinSol = settings.lineage.gasFundingMinSol;
   const meaningfulValueOr = [
-    { valuedUsd: { gt: settings.lineage.dustMaxUsd } },
-    { valuedUsd: null, asset: 'SOL', assetMint: null, amountToken: { gte: settings.lineage.gasFundingMinSol } }
+    { valuedUsd: { gt: dust } },
+    {
+      valuedUsd: null,
+      AND: [
+        { OR: [{ valuationStatus: null }, { valuationStatus: 'unavailable' as const }] },
+        { OR: [{ amountUsd: { gt: dust } }, { asset: 'SOL', assetMint: null, amountToken: { gte: gasMinSol } }] }
+      ]
+    }
   ];
   const lastMeaningfulEdgeBefore = (
     await prisma.moneyFlowEdge.findFirst({
