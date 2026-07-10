@@ -20,6 +20,7 @@ export * from './lineage/runLineageExpansion';
 export * from './lineage/resolveValuation';
 export * from './lineage/revaluateEdges';
 export * from './lineage/runMonitoringScheduler';
+export * from './lineage/importObservationUniverse';
 export * from './locks/globalJobLock';
 export * from './tokenTopTraderBackfill';
 export * from './dune/duneOverlap';

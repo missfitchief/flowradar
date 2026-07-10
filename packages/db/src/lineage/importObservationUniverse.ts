@@ -1,0 +1,196 @@
+// FlowRadar — Capital Lineage (Wave D): dedicated observation-universe import.
+//
+// A SEPARATE path from importWalletsCsv (which grants signal_eligible for
+// operator-vouched wallets). This one imports a wallet UNIVERSE as pure
+// OBSERVATION: every wallet is observation_only, any provider stats are stored
+// with trust=provider_claimed (source='provider' — NOT locally verified), and
+// NOTHING here ever grants signal eligibility or contributes a smart vote.
+// Existing classifications (public_kol/public_promoter/copytrader/
+// bot_or_service/excluded) and monitoring/lineage state are PRESERVED. Idempotent,
+// deduped. Address-only rows are fine — no stats are fabricated (hard rule 9).
+//
+// CSV columns (header row required): wallet_address[,source][,pnl_30d]
+// [,win_rate][,trade_count_30d][,avg_trade_size_usd][,tags]. Only
+// wallet_address is required; stats are optional and, when present, stored as
+// provider_claimed. A win_rate must be a fraction 0..1.
+
+import type { PrismaClient } from '@prisma/client';
+import { parseRootWalletFile } from '@flowradar/core';
+
+export interface ObservationRow {
+  address: string;
+  source: string;
+  providerStats?: {
+    pnl30d: number;
+    winRate: number;
+    tradeCount: number;
+    avgTradeSizeUsd: number;
+  };
+  tags: string[];
+  line: number;
+}
+
+export interface ObservationParseResult {
+  rows: ObservationRow[];
+  evmParked: string[];
+  malformed: { line: number; raw: string; reason: string }[];
+  duplicates: number;
+}
+
+/** Splits a CSV line honoring simple quotes (no embedded commas in our schema). */
+function splitCsv(line: string): string[] {
+  return line.split(',').map((c) => c.trim());
+}
+
+export function parseObservationUniverse(csv: string): ObservationParseResult {
+  const lines = csv.split(/\r?\n/).filter((l) => l.trim() !== '');
+  const rows: ObservationRow[] = [];
+  const malformed: ObservationParseResult['malformed'] = [];
+  const evmParked: string[] = [];
+  const seen = new Set<string>();
+  let duplicates = 0;
+  if (lines.length === 0) return { rows, evmParked, malformed, duplicates };
+
+  const header = splitCsv(lines[0]!).map((h) => h.toLowerCase());
+  const col = (name: string) => header.indexOf(name);
+  const iAddr = col('wallet_address');
+  const iSource = col('source');
+  const iPnl = col('pnl_30d');
+  const iWin = col('win_rate');
+  const iTrades = col('trade_count_30d');
+  const iAvg = col('avg_trade_size_usd');
+  const iTags = col('tags');
+
+  for (let i = 1; i < lines.length; i++) {
+    const raw = lines[i]!;
+    const cells = splitCsv(raw);
+    const address = iAddr >= 0 ? cells[iAddr] ?? '' : cells[0] ?? '';
+    if (/^0x[0-9a-fA-F]{40}$/i.test(address)) {
+      evmParked.push(address);
+      continue;
+    }
+    // Reuse the canonical Solana base58 32-byte validator.
+    const check = parseRootWalletFile(address);
+    if (check.roots.length !== 1) {
+      malformed.push({ line: i + 1, raw, reason: 'not a valid Solana address' });
+      continue;
+    }
+    if (seen.has(address)) {
+      duplicates += 1;
+      continue;
+    }
+    seen.add(address);
+
+    const num = (idx: number): number | null => {
+      if (idx < 0) return null;
+      const v = Number(cells[idx]);
+      return Number.isFinite(v) ? v : null;
+    };
+    const pnl = num(iPnl);
+    const win = num(iWin);
+    const trades = num(iTrades);
+    const avg = num(iAvg);
+    let providerStats: ObservationRow['providerStats'] | undefined;
+    // Only build a provider-stats block when ALL four are present AND win_rate
+    // is a valid fraction — never fabricate a partial/zero stat.
+    if (pnl !== null && win !== null && trades !== null && avg !== null && win >= 0 && win <= 1) {
+      providerStats = { pnl30d: pnl, winRate: win, tradeCount: trades, avgTradeSizeUsd: avg };
+    }
+    const tags = iTags >= 0 && cells[iTags] ? cells[iTags]!.split('|').map((t) => t.trim()).filter(Boolean) : [];
+    rows.push({ address, source: (iSource >= 0 ? cells[iSource] : '') || 'observation_universe', providerStats, tags, line: i + 1 });
+  }
+  return { rows, evmParked, malformed, duplicates };
+}
+
+export interface ObservationImportResult {
+  totalRows: number;
+  validRows: number;
+  walletsCreated: number;
+  walletsExisting: number;
+  statsRowsCreated: number;
+  classificationsPreserved: number;
+  evmParked: number;
+  malformed: number;
+  duplicates: number;
+}
+
+export async function importObservationUniverse(
+  prisma: PrismaClient,
+  csv: string,
+  opts: { now?: Date; provenance?: string } = {}
+): Promise<ObservationImportResult> {
+  const parsed = parseObservationUniverse(csv);
+  const now = opts.now ?? new Date();
+  const result: ObservationImportResult = {
+    totalRows: parsed.rows.length + parsed.evmParked.length + parsed.malformed.length + parsed.duplicates,
+    validRows: parsed.rows.length,
+    walletsCreated: 0,
+    walletsExisting: 0,
+    statsRowsCreated: 0,
+    classificationsPreserved: 0,
+    evmParked: parsed.evmParked.length,
+    malformed: parsed.malformed.length,
+    duplicates: parsed.duplicates
+  };
+
+  for (const row of parsed.rows) {
+    const existing = await prisma.wallet.findUnique({
+      where: { address_chain: { address: row.address, chain: 'SOLANA' } },
+      select: { id: true, status: true }
+    });
+
+    let walletId: string;
+    if (existing) {
+      // PRESERVATION: never change an existing wallet's status (a classified
+      // public_kol/excluded, or an operator-promoted signal_eligible, survives
+      // — the universe import must NOT demote or re-status it).
+      walletId = existing.id;
+      result.walletsExisting += 1;
+      if (existing.status !== 'observation_only') result.classificationsPreserved += 1;
+    } else {
+      const created = await prisma.wallet.create({
+        data: {
+          address: row.address,
+          chain: 'SOLANA',
+          firstSeenAt: now,
+          lastActiveAt: now,
+          isWatched: false,
+          status: 'observation_only', // NEVER signal_eligible via this path
+          notes: `observation-universe:${row.source}${opts.provenance ? ` (${opts.provenance})` : ''}`
+        },
+        select: { id: true }
+      });
+      walletId = created.id;
+      result.walletsCreated += 1;
+    }
+
+    // Store provider stats as provider_claimed (source='provider') ONLY when
+    // the row supplied a complete set — never fabricated. Skip if a stats row
+    // for this window already exists (idempotent; don't clobber).
+    if (row.providerStats) {
+      const hasStats = await prisma.walletStats.count({ where: { walletId, source: 'provider', window: '30d' } });
+      if (hasStats === 0) {
+        await prisma.walletStats.create({
+          data: {
+            walletId,
+            window: '30d',
+            pnlUsd: row.providerStats.pnl30d,
+            realizedPnlUsd: row.providerStats.pnl30d,
+            unrealizedPnlUsd: 0,
+            winRate: row.providerStats.winRate,
+            tradeCount: row.providerStats.tradeCount,
+            avgTradeSizeUsd: row.providerStats.avgTradeSizeUsd,
+            walletScore: 0,
+            scoreComponents: {},
+            pnlConfidence: 0,
+            source: 'provider', // provider_claimed trust — NOT locally verified
+            computedAt: now
+          }
+        });
+        result.statsRowsCreated += 1;
+      }
+    }
+  }
+
+  return result;
+}
