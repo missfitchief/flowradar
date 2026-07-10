@@ -562,7 +562,7 @@ async function upsertSubscription(
     await tx.monitoringSubscription.create({
       // hotUntil ARMS the scheduler's hot-expiry (Wave C Codex P1): after this
       // the tier demotes to probable_link.
-      data: { walletId, priority: 'fresh_receiver_hot', active: true, reason: 'fresh_receiver_enrollment', lineageRootId, hotUntil }
+      data: { walletId, priority: 'fresh_receiver_hot', tierPriority: 0, active: true, reason: 'fresh_receiver_enrollment', lineageRootId, hotUntil }
     });
     return { created: true };
   } catch (err) {

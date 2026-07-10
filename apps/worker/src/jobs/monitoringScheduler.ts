@@ -20,11 +20,20 @@ export async function run(ctx: JobContext): Promise<void> {
     try {
       // Reopen this wallet's completed/skipped expansion nodes so the next
       // lineageExpansion pass re-scans it. Idempotent; enrollment dedupes.
+      // Provider FETCHING happens in lineageExpansion (its own per-node error
+      // isolation + the node stays pending for retry). We surface provider
+      // health back to the scheduler's backoff by reporting ok=false when the
+      // wallet's LAST expansion ended in an error stop reason — so a
+      // persistently-failing wallet is polled less often.
+      const errored = await prisma.lineageExpansionNode.findFirst({
+        where: { walletAddress, chain: 'SOLANA', stopReason: { startsWith: 'error' } },
+        select: { id: true }
+      });
       await prisma.lineageExpansionNode.updateMany({
         where: { walletAddress, chain: 'SOLANA', status: { in: ['done', 'skipped'] } },
         data: { status: 'pending' }
       });
-      return { ok: true };
+      return { ok: errored === null };
     } catch {
       return { ok: false };
     }

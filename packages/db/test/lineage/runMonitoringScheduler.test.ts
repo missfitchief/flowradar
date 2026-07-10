@@ -27,12 +27,15 @@ async function cleanup() {
 afterAll(async () => { if (!dbReachable) return; await cleanup(); await prisma.$disconnect(); });
 beforeEach(async () => { if (!dbReachable) return; await cleanup(); });
 
+const RANK: Record<string, number> = { fresh_receiver_hot: 0, root_permanent: 1, strong_link: 2, probable_link: 3, standard: 4, weak_cold: 5, cold_archive: 6 };
 async function makeSub(suffix: string, over: { priority?: string; nextPollAt?: Date | null; claimedAt?: Date | null; hotUntil?: Date | null; consecutiveErrors?: number; active?: boolean } = {}) {
   const w = await prisma.wallet.create({ data: { address: `${PREFIX}_${suffix}`, chain: 'SOLANA', firstSeenAt: NOW, lastActiveAt: NOW, status: 'observation_only' } });
+  const priority = over.priority ?? 'probable_link';
   return prisma.monitoringSubscription.create({
     data: {
       walletId: w.id,
-      priority: (over.priority ?? 'probable_link') as never,
+      priority: priority as never,
+      tierPriority: RANK[priority] ?? 99,
       active: over.active ?? true,
       reason: 'test',
       nextPollAt: over.nextPollAt === undefined ? null : over.nextPollAt,
@@ -53,6 +56,16 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runMonitoringScheduler',
     expect(order[0]).toBe('root_permanent'); // higher priority first
     const subs = await prisma.monitoringSubscription.findMany({ where: { wallet: { address: { startsWith: PREFIX } } } });
     for (const s of subs) expect(s.nextPollAt).not.toBeNull(); // advanced
+  });
+
+  it('STRICT tier order across the enum migration-order gap (standard vs strong_link)', async () => {
+    // The DB enum on-disk order puts standard/weak_cold BEFORE strong/probable
+    // (migration order), so this only passes if ordering uses tierPriority.
+    await makeSub('t_standard', { priority: 'standard', nextPollAt: null });
+    await makeSub('t_strong', { priority: 'strong_link', nextPollAt: null });
+    const order: string[] = [];
+    await runMonitoringScheduler(prisma, { now: NOW, walletAddressStartsWith: PREFIX, poll: async (c) => { order.push(c.tier); return { ok: true }; } });
+    expect(order.indexOf('strong_link')).toBeLessThan(order.indexOf('standard')); // strong (rank 2) before standard (rank 4)
   });
 
   it('respects the request BUDGET and reports exhaustion', async () => {
@@ -113,8 +126,8 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runMonitoringScheduler',
   it('HOT EXPIRY is collision-safe: when the wallet already has a probable_link sub, the expired hot one is DEDUPED not P2002', async () => {
     // One wallet with BOTH a fresh_receiver_hot (expired) and a probable_link.
     const w = await prisma.wallet.create({ data: { address: `${PREFIX}_dual`, chain: 'SOLANA', firstSeenAt: NOW, lastActiveAt: NOW, status: 'observation_only' } });
-    const hot = await prisma.monitoringSubscription.create({ data: { walletId: w.id, priority: 'fresh_receiver_hot', active: true, reason: 't', hotUntil: new Date(NOW.getTime() - 1000), nextPollAt: null } });
-    await prisma.monitoringSubscription.create({ data: { walletId: w.id, priority: 'probable_link', active: true, reason: 't', nextPollAt: new Date(NOW.getTime() + 3600_000) } });
+    const hot = await prisma.monitoringSubscription.create({ data: { walletId: w.id, priority: 'fresh_receiver_hot', tierPriority: 0, active: true, reason: 't', hotUntil: new Date(NOW.getTime() - 1000), nextPollAt: null } });
+    await prisma.monitoringSubscription.create({ data: { walletId: w.id, priority: 'probable_link', tierPriority: 3, active: true, reason: 't', nextPollAt: new Date(NOW.getTime() + 3600_000) } });
 
     const res = await runMonitoringScheduler(prisma, { now: NOW, walletAddressStartsWith: PREFIX, poll: async () => ({ ok: true }) });
     expect(res.hotExpired).toBeGreaterThanOrEqual(1);
@@ -125,7 +138,7 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runMonitoringScheduler',
 
   it('COLD DEMOTION: an idle probable_link demotes to standard', async () => {
     const w = await prisma.wallet.create({ data: { address: `${PREFIX}_cold`, chain: 'SOLANA', firstSeenAt: NOW, lastActiveAt: new Date(NOW.getTime() - 100 * 86_400_000), status: 'observation_only' } });
-    const sub = await prisma.monitoringSubscription.create({ data: { walletId: w.id, priority: 'probable_link', active: true, reason: 't', nextPollAt: new Date(NOW.getTime() + 3600_000) } });
+    const sub = await prisma.monitoringSubscription.create({ data: { walletId: w.id, priority: 'probable_link', tierPriority: 3, active: true, reason: 't', nextPollAt: new Date(NOW.getTime() + 3600_000) } });
     const res = await runMonitoringScheduler(prisma, { now: NOW, walletAddressStartsWith: PREFIX, poll: async () => ({ ok: true }) });
     expect(res.coldDemoted).toBeGreaterThanOrEqual(1);
     const after = await prisma.monitoringSubscription.findUnique({ where: { id: sub.id } });

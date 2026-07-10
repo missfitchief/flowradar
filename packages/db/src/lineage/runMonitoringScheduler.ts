@@ -16,6 +16,7 @@ import {
   DEFAULT_MONITORING_SCHEDULE,
   computeNextPollAt,
   coldTransition,
+  tierPriorityValue,
   type MonitoringScheduleConfig,
   type MonitoringTier
 } from '@flowradar/core';
@@ -43,7 +44,10 @@ async function transitionTier(
     await prisma.monitoringSubscription.delete({ where: { id: subId } });
     return 'deduped';
   }
-  await prisma.monitoringSubscription.update({ where: { id: subId }, data: { priority: toTier } });
+  await prisma.monitoringSubscription.update({
+    where: { id: subId },
+    data: { priority: toTier, tierPriority: tierPriorityValue(toTier) }
+  });
   return 'updated';
 }
 
@@ -111,12 +115,13 @@ export async function runMonitoringScheduler(
     result.reclaimed = reclaimed.count;
 
     // 2. Expire fresh_receiver_hot past its hot window -> probable_link,
-    // per-row (collision-safe, Wave C Codex P1: a bulk updateMany would P2002
-    // against @@unique([walletId,priority]) when the wallet already has a
-    // probable_link sub).
+    // per-row (collision-safe, Wave C Codex P1). BOUNDED scan (Codex round-2:
+    // an unbounded expiry backlog could hold the lock too long).
+    const MAINT_LIMIT = 500;
     const expiring = await prisma.monitoringSubscription.findMany({
       where: { priority: 'fresh_receiver_hot', hotUntil: { lte: now }, ...scope },
-      select: { id: true, walletId: true }
+      select: { id: true, walletId: true },
+      take: MAINT_LIMIT
     });
     for (const s of expiring) {
       await transitionTier(prisma, s.id, s.walletId, 'probable_link');
@@ -124,15 +129,20 @@ export async function runMonitoringScheduler(
     }
 
     // 3. Cold-demote idle non-permanent subscriptions one step toward
-    // cold_archive (wires the pure coldTransition). Bounded scan.
+    // cold_archive (wires the pure coldTransition). Filter to genuinely IDLE
+    // wallets (lastActiveAt older than coldAfterDays), OLDEST first, so a burst
+    // of recent rows can't starve idle ones (Codex round-2).
+    const coldBefore = new Date(now.getTime() - config.coldAfterDays * 86_400_000);
     const coldCandidates = await prisma.monitoringSubscription.findMany({
       where: {
         active: true,
         priority: { in: ['strong_link', 'probable_link', 'standard', 'weak_cold'] },
+        wallet: { lastActiveAt: { lt: coldBefore } },
         ...scope
       },
       select: { id: true, priority: true, walletId: true, wallet: { select: { lastActiveAt: true } } },
-      take: 500
+      orderBy: { wallet: { lastActiveAt: 'asc' } },
+      take: MAINT_LIMIT
     });
     for (const s of coldCandidates) {
       const to = coldTransition(s.priority as MonitoringTier, s.wallet.lastActiveAt, now, config);
@@ -142,11 +152,11 @@ export async function runMonitoringScheduler(
       }
     }
 
-    // 4. Select DUE active, unclaimed subscriptions. Ordered by ENUM priority
-    // (declared fresh_receiver_hot..cold_archive = tier order) then due time,
-    // nulls FIRST (never-scheduled == due now). Take exactly the budget — the
-    // DB ordering means the highest-priority due rows are selected, not a
-    // random over-fetch window (Wave C Codex P2).
+    // 4. Select DUE active, unclaimed subscriptions ordered by the EXPLICIT
+    // tierPriority integer (the enum's on-disk order is migration order, not
+    // tier order — Codex round-2) then due time, nulls FIRST (never-scheduled
+    // == due now). Take exactly the budget — the DB ordering selects the
+    // highest-priority due rows, not an over-fetch window.
     const safeBudget = Number.isFinite(budget) && budget > 0 ? Math.floor(budget) : 100;
     const batch = await prisma.monitoringSubscription.findMany({
       where: {
@@ -155,7 +165,7 @@ export async function runMonitoringScheduler(
         OR: [{ nextPollAt: null }, { nextPollAt: { lte: now } }],
         ...scope
       },
-      orderBy: [{ priority: 'asc' }, { nextPollAt: { sort: 'asc', nulls: 'first' } }],
+      orderBy: [{ tierPriority: 'asc' }, { nextPollAt: { sort: 'asc', nulls: 'first' } }],
       take: safeBudget,
       include: { wallet: { select: { id: true, address: true } } }
     });

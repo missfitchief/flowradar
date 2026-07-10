@@ -59,6 +59,11 @@ export function tierRank(tier: MonitoringTier): number {
   return i === -1 ? TIER_ORDER.length : i;
 }
 
+/** Persisted tier-priority integer (0=highest). Every subscription writer stores this so the scheduler can order in the DB (the enum's on-disk order is migration order, not tier order). Must match the migration backfill CASE. */
+export function tierPriorityValue(tier: MonitoringTier): number {
+  return tierRank(tier);
+}
+
 /** Base poll interval for a tier, seconds. */
 export function pollIntervalSec(tier: MonitoringTier, config: MonitoringScheduleConfig): number {
   return config.tierIntervalsSec[tier];

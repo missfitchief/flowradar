@@ -1315,12 +1315,17 @@ model MonitoringSubscription {
   /// Set when a scheduler batch claims this row; cleared on completion. A
   /// stale claim (older than the reclaim window) is reclaimable.
   claimedAt         DateTime?
+  /// Explicit tier rank (0=highest) for DB-side priority ordering. The
+  /// MonitoringPriority ENUM's on-disk order reflects migration order, NOT
+  /// tier priority, so ordering by the enum is wrong — this integer is the
+  /// source of truth. Maintained by every writer via @flowradar/core tierRank.
+  tierPriority      Int      @default(99)
 
   wallet        Wallet             @relation(fields: [walletId], references: [id], onDelete: Cascade)
   lineageRoot   LineageRoot?       @relation(fields: [lineageRootId], references: [id], onDelete: SetNull)
 
-  /// Scheduler read path: due, active subscriptions by tier.
-  @@index([active, nextPollAt])
+  /// Scheduler read path: due, active subscriptions by explicit tier rank.
+  @@index([active, tierPriority, nextPollAt])
   /// One subscription per wallet per tier — re-imports upsert, never stack.
   @@unique([walletId, priority])
   /// The scheduler's read path: active subscriptions by tier, batched.

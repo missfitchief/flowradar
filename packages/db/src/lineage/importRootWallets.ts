@@ -184,6 +184,7 @@ export async function importRootWallets(
         data: {
           walletId,
           priority: 'root_permanent',
+          tierPriority: 1, // root_permanent rank (see @flowradar/core tierRank)
           active: true,
           reason: 'operator_root_import',
           lineageRootId
