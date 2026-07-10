@@ -38,11 +38,33 @@ export interface ObservationParseResult {
   duplicates: number;
 }
 
-// NOT quote-aware: splits on bare commas. Our schema has no comma-bearing
-// fields (addresses are base58, tags are '|'-separated), so quoting is
-// unsupported — a quoted field containing a comma would shift columns.
+// Quote-aware CSV line split (RFC-4180 subset): honors double-quoted fields
+// so a spreadsheet export ("addr","source") validates, and a quoted field
+// containing a comma does not shift columns. `""` inside a quoted field is a
+// literal quote. Unquoted cells are trimmed; quoted cells keep inner spaces.
 function splitCsv(line: string): string[] {
-  return line.split(',').map((c) => c.trim());
+  const out: string[] = [];
+  let cell = '';
+  let inQuotes = false;
+  let quoted = false; // this cell had a quoted section (don't trim it)
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cell += '"'; i++; } // escaped quote
+        else inQuotes = false;
+      } else cell += ch;
+    } else if (ch === '"') {
+      inQuotes = true;
+      quoted = true;
+    } else if (ch === ',') {
+      out.push(quoted ? cell : cell.trim());
+      cell = '';
+      quoted = false;
+    } else cell += ch;
+  }
+  out.push(quoted ? cell : cell.trim());
+  return out;
 }
 
 export function parseObservationUniverse(csv: string): ObservationParseResult {

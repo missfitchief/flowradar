@@ -95,6 +95,21 @@ describe('parseObservationUniverse (pure)', () => {
     const csv = [`addr,source`, `${A1},x`].join('\n');
     expect(() => parseObservationUniverse(csv)).toThrow(/wallet_address/);
   });
+
+  it('handles spreadsheet-style quoted fields incl. embedded commas', () => {
+    const csv = [
+      '"wallet_address","source","tags"',
+      `"${A1}","solana, tracker","smart|kol"`, // quoted address + comma inside a quoted field
+      `${A2},plain,x`                            // mixed: unquoted row still works
+    ].join('\n');
+    const r = parseObservationUniverse(csv);
+    expect(r.rows).toHaveLength(2);
+    expect(r.rows[0]!.address).toBe(A1); // quoted address validated, not malformed
+    expect(r.rows[0]!.source).toBe('solana, tracker'); // comma did not shift columns
+    expect(r.rows[0]!.tags).toEqual(['smart', 'kol']);
+    expect(r.rows[1]!.address).toBe(A2);
+    expect(r.malformed).toHaveLength(0);
+  });
 });
 
 describe.skipIf(!(await probePort('localhost', 5439)))('importObservationUniverse', () => {
