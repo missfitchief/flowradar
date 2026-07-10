@@ -178,6 +178,27 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runLineageExpansion', ()
     expect(result.stopReasons['receiver_day_cap'] ?? 0).toBeGreaterThanOrEqual(1);
   });
 
+  it('REPLAY: a duplicated tx in one page does not consume a second receiver/day-cap slot', async () => {
+    const A = `${PREFIX}_replayRoot`;
+    const B = `${PREFIX}_replayB`;
+    const { root } = await makeRoot(A);
+    // Same txHash appears twice (provider overlap); one real receiver B.
+    const dupLeg = { kind: 'native_transfer' as const, from: A, to: B, asset: { symbol: 'SOL', decimals: 9 }, amountToken: '5', amountUsd: 1000 };
+    const provider = mapProvider({
+      [A]: [
+        { txHash: `${PREFIX}_dupfix`, blockOrSlot: 1n, ts: NOW, legs: [dupLeg] },
+        { txHash: `${PREFIX}_dupfix`, blockOrSlot: 1n, ts: NOW, legs: [dupLeg] }
+      ]
+    });
+
+    const result = await runLineageExpansion(prisma, provider, DEFAULT_SETTINGS, { rootId: root.id, now: NOW });
+    // Exactly ONE receiver enrolled despite the duplicate; the replay is not
+    // counted toward budgets.
+    expect(result.receiversEnrolled).toBe(1);
+    const rel = await prisma.walletRelationship.findFirst({ where: { walletB: { address: B } } });
+    expect(rel!.interactionCount).toBe(1);
+  });
+
   it('SCENARIO 8: an interrupted backfill resumes from the cursor across passes (no lost pages)', async () => {
     const A = `${PREFIX}_resumeRoot`;
     const B1 = `${PREFIX}_resumeB1`;

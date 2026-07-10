@@ -147,11 +147,17 @@ export async function runLineageExpansion(
           continue;
         }
 
-        // Edge-budget check for this root (per pass).
+        // Edge-budget check for this root (per RUN). When exhausted, DEFER
+        // this node (leave it pending with its cursor) so a later run — with a
+        // fresh per-run budget — resumes it (Codex round-3: marking it skipped
+        // permanently lost the unprocessed transfers). processedNodeIds keeps
+        // it from being re-picked this pass.
         const rootEdges = edgesByRoot.get(node.lineageRootId) ?? 0;
         if (rootEdges >= settings.lineage.maxEdgesPerRoot) {
-          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'skipped', stopReason: 'edge_cap' } });
-          result.nodesSkipped += 1;
+          await prisma.lineageExpansionNode.update({
+            where: { id: node.id },
+            data: { status: 'pending', stopReason: node.stopReason ?? 'edge_cap' }
+          });
           bump('edge_cap');
           continue;
         }
@@ -201,7 +207,7 @@ export async function runLineageExpansion(
             for (const observation of outboundTransfers(tx, node.walletAddress)) {
               if ((edgesByRoot.get(node.lineageRootId) ?? 0) >= settings.lineage.maxEdgesPerRoot) {
                 hitEdgeCap = true;
-                nodeStopReason = 'edge_cap';
+                nodeStopReason = nodeStopReason ?? 'edge_cap';
                 bump('edge_cap');
                 break;
               }
@@ -237,6 +243,10 @@ export async function runLineageExpansion(
                   nodeStopReason = nodeStopReason ?? 'receiver_day_cap';
                   bump('receiver_day_cap');
                 }
+              } else if (res.replay) {
+                // A replayed tx creates nothing new — must NOT consume child
+                // or daily receiver budget (Codex round-3).
+                bump('replay_skipped');
               } else if (res.reason.match(/service/i)) {
                 result.serviceNodesSkipped += 1;
               }
@@ -246,23 +256,32 @@ export async function runLineageExpansion(
             }
             if (hitEdgeCap) break;
           }
+          if (hitEdgeCap) {
+            // Do NOT advance the cursor: the current page has unprocessed
+            // transfers. Next run re-fetches THIS page from the same cursor
+            // and reprocesses idempotently (edge + tx-identity dedupe),
+            // continuing past where the budget ran out (Codex round-3).
+            break;
+          }
           pages += 1;
           lastCursor = nextCursor;
           cursor = nextCursor;
           await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { cursor: cursor ?? null } });
-          if (!nextCursor || hitEdgeCap) break;
+          if (!nextCursor) break;
         }
 
-        // RESUME (2026-07-10 Codex review): if pages remain (lastCursor set)
-        // and we did not hit the edge cap, leave the node PENDING with its
-        // cursor checkpointed so the NEXT pass continues it — marking it done
-        // would permanently lose later pages. processedNodeIds prevents
-        // re-picking it within THIS pass.
-        const morePagesRemain = lastCursor !== undefined && !hitEdgeCap;
-        if (morePagesRemain) {
-          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'pending', stopReason: nodeStopReason } });
+        // RESUME (Codex round-1/3): leave the node PENDING when more pages
+        // remain OR the edge cap fired mid-page (a fresh per-run budget next
+        // pass resumes it) — marking it done would permanently lose later
+        // pages/transfers. Stop reason is durable: never overwrite a prior
+        // reason with null (Codex round-3), and carry the reason forward on a
+        // resumed node. processedNodeIds prevents re-picking within THIS pass.
+        const durableStopReason = nodeStopReason ?? node.stopReason ?? null;
+        const resumable = (lastCursor !== undefined || hitEdgeCap);
+        if (resumable) {
+          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'pending', stopReason: durableStopReason } });
         } else {
-          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'done', stopReason: nodeStopReason } });
+          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'done', stopReason: durableStopReason } });
           result.nodesExpanded += 1;
         }
       } catch (err) {

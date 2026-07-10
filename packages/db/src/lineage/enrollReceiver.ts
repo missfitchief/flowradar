@@ -37,6 +37,14 @@ export interface TransferObservation {
 export interface EnrollReceiverResult {
   edgePersisted: boolean;
   enrolled: boolean;
+  /**
+   * True when this exact tx was ALREADY folded into the relationship — the
+   * receiver/relationship/subscription already existed and nothing new was
+   * created. The driver must NOT count a replay toward child/day budgets
+   * (2026-07-10 Codex round-3), else a tx + its provider-overlap replay eats
+   * two receiver slots.
+   */
+  replay: boolean;
   /** True when a NEW expansion node was created (not deduped, allowEnqueue). */
   enqueued: boolean;
   relationshipKind?: WalletRelationshipKind;
@@ -94,7 +102,7 @@ export async function enrollReceiverFromTransfer(
 
   // Cap-exhausted: persist the edge (observation), skip enrollment entirely.
   if (!allowEnroll) {
-    return { edgePersisted, enrolled: false, enqueued: false, viaGasException: false, dust: false, reason: 'enrollment cap reached — edge persisted only' };
+    return { edgePersisted, enrolled: false, replay: false, enqueued: false, viaGasException: false, dust: false, reason: 'enrollment cap reached — edge persisted only' };
   }
 
   // 2. Gather the receiver-classification context.
@@ -163,9 +171,6 @@ export async function enrollReceiverFromTransfer(
   const inactiveDays = lastActiveBeforeTransfer
     ? (transfer.ts.getTime() - lastActiveBeforeTransfer.getTime()) / (24 * 60 * 60 * 1000)
     : Infinity;
-  const receiverIsFreshOrInactive =
-    receiverWallet === null || priorTrades === 0 || inactiveDays >= settings.lineage.freshInactiveDays;
-
   // "First meaningful inbound": no ABOVE-DUST inbound transfer predates this
   // one (dust doesn't count as meaningful — Codex review).
   const priorMeaningfulInbound = await prisma.moneyFlowEdge.count({
@@ -177,6 +182,14 @@ export async function enrollReceiverFromTransfer(
       ts: { lt: transfer.ts }
     }
   });
+
+  // Fresh/empty requires no prior TRADES AND no prior MEANINGFUL INBOUNDS
+  // (Codex round-3: a transfer-only wallet with several real inbounds and no
+  // trades was wrongly classified fresh) — OR it is long-inactive.
+  const receiverIsFreshOrInactive =
+    receiverWallet === null ||
+    (priorTrades === 0 && priorMeaningfulInbound === 0) ||
+    inactiveDays >= settings.lineage.freshInactiveDays;
 
   // Gas-activation: the receiver must actually trade WITHIN the window after
   // the funding (not merely "has any trade ever" — Codex review).
@@ -199,17 +212,19 @@ export async function enrollReceiverFromTransfer(
 
   const verdict = classifyReceiverEnrollment(ctx, settings.lineage);
   if (!verdict.enroll) {
-    return { edgePersisted, enrolled: false, enqueued: false, viaGasException: false, dust: verdict.dust, reason: verdict.reason };
+    return { edgePersisted, enrolled: false, replay: false, enqueued: false, viaGasException: false, dust: verdict.dust, reason: verdict.reason };
   }
 
   // 3. Upsert receiver observation_only (NEVER signal_eligible), preserving an
   // existing classified status.
   const receiverId = await upsertObservationReceiver(prisma, transfer.toAddress, now);
 
-  // 4. Relationship (probabilistic; upsert bumps interaction count/value).
+  // 4. Relationship (probabilistic; upsert bumps interaction count/value). A
+  // replayed tx (already in this relationship's evidence) makes no change and
+  // is reported so the driver doesn't count it toward budgets.
   const kind = verdict.relationshipKind!;
   const confidence = relationshipConfidence(kind, { activated: ctx.receiverBecameActiveWithinWindow, interactionCount: 1 });
-  await upsertRelationship(prisma, {
+  const replay = await upsertRelationship(prisma, {
     lineageRootId,
     walletAId: (await walletIdOf(prisma, transfer.fromAddress)) ?? receiverId,
     walletBId: receiverId,
@@ -220,6 +235,9 @@ export async function enrollReceiverFromTransfer(
     txHash: transfer.txHash,
     now
   });
+  if (replay) {
+    return { edgePersisted, enrolled: false, replay: true, enqueued: false, viaGasException: verdict.viaGasException, dust: false, reason: 'replayed transfer — no new enrollment' };
+  }
 
   // 5. Hot subscription (fresh_receiver_hot), active immediately.
   await upsertSubscription(prisma, receiverId, lineageRootId);
@@ -247,6 +265,7 @@ export async function enrollReceiverFromTransfer(
   return {
     edgePersisted,
     enrolled: true,
+    replay: false,
     enqueued,
     relationshipKind: kind,
     viaGasException: verdict.viaGasException,
@@ -336,7 +355,7 @@ async function upsertRelationship(
     txHash: string;
     now: Date;
   }
-): Promise<void> {
+): Promise<boolean> {
   const existing = await prisma.walletRelationship.findUnique({
     where: {
       lineageRootId_walletAId_walletBId_kind: {
@@ -350,11 +369,17 @@ async function upsertRelationship(
   });
   if (existing) {
     const evidence = Array.isArray(existing.evidence) ? (existing.evidence as { txHash?: string }[]) : [];
-    // TX-IDENTITY IDEMPOTENCY (Codex round-2): a txHash already folded into
-    // this relationship never bumps interactionCount/value again — this is
-    // what makes a replayed tx OR an ingest-preexisting edge safe, without
+    // TX-IDENTITY IDEMPOTENCY (Codex round-2/3): a txHash already folded into
+    // this relationship never bumps interactionCount/value again, and returns
+    // `true` (replay) so the driver doesn't count it toward budgets. This is
+    // what makes a replayed tx OR an ingest-preexisting edge safe without
     // suppressing enrollment for genuinely new transfers.
-    if (evidence.some((e) => e && e.txHash === args.txHash)) return;
+    if (evidence.some((e) => e && e.txHash === args.txHash)) return true;
+    // Evidence is a bounded ring of the most recent EVIDENCE_CAP txHashes
+    // (Codex round-3: an unbounded array made each update quadratic for
+    // high-frequency pairs). The dedupe window this protects — provider
+    // overlap / webhook retries — is recent, so a capped tail is sufficient.
+    const nextEvidence = [...evidence, { txHash: args.txHash, usd: args.valueUsd }].slice(-EVIDENCE_CAP);
     await prisma.walletRelationship.update({
       where: { id: existing.id },
       data: {
@@ -362,10 +387,10 @@ async function upsertRelationship(
         lastSeenAt: args.now,
         valueTransferredUsd: Number(existing.valueTransferredUsd) + args.valueUsd,
         confidence: relationshipConfidence(args.kind, { activated: args.activated, interactionCount: existing.interactionCount + 1 }),
-        evidence: [...evidence, { txHash: args.txHash, usd: args.valueUsd }] as Prisma.InputJsonValue
+        evidence: nextEvidence as Prisma.InputJsonValue
       }
     });
-    return;
+    return false;
   }
   await prisma.walletRelationship.create({
     data: {
@@ -381,7 +406,10 @@ async function upsertRelationship(
       evidence: [{ txHash: args.txHash, usd: args.valueUsd }] as Prisma.InputJsonValue
     }
   });
+  return false;
 }
+
+const EVIDENCE_CAP = 100;
 
 async function upsertSubscription(prisma: PrismaClient, walletId: string, lineageRootId: string): Promise<void> {
   const existing = await prisma.monitoringSubscription.findUnique({
