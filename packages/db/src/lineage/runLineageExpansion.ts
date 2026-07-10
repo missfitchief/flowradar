@@ -174,9 +174,11 @@ export async function runLineageExpansion(
           );
         }
 
-        // Daily receiver budget for this root (UTC day).
-        const receiversToday = await prisma.monitoringSubscription.count({
-          where: { lineageRootId: node.lineageRootId, priority: 'fresh_receiver_hot', createdAt: { gte: utcDayStart } }
+        // Daily receiver budget for this root (UTC day). Counts NEW
+        // relationships (per-root child links) created today — the per-root
+        // notion, not the global hot subscription (Codex round-5).
+        const receiversToday = await prisma.walletRelationship.count({
+          where: { lineageRootId: node.lineageRootId, firstSeenAt: { gte: utcDayStart } }
         });
         // CUMULATIVE children of THIS node across passes (Codex round-2:
         // enrolledFromNode reset every resumed pass, defeating the cap). Count
