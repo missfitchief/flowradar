@@ -267,6 +267,8 @@ model Wallet {
   /// Capital Lineage Engine (Phase 6a): at most one permanent root record.
   lineageRoot            LineageRoot?
   monitoringSubscriptions MonitoringSubscription[]
+  relationshipsAsSender   WalletRelationship[] @relation("RelationshipSender")
+  relationshipsAsReceiver WalletRelationship[] @relation("RelationshipReceiver")
 
   @@unique([address, chain])
   @@index([status])
@@ -1213,6 +1215,8 @@ model TokenConfluenceSnapshot {
 enum MonitoringPriority {
   fresh_receiver_hot
   root_permanent
+  strong_link
+  probable_link
   standard
   weak_cold
 }
@@ -1239,6 +1243,8 @@ model LineageRoot {
 
   wallet              Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
   subscriptions       MonitoringSubscription[]
+  relationships       WalletRelationship[]
+  expansionNodes      LineageExpansionNode[]
 
   @@index([source])
   @@map("lineage_roots")
@@ -1267,4 +1273,96 @@ model MonitoringSubscription {
   /// The scheduler's read path: active subscriptions by tier, batched.
   @@index([priority, active])
   @@map("monitoring_subscriptions")
+}
+
+/// WalletRelationship.kind — probabilistic on-chain relationship vocabulary
+/// (possible/probable/strong wording lives in `confidence`, never identity
+/// claims).
+enum WalletRelationshipKind {
+  first_funder
+  direct_funding
+  repeated_transfer
+  fresh_wallet_activation
+  service_interrupted
+  unknown
+}
+
+model WalletRelationship {
+  id                  String                 @id @default(cuid())
+  lineageRootId       String
+  /// Sender side of the observed flow.
+  walletAId           String
+  /// Receiver side of the observed flow.
+  walletBId           String
+  kind                WalletRelationshipKind
+  /// 0-100. Bands map to possible (<50) / probable (50-79) / strong (>=80)
+  /// via @flowradar/core confidenceBand — same vocabulary as /flow.
+  confidence          Float
+  firstSeenAt         DateTime
+  lastSeenAt          DateTime
+  interactionCount    Int                    @default(1)
+  valueTransferredUsd Decimal                @db.Decimal(20, 4)
+  /// Evidence trail: tx signatures, edge ids, classification inputs.
+  evidence            Json
+
+  lineageRoot         LineageRoot            @relation(fields: [lineageRootId], references: [id], onDelete: Cascade)
+  walletA             Wallet                 @relation("RelationshipSender", fields: [walletAId], references: [id], onDelete: Cascade)
+  walletB             Wallet                 @relation("RelationshipReceiver", fields: [walletBId], references: [id], onDelete: Cascade)
+
+  /// One relationship row per (root, pair, kind) — repeat observations bump
+  /// interactionCount/lastSeenAt/value instead of stacking rows.
+  @@unique([lineageRootId, walletAId, walletBId, kind])
+  @@index([walletBId])
+  @@index([lineageRootId, kind])
+  @@map("wallet_relationships")
+}
+
+/// LineageExpansionNode.priority — expansion queue order (spec order).
+enum ExpansionPriority {
+  first_funder
+  direct_high_value
+  fresh_activation
+  post_funding_buy
+  bridge_correlated
+  repeated_transfer
+  profit_rotation
+  weak
+}
+
+/// LineageExpansionNode.status — queue lifecycle.
+enum ExpansionNodeStatus {
+  pending
+  in_progress
+  done
+  skipped
+}
+
+/// The PERSISTENT priority frontier for bounded recursive expansion — a
+/// queue table consumed in priority batches under provider budgets (never
+/// one timer per wallet). `cursor` checkpoints provider pagination so an
+/// interrupted backfill resumes instead of restarting.
+model LineageExpansionNode {
+  id            String              @id @default(cuid())
+  lineageRootId String
+  walletAddress String
+  chain         ChainId
+  depth         Int
+  priority      ExpansionPriority
+  status        ExpansionNodeStatus @default(pending)
+  /// Persisted when expansion stops: 'max_depth', 'service_node',
+  /// 'node_cap', 'edge_cap', 'receiver_day_cap', 'below_min_usd', ...
+  stopReason    String?
+  /// How this node entered the frontier (audit): 'root', 'first_funder of
+  /// <addr>', 'bridge_correlated', ...
+  discoveredVia String
+  /// Provider pagination checkpoint (resume-safe interrupted backfill).
+  cursor        String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  lineageRoot   LineageRoot         @relation(fields: [lineageRootId], references: [id], onDelete: Cascade)
+
+  @@unique([lineageRootId, walletAddress])
+  @@index([status, priority])
+  @@map("lineage_expansion_nodes")
 }
