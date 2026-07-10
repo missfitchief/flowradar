@@ -134,9 +134,16 @@ export const DEFAULT_STEALTH_CONFIG: StealthConfig = {
     distributionSellToBuyRatio: 0.5,
     invalidatedNetUsdCeil: 0,
     netInflowRefUsd: 25000,
-    persistenceWindowsRef: 4
+    persistenceWindowsRef: 5
   }
 };
+
+// Deep-freeze the exported default so it cannot become mutable global state:
+// mutating it would silently change results for callers who pass no config,
+// violating purity/determinism. Callers override by passing their own config.
+Object.freeze(DEFAULT_STEALTH_CONFIG.weights);
+Object.freeze(DEFAULT_STEALTH_CONFIG.thresholds);
+Object.freeze(DEFAULT_STEALTH_CONFIG);
 
 // ---------------------------------------------------------------------------
 // Metrics (~24 structural fields; deterministic)
@@ -159,10 +166,16 @@ export interface StealthMetrics {
   publicKolBuyers24h: number;
   publicKolBuyers1h: number;
   publicKolNetUsd24h: number;
+  /** Descriptive: public-KOL buyers as a share of ALL buyers (context only; NOT used for scoring). */
   publicKolShare24h: number;
+  /** Penalty input: public-KOL buyers vs the eligible cohort ONLY — k/(k+eligible). Cannot be diluted by observation/crowd. */
+  publicKolPressure: number;
   crowdBuyers24h: number;
   crowdNetUsd24h: number;
+  /** Descriptive: crowd buyers as a share of ALL buyers (context only; NOT used for scoring). */
   crowdShare24h: number;
+  /** Penalty input: crowd buyers vs the eligible cohort ONLY — c/(c+eligible). Cannot be diluted by observation/public. */
+  crowdPressure: number;
   observationBuyers24h: number;
   totalDistinctBuyers24h: number;
   eligibleBuyerShare24h: number;
@@ -226,18 +239,26 @@ function computeMetrics(input: StealthInput): StealthMetrics {
 
   // Acceleration: eligible buyers-per-minute in the last hour vs the last 24h.
   // >1 means recent accumulation is faster than the daily baseline.
+  // No 24h baseline => acceleration is UNKNOWN, reported as 0 (never a
+  // fabricated "1 = same as baseline" when there is no baseline to compare to).
   const rate1h = e1h.distinctBuyers / 60;
   const rate24h = e24.distinctBuyers / 1440;
-  const accumulationAcceleration = rate24h > 0 ? rate1h / rate24h : rate1h > 0 ? 1 : 0;
+  const accumulationAcceleration = rate24h > 0 ? rate1h / rate24h : 0;
 
-  // Persistence: count of consecutive short→long windows (from 5m up) where the
-  // eligible cohort is net-positive, stopping at the first non-positive/absent.
+  // Persistence: because the windows are NESTED cumulative trailing spans
+  // (5m ⊂ 15m ⊂ … ⊂ 24h), one burst shows up net-positive in ALL of them and
+  // must NOT count as repeated evidence. Real persistence = accumulation kept
+  // happening in the OUTER ring between adjacent windows, i.e. the longer
+  // window's eligible net USD strictly exceeds the shorter's. A single burst
+  // makes every window's net equal → all deltas 0 → persistence 0.
   let persistenceWindows = 0;
-  for (const w of WINDOW_ORDER) {
-    const present = byWindow.has(w);
-    const f = cohort(w, 'eligible');
-    if (present && f.buyUsd - f.sellUsd > 0) persistenceWindows += 1;
-    else break;
+  for (let i = 0; i < WINDOW_ORDER.length - 1; i++) {
+    const shortW = WINDOW_ORDER[i]!;
+    const longW = WINDOW_ORDER[i + 1]!;
+    if (!byWindow.has(shortW) || !byWindow.has(longW)) continue;
+    const sNet = cohort(shortW, 'eligible').buyUsd - cohort(shortW, 'eligible').sellUsd;
+    const lNet = cohort(longW, 'eligible').buyUsd - cohort(longW, 'eligible').sellUsd;
+    if (lNet - sNet > 0) persistenceWindows += 1;
   }
 
   return {
@@ -258,9 +279,11 @@ function computeMetrics(input: StealthInput): StealthMetrics {
     publicKolBuyers1h: k1h.distinctBuyers,
     publicKolNetUsd24h: k24.buyUsd - k24.sellUsd,
     publicKolShare24h: safeShare(k24.distinctBuyers, totalDistinctBuyers24h),
+    publicKolPressure: safeShare(k24.distinctBuyers, k24.distinctBuyers + e24.distinctBuyers),
     crowdBuyers24h: c24.distinctBuyers,
     crowdNetUsd24h: c24.buyUsd - c24.sellUsd,
     crowdShare24h: safeShare(c24.distinctBuyers, totalDistinctBuyers24h),
+    crowdPressure: safeShare(c24.distinctBuyers, c24.distinctBuyers + e24.distinctBuyers),
     observationBuyers24h: o24.distinctBuyers,
     totalDistinctBuyers24h,
     eligibleBuyerShare24h: safeShare(e24.distinctBuyers, totalDistinctBuyers24h),
@@ -293,9 +316,12 @@ function computeScore(m: StealthMetrics, cfg: StealthConfig): number {
     w.eligibleBreadth + w.freshAccumulation + w.independence + w.persistence + w.netInflow;
   const positiveNorm = positiveWeightSum > 0 ? positive / positiveWeightSum : 0;
 
-  // Penalties scale the public/crowd SHARE of all buyers (both non-decreasing
-  // as those cohorts grow — so more public/crowd activity only lowers score).
-  const penalty = w.publicPenalty * m.publicKolShare24h + w.crowdPenalty * m.crowdShare24h;
+  // Penalties scale public/crowd PRESSURE (each cohort vs the eligible cohort
+  // only). Each pressure term is non-decreasing in its own cohort and wholly
+  // independent of observation and the other penalised cohort — so adding
+  // public, crowd, OR observation buyers can only lower the score, never raise
+  // it (observation dilutes nothing because it is not in either denominator).
+  const penalty = w.publicPenalty * m.publicKolPressure + w.crowdPenalty * m.crowdPressure;
 
   const score = 100 * positiveNorm - 100 * clamp01(penalty);
   if (!Number.isFinite(score) || score <= 0) return 0;

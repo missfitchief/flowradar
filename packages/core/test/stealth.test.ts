@@ -183,6 +183,71 @@ describe('stealth engine — trust-boundary invariants', () => {
     expect(r.stealthScore).toBe(0);
   });
 
+  it('observation buyers cannot dilute a public/crowd penalty to raise the score', () => {
+    // Codex CRITICAL repro: with a penalty-bearing cohort present, piling on
+    // observation-only buyers must NOT raise the score by inflating the total.
+    const withCrowd = input([
+      win('24h', {
+        eligible: flow({ distinctBuyers: 4, buyUsd: 30000, freshBuyers: 3, distinctClusters: 3 }),
+        crowd: flow({ distinctBuyers: 20, buyUsd: 100000 })
+      })
+    ]);
+    const plusObservation = input([
+      win('24h', {
+        eligible: flow({ distinctBuyers: 4, buyUsd: 30000, freshBuyers: 3, distinctClusters: 3 }),
+        crowd: flow({ distinctBuyers: 20, buyUsd: 100000 }),
+        observation: flow({ distinctBuyers: 100, buyUsd: 400000, distinctClusters: 80 })
+      })
+    ]);
+    expect(computeStealth(plusObservation).stealthScore).toBeLessThanOrEqual(computeStealth(withCrowd).stealthScore);
+  });
+
+  it('adding a public buyer never raises score even under lopsided custom penalties', () => {
+    // Codex CRITICAL repro: publicPenalty=.1, crowdPenalty=.5 (both valid).
+    const cfg = {
+      ...DEFAULT_STEALTH_CONFIG,
+      weights: { ...DEFAULT_STEALTH_CONFIG.weights, publicPenalty: 0.1, crowdPenalty: 0.5 }
+    };
+    const base = input([
+      win('24h', {
+        eligible: flow({ distinctBuyers: 4, buyUsd: 30000, freshBuyers: 3, distinctClusters: 3 }),
+        crowd: flow({ distinctBuyers: 3, buyUsd: 10000 })
+      })
+    ]);
+    const plusOnePublic = input([
+      win('24h', {
+        eligible: flow({ distinctBuyers: 4, buyUsd: 30000, freshBuyers: 3, distinctClusters: 3 }),
+        crowd: flow({ distinctBuyers: 3, buyUsd: 10000 }),
+        publicKol: flow({ distinctBuyers: 1, buyUsd: 5000 })
+      })
+    ]);
+    expect(computeStealth(plusOnePublic, cfg).stealthScore).toBeLessThanOrEqual(computeStealth(base, cfg).stealthScore);
+  });
+
+  it('does not treat one burst (present in all nested windows) as persistence', () => {
+    // Codex HIGH repro: a single burst appears net-positive in every trailing
+    // window; persistenceWindows must be 0 (no OUTER-ring growth), not 6.
+    const burst = flow({ distinctBuyers: 4, buyUsd: 30000, freshBuyers: 4, distinctClusters: 3 });
+    const r = computeStealth(input(STEALTH_WINDOWS.map((w) => win(w, { eligible: { ...burst } }))));
+    expect(r.metrics.persistenceWindows).toBe(0);
+  });
+
+  it('DOES count genuine persistence — net inflow growing across adjacent windows', () => {
+    // Each wider window has strictly more eligible net USD than the next
+    // shorter one => accumulation kept happening in every outer ring.
+    const nets = { '5m': 2000, '15m': 5000, '30m': 9000, '1h': 15000, '4h': 30000, '24h': 60000 } as const;
+    const r = computeStealth(input(
+      STEALTH_WINDOWS.map((w) => win(w, { eligible: flow({ distinctBuyers: 4, buyUsd: nets[w], distinctClusters: 3 }) }))
+    ));
+    expect(r.metrics.persistenceWindows).toBe(5); // all 5 adjacent pairs grow
+  });
+
+  it('DEFAULT_STEALTH_CONFIG is frozen (no mutable global state)', () => {
+    expect(Object.isFrozen(DEFAULT_STEALTH_CONFIG)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_STEALTH_CONFIG.weights)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_STEALTH_CONFIG.thresholds)).toBe(true);
+  });
+
   it('carries no profitability/return claim in its output surface', () => {
     const r = computeStealth(stealthFixture());
     const json = JSON.stringify(r).toLowerCase();
