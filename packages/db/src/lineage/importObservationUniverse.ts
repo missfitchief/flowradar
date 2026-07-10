@@ -42,28 +42,38 @@ export interface ObservationParseResult {
 // so a spreadsheet export ("addr","source") validates, and a quoted field
 // containing a comma does not shift columns. `""` inside a quoted field is a
 // literal quote. Unquoted cells are trimmed; quoted cells keep inner spaces.
-function splitCsv(line: string): string[] {
+// Returns null on malformed quoting (unterminated quote, a quote mid-unquoted
+// cell, or characters after a closing quote) — the caller flags such a row
+// malformed rather than silently "repairing" it into a valid-looking value.
+function splitCsv(line: string): string[] | null {
   const out: string[] = [];
   let cell = '';
-  let inQuotes = false;
-  let quoted = false; // this cell had a quoted section (don't trim it)
+  // start: field not yet begun · unquoted: plain field · inquotes: inside "…"
+  // · afterquote: closing quote seen, expecting a delimiter
+  let state: 'start' | 'unquoted' | 'inquotes' | 'afterquote' = 'start';
+  const pushCell = () => out.push(state === 'unquoted' || state === 'start' ? cell.trim() : cell);
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]!;
-    if (inQuotes) {
+    if (state === 'inquotes') {
       if (ch === '"') {
         if (line[i + 1] === '"') { cell += '"'; i++; } // escaped quote
-        else inQuotes = false;
+        else state = 'afterquote';
       } else cell += ch;
-    } else if (ch === '"') {
-      inQuotes = true;
-      quoted = true;
     } else if (ch === ',') {
-      out.push(quoted ? cell : cell.trim());
+      pushCell();
       cell = '';
-      quoted = false;
-    } else cell += ch;
+      state = 'start';
+    } else if (ch === '"') {
+      if (state !== 'start') return null; // quote mid-cell / after a closing quote
+      state = 'inquotes';
+    } else {
+      if (state === 'afterquote') return null; // stray chars after a closing quote
+      cell += ch;
+      state = 'unquoted';
+    }
   }
-  out.push(quoted ? cell : cell.trim());
+  if (state === 'inquotes') return null; // unterminated quote
+  pushCell();
   return out;
 }
 
@@ -76,7 +86,11 @@ export function parseObservationUniverse(csv: string): ObservationParseResult {
   let duplicates = 0;
   if (lines.length === 0) return { rows, evmParked, malformed, duplicates };
 
-  const header = splitCsv(lines[0]!).map((h) => h.toLowerCase());
+  const headerCells = splitCsv(lines[0]!);
+  if (!headerCells) {
+    throw new Error('observation-universe CSV header row has malformed quoting');
+  }
+  const header = headerCells.map((h) => h.toLowerCase());
   const col = (name: string) => header.indexOf(name);
   const iAddr = col('wallet_address');
   // Hard-require the address header — never silently treat column 0 as the
@@ -94,6 +108,10 @@ export function parseObservationUniverse(csv: string): ObservationParseResult {
   for (let i = 1; i < lines.length; i++) {
     const raw = lines[i]!;
     const cells = splitCsv(raw);
+    if (!cells) {
+      malformed.push({ line: i + 1, raw, reason: 'malformed CSV quoting' });
+      continue;
+    }
     const rawAddr = (cells[iAddr] ?? '').trim();
     if (/^0x[0-9a-fA-F]{40}$/i.test(rawAddr)) {
       evmParked.push(rawAddr);

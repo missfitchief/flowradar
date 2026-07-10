@@ -110,6 +110,19 @@ describe('parseObservationUniverse (pure)', () => {
     expect(r.rows[1]!.address).toBe(A2);
     expect(r.malformed).toHaveLength(0);
   });
+
+  it('flags malformed quoting rather than silently repairing it', () => {
+    const csv = [
+      'wallet_address,source',
+      `"${A1},unterminated`,   // unterminated quote
+      `${A2}"x,midquote`,      // quote mid-unquoted cell
+      `"${A3}"junk,afterquote` // stray chars after closing quote
+    ].join('\n');
+    const r = parseObservationUniverse(csv);
+    expect(r.rows).toHaveLength(0);
+    expect(r.malformed).toHaveLength(3);
+    expect(r.malformed.every((m) => /malformed CSV quoting/.test(m.reason))).toBe(true);
+  });
 });
 
 describe.skipIf(!(await probePort('localhost', 5439)))('importObservationUniverse', () => {
