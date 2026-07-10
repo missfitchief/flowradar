@@ -153,6 +153,38 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runLineageExpansion', ()
     expect(badNode!.stopReason).toMatch(/error/i);
   });
 
+  it('SCENARIO 8: an interrupted backfill resumes from the cursor across passes (no lost pages)', async () => {
+    const A = `${PREFIX}_resumeRoot`;
+    const B1 = `${PREFIX}_resumeB1`;
+    const B2 = `${PREFIX}_resumeB2`;
+    const { root } = await makeRoot(A);
+
+    // Paginating provider: page 1 -> B1 (nextCursor 'p2'), page 2 -> B2 (end).
+    const paging: LineageProvider = {
+      async getWalletTransactions(_chain, address, o) {
+        if (address !== A) return { txs: [], nextCursor: undefined };
+        if (!o?.cursor) return { txs: [nativeTransferTx(`${PREFIX}_tx_r1`, A, B1, 1000)], nextCursor: 'p2' };
+        return { txs: [nativeTransferTx(`${PREFIX}_tx_r2`, A, B2, 1000)], nextCursor: undefined };
+      }
+    };
+
+    // backfillMaxPagesPerNode=1 forces the pass to stop after page 1 with a
+    // cursor remaining — the node must stay pending (resumable), not done.
+    const settings = { ...DEFAULT_SETTINGS, lineage: { ...DEFAULT_SETTINGS.lineage, backfillMaxPagesPerNode: 1 } };
+
+    await runLineageExpansion(prisma, paging, settings, { rootId: root.id, now: NOW });
+    // B1 enrolled from page 1; B2 not yet.
+    expect(await prisma.wallet.findUnique({ where: { address_chain: { address: B1, chain: 'SOLANA' } } })).not.toBeNull();
+    expect(await prisma.wallet.findUnique({ where: { address_chain: { address: B2, chain: 'SOLANA' } } })).toBeNull();
+    const nodeAfter1 = await prisma.lineageExpansionNode.findFirst({ where: { lineageRootId: root.id, walletAddress: A } });
+    expect(nodeAfter1!.status).toBe('pending'); // resumable
+    expect(nodeAfter1!.cursor).toBe('p2');
+
+    // Second pass resumes from cursor 'p2' -> B2 enrolled, node now done.
+    await runLineageExpansion(prisma, paging, settings, { rootId: root.id, now: NOW });
+    expect(await prisma.wallet.findUnique({ where: { address_chain: { address: B2, chain: 'SOLANA' } } })).not.toBeNull();
+  });
+
   it('SCENARIO 9: node cap stops expansion and persists a stop reason', async () => {
     const A = `${PREFIX}_capRoot`;
     const { root } = await makeRoot(A);
@@ -170,9 +202,14 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runLineageExpansion', ()
     const settings = { ...DEFAULT_SETTINGS, lineage: { ...DEFAULT_SETTINGS.lineage, maxNodesPerRoot: 3, maxChildrenPerNode: 100 } };
     const result = await runLineageExpansion(prisma, provider, settings, { rootId: root.id, now: NOW });
 
-    // Some nodes skipped with node_cap stop reason once the frontier fills.
-    const capped = await prisma.lineageExpansionNode.count({ where: { lineageRootId: root.id, stopReason: 'node_cap' } });
-    expect(capped).toBeGreaterThanOrEqual(1);
+    // The node cap is enforced as a running projection: the frontier for this
+    // root never exceeds maxNodesPerRoot, and the cap is recorded as a stop
+    // reason (10 receivers fan out, but only 3 nodes may exist).
+    const rootNodes = await prisma.lineageExpansionNode.count({ where: { lineageRootId: root.id } });
+    expect(rootNodes).toBeLessThanOrEqual(settings.lineage.maxNodesPerRoot);
     expect(result.stopReasons['node_cap'] ?? 0).toBeGreaterThanOrEqual(1);
+    // Edges for ALL 10 receivers are still persisted (cap gates expansion,
+    // not observation).
+    expect(result.edgesPersisted).toBe(10);
   });
 });

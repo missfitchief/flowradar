@@ -93,8 +93,21 @@ export async function runLineageExpansion(
       }
     }
 
+    // Reclaim stale in_progress nodes from a crashed prior pass (2026-07-10
+    // Codex review). Safe because the global job lock guarantees no other
+    // expansion pass runs concurrently — any in_progress node is orphaned.
+    await prisma.lineageExpansionNode.updateMany({
+      where: { status: 'in_progress', ...(opts.rootId ? { lineageRootId: opts.rootId } : {}) },
+      data: { status: 'pending' }
+    });
+
     const processedRoots = new Set<string>();
+    const processedNodeIds: string[] = []; // don't re-pick a resumed node this pass
+    // Per-root, per-pass counters for the edge + node caps.
+    const edgesByRoot = new Map<string, number>();
+    const projectedNodesByRoot = new Map<string, number>();
     let nodesThisPass = 0;
+    const utcDayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
     // Priority-ordered batch consumption (enum order = priority order).
     for (;;) {
@@ -103,7 +116,11 @@ export async function runLineageExpansion(
         break;
       }
       const node = await prisma.lineageExpansionNode.findFirst({
-        where: { status: 'pending', ...(opts.rootId ? { lineageRootId: opts.rootId } : {}) },
+        where: {
+          status: 'pending',
+          ...(opts.rootId ? { lineageRootId: opts.rootId } : {}),
+          ...(processedNodeIds.length > 0 ? { id: { notIn: processedNodeIds } } : {})
+        },
         orderBy: [{ priority: 'asc' }, { depth: 'asc' }, { createdAt: 'asc' }]
       });
       if (!node) break;
@@ -116,11 +133,10 @@ export async function runLineageExpansion(
       if (claim.count === 0) continue;
 
       nodesThisPass += 1;
+      processedNodeIds.push(node.id);
       processedRoots.add(node.lineageRootId);
 
       try {
-        // Per-root cap: stop expanding this root once its frontier is full.
-        const rootNodeCount = await prisma.lineageExpansionNode.count({ where: { lineageRootId: node.lineageRootId } });
         // A node AT maxDepth is a terminal leaf: it was already enrolled by
         // its parent, but we do NOT fetch its transactions (that would be one
         // hop too far). maxDepth=1 => only the root's DIRECT receivers exist.
@@ -130,48 +146,101 @@ export async function runLineageExpansion(
           bump('max_depth');
           continue;
         }
-        if (rootNodeCount > settings.lineage.maxNodesPerRoot) {
-          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'skipped', stopReason: 'node_cap' } });
+
+        // Edge-budget check for this root (per pass).
+        const rootEdges = edgesByRoot.get(node.lineageRootId) ?? 0;
+        if (rootEdges >= settings.lineage.maxEdgesPerRoot) {
+          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'skipped', stopReason: 'edge_cap' } });
           result.nodesSkipped += 1;
-          bump('node_cap');
+          bump('edge_cap');
           continue;
         }
+
+        // Node-cap: once a root's frontier is full, still process THIS node's
+        // transfers (persist edges/receivers) but forbid enqueuing new nodes.
+        // Tracked as a RUNNING projection per root (incremented on each actual
+        // enqueue) so a single node's fan-out cannot blow past the cap between
+        // count queries (2026-07-10 Codex review Critical).
+        if (!projectedNodesByRoot.has(node.lineageRootId)) {
+          projectedNodesByRoot.set(
+            node.lineageRootId,
+            await prisma.lineageExpansionNode.count({ where: { lineageRootId: node.lineageRootId } })
+          );
+        }
+
+        // Daily receiver budget for this root (UTC day).
+        const receiversToday = await prisma.monitoringSubscription.count({
+          where: { lineageRootId: node.lineageRootId, priority: 'fresh_receiver_hot', createdAt: { gte: utcDayStart } }
+        });
 
         // Fetch a bounded number of pages for this node, resuming from cursor.
         let cursor = node.cursor ?? undefined;
         let pages = 0;
         let enrolledFromNode = 0;
+        let dailyReceivers = receiversToday;
+        let hitChildCap = false;
+        let hitDayCap = false;
+        let hitEdgeCap = false;
+        let lastCursor: string | undefined = cursor;
         while (pages < settings.lineage.backfillMaxPagesPerNode) {
-          const { txs, nextCursor } = await provider.getWalletTransactions('SOLANA', node.walletAddress, {
-            cursor,
-            limit: 100
-          });
+          const { txs, nextCursor } = await provider.getWalletTransactions('SOLANA', node.walletAddress, { cursor, limit: 100 });
           for (const tx of txs) {
             for (const observation of outboundTransfers(tx, node.walletAddress)) {
-              const res = await enrollReceiverFromTransfer(prisma, observation, node.lineageRootId, node.depth, settings, now);
-              if (res.edgePersisted) result.edgesPersisted += 1;
+              if ((edgesByRoot.get(node.lineageRootId) ?? 0) >= settings.lineage.maxEdgesPerRoot) {
+                hitEdgeCap = true;
+                break;
+              }
+              const underNodeCap = (projectedNodesByRoot.get(node.lineageRootId) ?? 0) < settings.lineage.maxNodesPerRoot;
+              const canEnrollMore = !hitDayCap && dailyReceivers < settings.lineage.maxNewReceiversPerRootPerDay;
+              const res = await enrollReceiverFromTransfer(prisma, observation, node.lineageRootId, node.depth, settings, now, {
+                allowEnqueue: underNodeCap && canEnrollMore
+              });
+              if (res.edgePersisted) {
+                result.edgesPersisted += 1;
+                edgesByRoot.set(node.lineageRootId, (edgesByRoot.get(node.lineageRootId) ?? 0) + 1);
+              }
+              if (res.enqueued) {
+                projectedNodesByRoot.set(node.lineageRootId, (projectedNodesByRoot.get(node.lineageRootId) ?? 0) + 1);
+                if ((projectedNodesByRoot.get(node.lineageRootId) ?? 0) >= settings.lineage.maxNodesPerRoot) bump('node_cap');
+              }
               if (res.enrolled) {
                 result.receiversEnrolled += 1;
                 enrolledFromNode += 1;
+                dailyReceivers += 1;
+                if (dailyReceivers >= settings.lineage.maxNewReceiversPerRootPerDay) {
+                  hitDayCap = true;
+                  bump('receiver_day_cap');
+                }
               } else if (res.reason.match(/service/i)) {
                 result.serviceNodesSkipped += 1;
               }
               if (enrolledFromNode >= settings.lineage.maxChildrenPerNode) {
+                hitChildCap = true;
                 bump('max_children_per_node');
                 break;
               }
             }
-            if (enrolledFromNode >= settings.lineage.maxChildrenPerNode) break;
+            if (hitChildCap || hitEdgeCap) break;
           }
           pages += 1;
+          lastCursor = nextCursor;
           cursor = nextCursor;
-          // Checkpoint the cursor so an interruption resumes here.
           await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { cursor: cursor ?? null } });
-          if (!nextCursor || enrolledFromNode >= settings.lineage.maxChildrenPerNode) break;
+          if (!nextCursor || hitChildCap || hitEdgeCap) break;
         }
 
-        await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'done' } });
-        result.nodesExpanded += 1;
+        // RESUME (2026-07-10 Codex review): if pages remain (lastCursor set)
+        // and we stopped only on the per-node page budget, leave the node
+        // PENDING with its cursor checkpointed so the NEXT pass continues it —
+        // marking it done would permanently lose later pages. processedNodeIds
+        // prevents re-picking it within THIS pass.
+        const morePagesRemain = lastCursor !== undefined && !hitChildCap && !hitEdgeCap;
+        if (morePagesRemain) {
+          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'pending' } });
+        } else {
+          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'done' } });
+          result.nodesExpanded += 1;
+        }
       } catch (err) {
         // Per-node error isolation (scenario 7): mark skipped, keep going.
         result.errors += 1;

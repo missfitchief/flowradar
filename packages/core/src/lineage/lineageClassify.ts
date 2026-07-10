@@ -85,7 +85,11 @@ export function classifyReceiverEnrollment(ctx: ReceiverContext, config: Lineage
   if (ctx.receiverIsServiceOrProgram) {
     return { ...base, enroll: false, reason: 'receiver is a service/program node — edge stored, never hot-enrolled' };
   }
-  if (ctx.transferUsd <= config.dustMaxUsd && !ctx.isNativeSol) {
+  // Dust is dust regardless of asset (2026-07-10 Codex review): the
+  // gas-funding exception below is the ONLY sub-dust enrollment path, and it
+  // requires transferUsd strictly ABOVE dustMaxUsd, so classifying native SOL
+  // as dust here cannot suppress a legitimate gas funding.
+  if (ctx.transferUsd <= config.dustMaxUsd) {
     return { ...base, enroll: false, dust: true, reason: 'inbound is dust — edge stored, no enrollment, no strong relationship' };
   }
   if (!ctx.receiverIsFreshOrInactive) {

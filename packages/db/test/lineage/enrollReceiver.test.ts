@@ -193,12 +193,14 @@ describe.skipIf(!(await probePort('localhost', 5439)))('enrollReceiverFromTransf
     const second = await enrollReceiverFromTransfer(prisma, t, root.id, 0, DEFAULT_SETTINGS, NOW);
 
     expect(second.edgePersisted).toBe(false); // idempotent
+    expect(second.reason).toMatch(/duplicate/i);
     const edges = await prisma.moneyFlowEdge.count({ where: { destinationAddress: receiver } });
     expect(edges).toBe(1);
-    // Relationship interactionCount bumps to 2 (repeat observation) but there
-    // is still exactly ONE relationship row.
-    const rels = await prisma.walletRelationship.count({ where: { walletB: { address: receiver } } });
-    expect(rels).toBe(1);
+    // Exactly ONE relationship row AND its interactionCount is NOT inflated by
+    // the replay (the duplicate short-circuits before the relationship update).
+    const rel = await prisma.walletRelationship.findFirst({ where: { walletB: { address: receiver } } });
+    expect(rel!.interactionCount).toBe(1);
+    expect(Number(rel!.valueTransferredUsd)).toBe(1000);
   });
 
   it('SCENARIO 11+12: a linked receiver never becomes signal_eligible; an existing public_kol receiver keeps its status', async () => {
