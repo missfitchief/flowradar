@@ -189,19 +189,23 @@ export async function runLineageExpansion(
           where: { address_chain: { address: node.walletAddress, chain: 'SOLANA' } },
           select: { id: true }
         });
-        const priorChildren = nodeWallet
-          ? (await prisma.walletRelationship.findMany({
-              where: { lineageRootId: node.lineageRootId, walletAId: nodeWallet.id },
-              distinct: ['walletBId'],
-              select: { walletBId: true }
-            })).length
-          : 0;
+        // Seed the distinct-receiver set with the ADDRESSES of prior children
+        // (Codex round-7: seeding only the COUNT let a new relationship kind
+        // for an already-counted receiver double-increment after resume).
+        const childReceiversThisNode = new Set<string>();
+        if (nodeWallet) {
+          const priorRows = await prisma.walletRelationship.findMany({
+            where: { lineageRootId: node.lineageRootId, walletAId: nodeWallet.id },
+            distinct: ['walletBId'],
+            select: { walletB: { select: { address: true } } }
+          });
+          for (const r of priorRows) childReceiversThisNode.add(r.walletB.address);
+        }
 
         // Fetch a bounded number of pages for this node, resuming from cursor.
         let cursor = node.cursor ?? undefined;
         let pages = 0;
-        let childrenEnrolled = priorChildren;
-        const childReceiversThisNode = new Set<string>(); // distinct receivers counted this node/pass
+        let childrenEnrolled = childReceiversThisNode.size;
         let dailyReceivers = receiversToday;
         let hitEdgeCap = false;
         let nodeStopReason: string | null = null;
@@ -219,10 +223,12 @@ export async function runLineageExpansion(
               const underNodeCap = (projectedNodesByRoot.get(node.lineageRootId) ?? 0) < settings.lineage.maxNodesPerRoot;
               const underChildCap = childrenEnrolled < settings.lineage.maxChildrenPerNode;
               const underDayCap = dailyReceivers < settings.lineage.maxNewReceiversPerRootPerDay;
-              // allowEnroll gates receiver/relationship/subscription creation;
-              // the edge is ALWAYS persisted (observation) regardless of caps.
+              // Caps gate only genuinely-NEW children/receivers; the edge is
+              // always persisted, and an existing child/receiver reprocesses
+              // regardless (Codex round-7). enroll decides new-vs-existing.
               const res = await enrollReceiverFromTransfer(prisma, observation, node.lineageRootId, node.depth, settings, now, {
-                allowEnroll: underChildCap && underDayCap,
+                allowNewChild: underChildCap,
+                allowNewReceiver: underDayCap,
                 allowEnqueue: underNodeCap
               });
               if (res.edgePersisted) {

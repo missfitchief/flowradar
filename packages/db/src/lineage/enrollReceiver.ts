@@ -78,13 +78,19 @@ export interface EnrollOptions {
    */
   allowEnqueue?: boolean;
   /**
-   * When false, ONLY the edge is persisted — no receiver/relationship/
-   * subscription. The driver sets this once a root's daily receiver cap or a
-   * node's child cap is exhausted (2026-07-10 Codex round-2 review: those
-   * caps previously gated only enqueue, so receivers were still created past
-   * the cap).
+   * When false, a NEW child (new relationship for this node) is NOT created —
+   * only the edge is persisted. An EXISTING child reprocessing (relationship
+   * already present) proceeds regardless, so its interaction is still counted
+   * and idempotent repair still runs (Codex round-7: a full-node cap must not
+   * block reprocessing of already-known children).
    */
-  allowEnroll?: boolean;
+  allowNewChild?: boolean;
+  /**
+   * When false, a NEW monitored receiver (new hot subscription) is NOT
+   * started — only the edge is persisted. An already-monitored receiver
+   * proceeds regardless (it consumes no daily slot; Codex round-7).
+   */
+  allowNewReceiver?: boolean;
 }
 
 export async function enrollReceiverFromTransfer(
@@ -97,20 +103,11 @@ export async function enrollReceiverFromTransfer(
   opts: EnrollOptions = {}
 ): Promise<EnrollReceiverResult> {
   const allowEnqueue = opts.allowEnqueue ?? true;
-  const allowEnroll = opts.allowEnroll ?? true;
+  const allowNewChild = opts.allowNewChild ?? true;
+  const allowNewReceiver = opts.allowNewReceiver ?? true;
   // 1. Persist the edge FIRST (first-write-wins idempotency), before any
   // deeper analysis — an interrupted pass still leaves the observed flow.
-  // NOTE (2026-07-10 Codex round-2): edge existence does NOT imply enrollment
-  // already ran — normal wallet-activity ingest writes edges independently.
-  // So enrollment idempotency is enforced by TX IDENTITY in the relationship
-  // evidence (a repeated txHash never bumps interactionCount), not by whether
-  // this call wrote the edge.
   const edgePersisted = await persistFlowEdge(prisma, transfer);
-
-  // Cap-exhausted: persist the edge (observation), skip enrollment entirely.
-  if (!allowEnroll) {
-    return { edgePersisted, enrolled: false, replay: false, newReceiver: false, enqueued: false, viaGasException: false, dust: false, reason: 'enrollment cap reached — edge persisted only' };
-  }
 
   // 2. Gather the receiver-classification context.
   const receiverWallet = await prisma.wallet.findUnique({
@@ -242,17 +239,54 @@ export async function enrollReceiverFromTransfer(
     return { edgePersisted, enrolled: false, replay: false, newReceiver: false, enqueued: false, viaGasException: false, dust: verdict.dust, reason: verdict.reason };
   }
 
-  // Steps 3-6 run in ONE transaction (2026-07-10 Codex round-5): receiver +
-  // relationship + subscription + expansion node commit together or not at
-  // all, so there is no partial-enrollment state a later cap check could
-  // strand. Each step is also individually idempotent, so a retry after a
-  // rolled-back attempt re-does cleanly. The budget signal is a NEW
-  // RELATIONSHIP for THIS root (per-root notion) — NOT the global hot
-  // subscription (which is one-per-wallet and would let a receiver already
-  // subscribed via another root bypass this root's child cap).
   const senderAddr = transfer.fromAddress;
   const kind = verdict.relationshipKind!;
   const senderWalletIdForRel = (await walletIdOf(prisma, senderAddr)) ?? null;
+
+  // CAP GATE — applied to a genuinely NEW child/receiver only (Codex round-7):
+  // the caps must not block reprocessing of an ALREADY-known child (its
+  // interaction still counts, idempotent repair/promotion still runs). Decide
+  // new-vs-existing up front so a capped node still services existing links.
+  const receiverWalletIdForCap = receiverWallet?.id ?? null;
+  const relExists =
+    receiverWalletIdForCap !== null &&
+    senderWalletIdForRel !== null &&
+    (await prisma.walletRelationship.findUnique({
+      where: {
+        lineageRootId_walletAId_walletBId_kind: {
+          lineageRootId,
+          walletAId: senderWalletIdForRel,
+          walletBId: receiverWalletIdForCap,
+          kind
+        }
+      },
+      select: { id: true }
+    })) !== null;
+  const subExists =
+    receiverWalletIdForCap !== null &&
+    (await prisma.monitoringSubscription.findUnique({
+      where: { walletId_priority: { walletId: receiverWalletIdForCap, priority: 'fresh_receiver_hot' } },
+      select: { id: true }
+    })) !== null;
+  // A NEW child needs child-cap headroom; a NEW receiver (no hot sub) needs
+  // daily headroom. If either genuinely-new step is over its cap, persist the
+  // edge only.
+  if ((!relExists && !allowNewChild) || (!subExists && !allowNewReceiver)) {
+    return {
+      edgePersisted,
+      enrolled: false,
+      replay: false,
+      newReceiver: false,
+      enqueued: false,
+      viaGasException: verdict.viaGasException,
+      dust: false,
+      reason: 'cap reached for a NEW child/receiver — edge persisted only'
+    };
+  }
+
+  // Steps 3-6 run in ONE transaction (2026-07-10 Codex round-5): receiver +
+  // relationship + subscription + expansion node commit together or not at
+  // all. Each step is individually idempotent, so a retry re-does cleanly.
 
   const { newChild, newReceiver, enqueued } = await prisma.$transaction(async (tx) => {
     // 3. Receiver observation_only (NEVER signal_eligible), status preserved;
