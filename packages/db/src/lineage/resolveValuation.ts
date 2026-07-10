@@ -56,6 +56,14 @@ export async function resolveTransferValuation(
   ctx: PriceContext
 ): Promise<ValuationResult> {
   const assetKind = classifyAsset({ symbol: transfer.asset, assetMint: transfer.assetMint, isServiceLeg: transfer.isServiceLeg });
+
+  // A positive provider valuation is AUTHORITATIVE and needs no snapshot
+  // lookup — short-circuit so a lookup failure can never discard it (Codex
+  // Wave-A round 2). Service is still not_applicable regardless.
+  if (assetKind !== 'service' && transfer.providerValueUsd != null && transfer.providerValueUsd > 0) {
+    return computeValuation({ assetKind, amountToken: transfer.amountToken, transferTs: transfer.transferTs, maxSnapshotAgeSec: ctx.maxSnapshotAgeSec, providerValueUsd: transfer.providerValueUsd });
+  }
+
   try {
     if (assetKind === 'service' || assetKind === 'stablecoin' || assetKind === 'unknown') {
       // service / stablecoin decided purely by computeValuation; unknown has no
@@ -92,6 +100,7 @@ export async function resolveTransferValuation(
     });
   } catch {
     // A price-lookup failure degrades to unavailable — never fails the pass.
-    return computeValuation({ assetKind: 'spl', amountToken: transfer.amountToken, transferTs: transfer.transferTs, maxSnapshotAgeSec: ctx.maxSnapshotAgeSec, priorSnapshot: null, currentPrice: null });
+    // Still honor a provider valuation if one was supplied.
+    return computeValuation({ assetKind, amountToken: transfer.amountToken, transferTs: transfer.transferTs, maxSnapshotAgeSec: ctx.maxSnapshotAgeSec, providerValueUsd: transfer.providerValueUsd, priorSnapshot: null, currentPrice: null });
   }
 }

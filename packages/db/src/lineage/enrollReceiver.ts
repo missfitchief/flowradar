@@ -29,6 +29,8 @@ export interface TransferObservation {
   asset: string;
   /** SPL mint address when known; null for native SOL (Wave A valuation). */
   assetMint?: string | null;
+  /** True when this leg is a swap/router/pool/program internal movement — valued as not_applicable, never direct funding (A5). */
+  isServiceLeg?: boolean;
   amountToken: number;
   amountUsd: number;
   isNativeSol: boolean;

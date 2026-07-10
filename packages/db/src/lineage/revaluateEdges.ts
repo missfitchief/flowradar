@@ -4,10 +4,15 @@
 // existed (valuationStatus IS NULL) or that were previously unavailable. Pages
 // by id cursor — never loads all edges. Updates ONLY valuation fields (never
 // touches raw amountToken / amountUsd / txHash / the edge identity). Re-running
-// is idempotent: the same inputs produce the same valuation, and re-enrollment
-// goes through the idempotent enrollReceiverFromTransfer (which NEVER grants
-// signal eligibility). A per-edge failure is recorded and skipped, never fails
-// the pass. Holds the global job lock (serialized with seed/import/expansion).
+// is idempotent. A per-edge failure is recorded and skipped, never fails the
+// pass. Holds the global job lock (serialized with seed/import/expansion).
+//
+// RE-ENROLLMENT (Codex Wave-A round 2): this job does NOT enroll receivers
+// directly (that would need root/depth/cap context it lacks). Instead, when an
+// edge NEWLY gains a value (unavailable/unpriced -> valued), it REOPENS the
+// sender's completed expansion node (done -> pending, cursor reset). The next
+// runLineageExpansion pass then re-processes that wallet, re-values inline, and
+// enrolls with correct depth/caps — the single correct enrollment path.
 
 import type { PrismaClient } from '@prisma/client';
 import type { Settings } from '@flowradar/core';
@@ -17,7 +22,11 @@ import { withGlobalJobLock } from '../locks/globalJobLock';
 export interface RevaluateResult {
   edgesExamined: number;
   edgesValued: number;
+  /** Edges that transitioned unavailable/unvalued -> a real value this pass. */
+  newlyValued: number;
   stillUnavailable: number;
+  /** Completed expansion nodes reopened so the next pass re-enrolls. */
+  nodesReopened: number;
   errors: number;
   byStatus: Record<string, number>;
   lastId: string | null;
@@ -57,17 +66,17 @@ export async function revaluateEdges(
     const result: RevaluateResult = {
       edgesExamined: 0,
       edgesValued: 0,
+      newlyValued: 0,
       stillUnavailable: 0,
+      nodesReopened: 0,
       errors: 0,
       byStatus: {},
       lastId: null
     };
 
-    // This job ONLY re-values edges. Re-enrollment is deliberately NOT done
-    // here (Codex Wave-A review): the frontier RESUME (runLineageExpansion,
-    // Wave B) re-processes each wallet, re-values inline, and enrolls with the
-    // correct depth/cap accounting — doing enrollment here with a defaulted
-    // depth would bypass node/child/day bounds.
+    // Senders whose edges NEWLY gained a value — their completed expansion
+    // nodes are reopened after the pass so the next expansion re-enrolls.
+    const newlyValuedSenders = new Set<string>();
     let cursorId: string | undefined = opts.startAfterId;
     for (;;) {
       if (result.edgesExamined >= maxEdges) break;
@@ -84,13 +93,14 @@ export async function revaluateEdges(
         // with the previous run's lastId rather than restarting at id 0).
         orderBy: { id: 'asc' },
         take: Math.min(50, maxEdges - result.edgesExamined),
-        select: { id: true, asset: true, assetMint: true, amountToken: true, amountUsd: true, ts: true }
+        select: { id: true, asset: true, assetMint: true, amountToken: true, amountUsd: true, ts: true, sourceAddress: true, valuedUsd: true }
       });
       if (batch.length === 0) break;
 
       for (const edge of batch) {
         result.edgesExamined += 1;
         cursorId = edge.id;
+        const hadValue = edge.valuedUsd !== null;
         try {
           const valuation = await resolveTransferValuation(
             prisma,
@@ -121,12 +131,32 @@ export async function revaluateEdges(
             }
           });
 
-          if (valuation.valuedUsd !== null) result.edgesValued += 1;
-          else result.stillUnavailable += 1;
+          if (valuation.valuedUsd !== null) {
+            result.edgesValued += 1;
+            if (!hadValue) {
+              result.newlyValued += 1;
+              newlyValuedSenders.add(edge.sourceAddress);
+            }
+          } else {
+            result.stillUnavailable += 1;
+          }
         } catch {
           result.errors += 1;
         }
       }
+    }
+
+    // Reopen completed expansion nodes for senders whose edges NEWLY gained a
+    // value, so the next expansion pass re-processes them and enrolls
+    // receivers that were previously skipped as unavailable/$0 (Codex Wave-A
+    // round 2). Cursor reset so the wallet is re-scanned from the start;
+    // idempotent (edges + relationships dedupe).
+    if (newlyValuedSenders.size > 0) {
+      const reopened = await prisma.lineageExpansionNode.updateMany({
+        where: { walletAddress: { in: [...newlyValuedSenders] }, status: 'done' },
+        data: { status: 'pending', cursor: null, stopReason: null }
+      });
+      result.nodesReopened = reopened.count;
     }
 
     result.lastId = cursorId ?? null;

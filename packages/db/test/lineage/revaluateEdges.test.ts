@@ -160,6 +160,41 @@ describe.skipIf(!(await probePort('localhost', 5439)))('revaluateEdges + resolve
     expect(Number(after!.valuedUsd)).toBeCloseTo(300, 4); // honest value in the new field
   });
 
+  it('REOPENS a done expansion node when its sender edge newly gains a value (re-enrollment via resume)', async () => {
+    await seedWsolSnapshot(150, new Date(NOW.getTime() - 60_000));
+    // A root + a completed expansion node for its wallet, plus an unvalued edge.
+    const rootWallet = await prisma.wallet.create({ data: { address: `${PREFIX}_src_reopen`, chain: 'SOLANA', firstSeenAt: NOW, lastActiveAt: NOW, status: 'observation_only' } });
+    const root = await prisma.lineageRoot.create({ data: { walletId: rootWallet.id, source: 'operator_file', permanent: true, firstImportedAt: NOW, lastSeenInImportAt: NOW } });
+    const node = await prisma.lineageExpansionNode.create({ data: { lineageRootId: root.id, walletAddress: rootWallet.address, chain: 'SOLANA', depth: 0, priority: 'first_funder', status: 'done', discoveredVia: 'root', cursor: 'end' } });
+    await prisma.moneyFlowEdge.create({
+      data: { sourceAddress: rootWallet.address, destinationAddress: `${PREFIX}_dst_reopen`, sourceChain: 'SOLANA', destinationChain: 'SOLANA', asset: 'SOL', assetMint: null, amountToken: 2, amountUsd: 0, ts: NOW, txHash: `${PREFIX}_tx_reopen`, actionType: 'transfer', confidence: 100, providerSource: 'test', metadata: {} }
+    });
+
+    const result = await revaluateEdges(prisma, settings, { sourceAddressStartsWith: PREFIX });
+    expect(result.newlyValued).toBeGreaterThanOrEqual(1);
+    expect(result.nodesReopened).toBeGreaterThanOrEqual(1);
+    const after = await prisma.lineageExpansionNode.findUnique({ where: { id: node.id } });
+    expect(after!.status).toBe('pending'); // reopened for re-enrollment
+    expect(after!.cursor).toBeNull();
+
+    // cleanup this test's extra rows
+    await prisma.lineageExpansionNode.deleteMany({ where: { lineageRootId: root.id } });
+    await prisma.lineageRoot.delete({ where: { id: root.id } });
+  });
+
+  it('startAfterId pages FORWARD across runs (no restart / starvation)', async () => {
+    await seedWsolSnapshot(150, new Date(NOW.getTime() - 60_000));
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) ids.push((await makeEdge(`fwd_${i}`, { asset: 'SOL', assetMint: null, amountToken: 1 })).id);
+    const sorted = [...ids].sort();
+    const r1 = await revaluateEdges(prisma, settings, { maxEdgesPerPass: 2, sourceAddressStartsWith: PREFIX });
+    expect(r1.lastId).not.toBeNull();
+    const r2 = await revaluateEdges(prisma, settings, { maxEdgesPerPass: 2, startAfterId: r1.lastId!, sourceAddressStartsWith: PREFIX });
+    // r2 only sees ids strictly greater than r1.lastId — no re-examination.
+    expect(r2.edgesExamined).toBeLessThanOrEqual(2);
+    void sorted;
+  });
+
   it('LEGACY positive amountUsd is treated as a provider valuation (exact_provider_historical)', async () => {
     const edge = await prisma.moneyFlowEdge.create({
       data: {

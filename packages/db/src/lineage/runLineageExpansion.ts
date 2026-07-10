@@ -240,6 +240,7 @@ export async function runLineageExpansion(
                 {
                   asset: observation.asset,
                   assetMint: observation.assetMint ?? null,
+                  isServiceLeg: observation.isServiceLeg,
                   amountToken: observation.amountToken,
                   transferTs: observation.ts,
                   providerValueUsd: observation.amountUsd > 0 ? observation.amountUsd : null
@@ -341,6 +342,13 @@ export async function runLineageExpansion(
 
 /** Extracts outbound transfer observations (this wallet is the sender). */
 function outboundTransfers(tx: NormalizedTx, walletAddress: string): TransferObservation[] {
+  // A transaction that contains a swap/LP/bridge/contract leg is NOT plain P2P
+  // funding: its native/token transfer legs are swap-INTERNAL movements
+  // (to/from a pool/router/program). Mark them isServiceLeg so valuation is
+  // not_applicable and enrollment never treats them as direct funding (A5).
+  const isSwapContext = tx.legs.some(
+    (l) => l.kind === 'swap_leg' || l.kind === 'lp_add' || l.kind === 'lp_remove' || l.kind === 'contract_interaction' || l.kind === 'bridge_deposit' || l.kind === 'bridge_withdrawal'
+  );
   const out: TransferObservation[] = [];
   for (const leg of tx.legs) {
     if (leg.from !== walletAddress) continue;
@@ -355,6 +363,7 @@ function outboundTransfers(tx: NormalizedTx, walletAddress: string): TransferObs
       asset: symbol,
       // Preserve the mint so valuation classifies by ADDRESS (Wave A).
       assetMint: leg.asset.address ?? null,
+      isServiceLeg: isSwapContext,
       amountToken: Number(leg.amountToken),
       amountUsd: leg.amountUsd ?? 0,
       isNativeSol: leg.kind === 'native_transfer' && symbol === NATIVE_SOL,
