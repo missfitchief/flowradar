@@ -9,7 +9,7 @@
 
 import { prisma, runLineageExpansion, type LineageProvider } from '@flowradar/db';
 import { getProvider } from '@flowradar/providers';
-import { DEFAULT_SETTINGS } from '@flowradar/core';
+import { DEFAULT_SETTINGS, WSOL_MINT } from '@flowradar/core';
 
 function rssMb(): number {
   return Math.round(process.memoryUsage().rss / (1024 * 1024));
@@ -25,16 +25,28 @@ async function main(): Promise<void> {
   // Live Helius walletActivity provider (or mock fallback when MOCK_MODE).
   const provider = getProvider('SOLANA', 'walletActivity') as unknown as LineageProvider;
 
+  // Current SOL price (once) so native SOL transfers are valued.
+  let solPrice: number | null = null;
+  try {
+    const market = getProvider('SOLANA', 'marketData');
+    solPrice = (await market.getTokenMarket('SOLANA', WSOL_MINT))?.priceUsd ?? null;
+  } catch { /* leave null */ }
+
+  // Reopen done ROOT (depth-0) nodes so this bounded smoke re-processes them
+  // and re-enrolls with the now-valued transfers (idempotent).
+  if (process.env.LINEAGE_REOPEN === '1') {
+    await prisma.lineageExpansionNode.updateMany({ where: { depth: 0, status: 'done' }, data: { status: 'pending', cursor: null } });
+  }
+
   const startedAt = Date.now();
   let result;
   let crashed: string | null = null;
   try {
-    // Bounded: at most 8 frontier nodes this pass (the roots + their first
-    // direct receivers), depth 1, 2 pages/node.
-    result = await runLineageExpansion(prisma, provider, settings, { maxNodesPerPass: 8 });
+    result = await runLineageExpansion(prisma, provider, settings, { maxNodesPerPass: 8, solCurrentPriceUsd: solPrice });
   } catch (err) {
     crashed = err instanceof Error ? err.message : String(err);
   }
+  console.log(JSON.stringify({ solPrice }));
   const durationSec = Math.round((Date.now() - startedAt) / 1000);
 
   // Post-pass DB tallies.
