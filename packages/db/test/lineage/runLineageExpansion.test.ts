@@ -153,6 +153,31 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runLineageExpansion', ()
     expect(badNode!.stopReason).toMatch(/error/i);
   });
 
+  it('CAP: maxNewReceiversPerRootPerDay actually stops enrollment (not just enqueue) — edges still persist', async () => {
+    const A = `${PREFIX}_dayRoot`;
+    const { root } = await makeRoot(A);
+    const legs = Array.from({ length: 6 }, (_, i) => ({
+      kind: 'native_transfer' as const,
+      from: A,
+      to: `${PREFIX}_dayRecv_${i}`,
+      asset: { symbol: 'SOL', decimals: 9 },
+      amountToken: '5',
+      amountUsd: 1000
+    }));
+    const provider = mapProvider({ [A]: [{ txHash: `${PREFIX}_tx_day`, blockOrSlot: 1n, ts: NOW, legs }] });
+
+    const settings = { ...DEFAULT_SETTINGS, lineage: { ...DEFAULT_SETTINGS.lineage, maxNewReceiversPerRootPerDay: 2, maxChildrenPerNode: 100, maxNodesPerRoot: 100 } };
+    const result = await runLineageExpansion(prisma, provider, settings, { rootId: root.id, now: NOW });
+
+    // Only 2 receivers enrolled despite 6 transfers; the day cap is a real
+    // enrollment gate now, not just an enqueue gate.
+    const enrolled = await prisma.wallet.count({ where: { address: { startsWith: `${PREFIX}_dayRecv_` } } });
+    expect(enrolled).toBe(2);
+    // ...but all 6 edges are still persisted (observation is not capped).
+    expect(result.edgesPersisted).toBe(6);
+    expect(result.stopReasons['receiver_day_cap'] ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
   it('SCENARIO 8: an interrupted backfill resumes from the cursor across passes (no lost pages)', async () => {
     const A = `${PREFIX}_resumeRoot`;
     const B1 = `${PREFIX}_resumeB1`;

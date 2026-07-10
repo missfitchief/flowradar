@@ -192,15 +192,39 @@ describe.skipIf(!(await probePort('localhost', 5439)))('enrollReceiverFromTransf
     await enrollReceiverFromTransfer(prisma, t, root.id, 0, DEFAULT_SETTINGS, NOW);
     const second = await enrollReceiverFromTransfer(prisma, t, root.id, 0, DEFAULT_SETTINGS, NOW);
 
-    expect(second.edgePersisted).toBe(false); // idempotent
-    expect(second.reason).toMatch(/duplicate/i);
+    expect(second.edgePersisted).toBe(false); // edge dedup: no second edge row
     const edges = await prisma.moneyFlowEdge.count({ where: { destinationAddress: receiver } });
     expect(edges).toBe(1);
     // Exactly ONE relationship row AND its interactionCount is NOT inflated by
-    // the replay (the duplicate short-circuits before the relationship update).
+    // the replay — enforced by TX-IDENTITY idempotency (a txHash already in
+    // the relationship's evidence never bumps count/value again), which also
+    // means an ingest-preexisting edge cannot suppress a genuinely new
+    // transfer's enrollment (Codex round-2).
     const rel = await prisma.walletRelationship.findFirst({ where: { walletB: { address: receiver } } });
     expect(rel!.interactionCount).toBe(1);
     expect(Number(rel!.valueTransferredUsd)).toBe(1000);
+  });
+
+  it('IDEMPOTENCY: an edge pre-written by normal ingest does NOT suppress enrollment of a genuinely new transfer', async () => {
+    const { wallet: rootWallet, root } = await makeRoot('ingest');
+    const receiver = `${PREFIX}_ingestB`;
+    const t = transfer({ fromAddress: rootWallet.address, toAddress: receiver, amountUsd: 1000, txHash: 'INGESTED' });
+    // Simulate normal wallet-activity ingest writing the edge first.
+    await prisma.moneyFlowEdge.create({
+      data: {
+        sourceAddress: t.fromAddress, destinationAddress: t.toAddress, sourceChain: 'SOLANA', destinationChain: 'SOLANA',
+        asset: 'SOL', amountToken: 5, amountUsd: 1000, ts: t.ts, txHash: t.txHash, actionType: 'transfer',
+        confidence: 100, providerSource: 'ingest', metadata: {}
+      }
+    });
+
+    const result = await enrollReceiverFromTransfer(prisma, t, root.id, 0, DEFAULT_SETTINGS, NOW);
+    expect(result.edgePersisted).toBe(false); // ingest already wrote it
+    expect(result.enrolled).toBe(true); // ...but enrollment still happens
+    const b = await prisma.wallet.findUnique({ where: { address_chain: { address: receiver, chain: 'SOLANA' } } });
+    expect(b!.status).toBe('observation_only');
+    const rel = await prisma.walletRelationship.findFirst({ where: { walletB: { address: receiver } } });
+    expect(rel).not.toBeNull();
   });
 
   it('SCENARIO 11+12: a linked receiver never becomes signal_eligible; an existing public_kol receiver keeps its status', async () => {

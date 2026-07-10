@@ -172,15 +172,28 @@ export async function runLineageExpansion(
         const receiversToday = await prisma.monitoringSubscription.count({
           where: { lineageRootId: node.lineageRootId, priority: 'fresh_receiver_hot', createdAt: { gte: utcDayStart } }
         });
+        // CUMULATIVE children of THIS node across passes (Codex round-2:
+        // enrolledFromNode reset every resumed pass, defeating the cap). Count
+        // distinct receivers already related from this node's wallet.
+        const nodeWallet = await prisma.wallet.findUnique({
+          where: { address_chain: { address: node.walletAddress, chain: 'SOLANA' } },
+          select: { id: true }
+        });
+        const priorChildren = nodeWallet
+          ? (await prisma.walletRelationship.findMany({
+              where: { lineageRootId: node.lineageRootId, walletAId: nodeWallet.id },
+              distinct: ['walletBId'],
+              select: { walletBId: true }
+            })).length
+          : 0;
 
         // Fetch a bounded number of pages for this node, resuming from cursor.
         let cursor = node.cursor ?? undefined;
         let pages = 0;
-        let enrolledFromNode = 0;
+        let childrenEnrolled = priorChildren;
         let dailyReceivers = receiversToday;
-        let hitChildCap = false;
-        let hitDayCap = false;
         let hitEdgeCap = false;
+        let nodeStopReason: string | null = null;
         let lastCursor: string | undefined = cursor;
         while (pages < settings.lineage.backfillMaxPagesPerNode) {
           const { txs, nextCursor } = await provider.getWalletTransactions('SOLANA', node.walletAddress, { cursor, limit: 100 });
@@ -188,12 +201,18 @@ export async function runLineageExpansion(
             for (const observation of outboundTransfers(tx, node.walletAddress)) {
               if ((edgesByRoot.get(node.lineageRootId) ?? 0) >= settings.lineage.maxEdgesPerRoot) {
                 hitEdgeCap = true;
+                nodeStopReason = 'edge_cap';
+                bump('edge_cap');
                 break;
               }
               const underNodeCap = (projectedNodesByRoot.get(node.lineageRootId) ?? 0) < settings.lineage.maxNodesPerRoot;
-              const canEnrollMore = !hitDayCap && dailyReceivers < settings.lineage.maxNewReceiversPerRootPerDay;
+              const underChildCap = childrenEnrolled < settings.lineage.maxChildrenPerNode;
+              const underDayCap = dailyReceivers < settings.lineage.maxNewReceiversPerRootPerDay;
+              // allowEnroll gates receiver/relationship/subscription creation;
+              // the edge is ALWAYS persisted (observation) regardless of caps.
               const res = await enrollReceiverFromTransfer(prisma, observation, node.lineageRootId, node.depth, settings, now, {
-                allowEnqueue: underNodeCap && canEnrollMore
+                allowEnroll: underChildCap && underDayCap,
+                allowEnqueue: underNodeCap
               });
               if (res.edgePersisted) {
                 result.edgesPersisted += 1;
@@ -201,44 +220,49 @@ export async function runLineageExpansion(
               }
               if (res.enqueued) {
                 projectedNodesByRoot.set(node.lineageRootId, (projectedNodesByRoot.get(node.lineageRootId) ?? 0) + 1);
-                if ((projectedNodesByRoot.get(node.lineageRootId) ?? 0) >= settings.lineage.maxNodesPerRoot) bump('node_cap');
+                if ((projectedNodesByRoot.get(node.lineageRootId) ?? 0) >= settings.lineage.maxNodesPerRoot) {
+                  nodeStopReason = nodeStopReason ?? 'node_cap';
+                  bump('node_cap');
+                }
               }
               if (res.enrolled) {
                 result.receiversEnrolled += 1;
-                enrolledFromNode += 1;
+                childrenEnrolled += 1;
                 dailyReceivers += 1;
+                if (childrenEnrolled >= settings.lineage.maxChildrenPerNode) {
+                  nodeStopReason = nodeStopReason ?? 'max_children_per_node';
+                  bump('max_children_per_node');
+                }
                 if (dailyReceivers >= settings.lineage.maxNewReceiversPerRootPerDay) {
-                  hitDayCap = true;
+                  nodeStopReason = nodeStopReason ?? 'receiver_day_cap';
                   bump('receiver_day_cap');
                 }
               } else if (res.reason.match(/service/i)) {
                 result.serviceNodesSkipped += 1;
               }
-              if (enrolledFromNode >= settings.lineage.maxChildrenPerNode) {
-                hitChildCap = true;
-                bump('max_children_per_node');
-                break;
-              }
+              // NB: child/day caps do NOT break the loop — remaining transfers
+              // still get their edges persisted (Codex round-2). Only the edge
+              // cap stops the scan.
             }
-            if (hitChildCap || hitEdgeCap) break;
+            if (hitEdgeCap) break;
           }
           pages += 1;
           lastCursor = nextCursor;
           cursor = nextCursor;
           await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { cursor: cursor ?? null } });
-          if (!nextCursor || hitChildCap || hitEdgeCap) break;
+          if (!nextCursor || hitEdgeCap) break;
         }
 
         // RESUME (2026-07-10 Codex review): if pages remain (lastCursor set)
-        // and we stopped only on the per-node page budget, leave the node
-        // PENDING with its cursor checkpointed so the NEXT pass continues it —
-        // marking it done would permanently lose later pages. processedNodeIds
-        // prevents re-picking it within THIS pass.
-        const morePagesRemain = lastCursor !== undefined && !hitChildCap && !hitEdgeCap;
+        // and we did not hit the edge cap, leave the node PENDING with its
+        // cursor checkpointed so the NEXT pass continues it — marking it done
+        // would permanently lose later pages. processedNodeIds prevents
+        // re-picking it within THIS pass.
+        const morePagesRemain = lastCursor !== undefined && !hitEdgeCap;
         if (morePagesRemain) {
-          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'pending' } });
+          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'pending', stopReason: nodeStopReason } });
         } else {
-          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'done' } });
+          await prisma.lineageExpansionNode.update({ where: { id: node.id }, data: { status: 'done', stopReason: nodeStopReason } });
           result.nodesExpanded += 1;
         }
       } catch (err) {

@@ -58,12 +58,18 @@ const TRUSTED_SENDER_STATUSES = new Set(['signal_eligible']);
  */
 export interface EnrollOptions {
   /**
-   * When false, enrollment still persists the edge + receiver + relationship
-   * + subscription, but does NOT enqueue a new expansion node — the driver
-   * sets this once a root hits its node cap so a capped root cannot keep
-   * growing its frontier (2026-07-10 Codex review).
+   * When false, enrollment persists the edge but does NOT enqueue a new
+   * expansion node — set once a root hits its node cap (2026-07-10 review).
    */
   allowEnqueue?: boolean;
+  /**
+   * When false, ONLY the edge is persisted — no receiver/relationship/
+   * subscription. The driver sets this once a root's daily receiver cap or a
+   * node's child cap is exhausted (2026-07-10 Codex round-2 review: those
+   * caps previously gated only enqueue, so receivers were still created past
+   * the cap).
+   */
+  allowEnroll?: boolean;
 }
 
 export async function enrollReceiverFromTransfer(
@@ -76,22 +82,25 @@ export async function enrollReceiverFromTransfer(
   opts: EnrollOptions = {}
 ): Promise<EnrollReceiverResult> {
   const allowEnqueue = opts.allowEnqueue ?? true;
+  const allowEnroll = opts.allowEnroll ?? true;
   // 1. Persist the edge FIRST (first-write-wins idempotency), before any
   // deeper analysis — an interrupted pass still leaves the observed flow.
+  // NOTE (2026-07-10 Codex round-2): edge existence does NOT imply enrollment
+  // already ran — normal wallet-activity ingest writes edges independently.
+  // So enrollment idempotency is enforced by TX IDENTITY in the relationship
+  // evidence (a repeated txHash never bumps interactionCount), not by whether
+  // this call wrote the edge.
   const edgePersisted = await persistFlowEdge(prisma, transfer);
 
-  // DUPLICATE GUARD (2026-07-10 Codex review Critical): a replayed tx whose
-  // edge already exists must NOT re-run enrollment — that would inflate
-  // relationship interactionCount/value/evidence and falsely upgrade
-  // confidence. The first processing already recorded everything.
-  if (!edgePersisted) {
-    return { edgePersisted: false, enrolled: false, enqueued: false, viaGasException: false, dust: false, reason: 'duplicate transfer — already processed' };
+  // Cap-exhausted: persist the edge (observation), skip enrollment entirely.
+  if (!allowEnroll) {
+    return { edgePersisted, enrolled: false, enqueued: false, viaGasException: false, dust: false, reason: 'enrollment cap reached — edge persisted only' };
   }
 
   // 2. Gather the receiver-classification context.
   const receiverWallet = await prisma.wallet.findUnique({
     where: { address_chain: { address: transfer.toAddress, chain: 'SOLANA' } },
-    select: { id: true, status: true, lastActiveAt: true, _count: { select: { trades: true } } }
+    select: { id: true, status: true, lastActiveAt: true }
   });
   const registry = await prisma.addressRegistry.findFirst({
     where: { address: transfer.toAddress, chain: 'SOLANA' },
@@ -99,7 +108,13 @@ export async function enrollReceiverFromTransfer(
   });
   // High-degree unregistered hubs are service nodes too (dust/airdrop
   // distributors) — degree = distinct counterparties across the flow graph.
-  const receiverDistinctCounterparties = await countDistinctCounterparties(prisma, transfer.toAddress);
+  // Bounded to threshold+1 (Codex round-2): we only need "meets threshold?",
+  // and an unbounded take could under-count above a high threshold.
+  const receiverDistinctCounterparties = await countDistinctCounterparties(
+    prisma,
+    transfer.toAddress,
+    settings.lineage.serviceDegreeThreshold + 1
+  );
   const receiverIsService = isServiceNode(
     { registryCategory: (registry?.category ?? null) as never, distinctCounterparties: receiverDistinctCounterparties },
     settings.lineage
@@ -127,11 +142,26 @@ export async function enrollReceiverFromTransfer(
       senderWallet.monitoringSubscriptions.length > 0 ||
       (await hasStrongLink(prisma, transfer.fromAddress)));
 
-  // A receiver with no prior trades and no prior inbound is fresh; a
-  // long-inactive one (>= freshInactiveDays) re-qualifies.
-  const priorTrades = receiverWallet?._count.trades ?? 0;
-  const inactiveDays = receiverWallet
-    ? (now.getTime() - receiverWallet.lastActiveAt.getTime()) / (24 * 60 * 60 * 1000)
+  // Freshness is assessed AS OF the funding time (Codex round-2): a wallet
+  // that was fresh when funded but has since traded (its ACTIVATION) must
+  // still qualify. Using current state would let the activation trade itself
+  // disqualify the very enrollment it should trigger. So "prior trades" means
+  // trades STRICTLY BEFORE the transfer, and inactivity is measured to the
+  // transfer ts.
+  const priorTrades = receiverWallet
+    ? await prisma.walletTokenTrade.count({ where: { walletId: receiverWallet.id, ts: { lt: transfer.ts } } })
+    : 0;
+  const lastActiveBeforeTransfer = receiverWallet
+    ? (
+        await prisma.walletTokenTrade.findFirst({
+          where: { walletId: receiverWallet.id, ts: { lt: transfer.ts } },
+          orderBy: { ts: 'desc' },
+          select: { ts: true }
+        })
+      )?.ts ?? null
+    : null;
+  const inactiveDays = lastActiveBeforeTransfer
+    ? (transfer.ts.getTime() - lastActiveBeforeTransfer.getTime()) / (24 * 60 * 60 * 1000)
     : Infinity;
   const receiverIsFreshOrInactive =
     receiverWallet === null || priorTrades === 0 || inactiveDays >= settings.lineage.freshInactiveDays;
@@ -185,6 +215,7 @@ export async function enrollReceiverFromTransfer(
     walletBId: receiverId,
     kind,
     confidence,
+    activated: ctx.receiverBecameActiveWithinWindow,
     valueUsd: transfer.amountUsd,
     txHash: transfer.txHash,
     now
@@ -196,14 +227,19 @@ export async function enrollReceiverFromTransfer(
   // 6. Enqueue bounded shallow expansion (depth+1), respecting maxDepth.
   // Priority derives from the relationship kind (first_funder highest), not a
   // hard-coded tier (Codex review).
+  // Promotion of an EXISTING deeper node always runs (it doesn't grow the
+  // frontier); only NEW node creation is gated by allowEnqueue (Codex
+  // round-2: the shallower-depth repair must work even when the frontier is
+  // full).
   let enqueued = false;
-  if (allowEnqueue && depth + 1 <= settings.lineage.maxDepth) {
+  if (depth + 1 <= settings.lineage.maxDepth) {
     enqueued = await enqueueExpansion(prisma, {
       lineageRootId,
       address: transfer.toAddress,
       depth: depth + 1,
       priority: expansionPriorityFor(kind, verdict.viaGasException, transfer.amountUsd, settings.lineage.minTransferUsd),
       discoveredVia: `${kind} of ${transfer.fromAddress}`,
+      canCreate: allowEnqueue,
       now
     });
   }
@@ -295,6 +331,7 @@ async function upsertRelationship(
     walletBId: string;
     kind: WalletRelationshipKind;
     confidence: number;
+    activated: boolean;
     valueUsd: number;
     txHash: string;
     now: Date;
@@ -312,14 +349,19 @@ async function upsertRelationship(
     select: { id: true, interactionCount: true, valueTransferredUsd: true, evidence: true }
   });
   if (existing) {
-    const evidence = Array.isArray(existing.evidence) ? existing.evidence : [];
+    const evidence = Array.isArray(existing.evidence) ? (existing.evidence as { txHash?: string }[]) : [];
+    // TX-IDENTITY IDEMPOTENCY (Codex round-2): a txHash already folded into
+    // this relationship never bumps interactionCount/value again — this is
+    // what makes a replayed tx OR an ingest-preexisting edge safe, without
+    // suppressing enrollment for genuinely new transfers.
+    if (evidence.some((e) => e && e.txHash === args.txHash)) return;
     await prisma.walletRelationship.update({
       where: { id: existing.id },
       data: {
         interactionCount: existing.interactionCount + 1,
         lastSeenAt: args.now,
         valueTransferredUsd: Number(existing.valueTransferredUsd) + args.valueUsd,
-        confidence: relationshipConfidence(args.kind, { activated: true, interactionCount: existing.interactionCount + 1 }),
+        confidence: relationshipConfidence(args.kind, { activated: args.activated, interactionCount: existing.interactionCount + 1 }),
         evidence: [...evidence, { txHash: args.txHash, usd: args.valueUsd }] as Prisma.InputJsonValue
       }
     });
@@ -390,6 +432,7 @@ async function enqueueExpansion(
     depth: number;
     priority: ExpansionPriorityValue;
     discoveredVia: string;
+    canCreate: boolean;
     now: Date;
   }
 ): Promise<boolean> {
@@ -400,7 +443,8 @@ async function enqueueExpansion(
   if (existing) {
     // Promotion (2026-07-10 Codex review): a wallet first seen as a deep leaf
     // that is LATER discovered via a shallower/higher-priority path must be
-    // re-openable at the shallower depth so it can actually expand.
+    // re-openable at the shallower depth so it can actually expand. Runs even
+    // when the frontier is full (it adds no node).
     if (args.depth < existing.depth && existing.status !== 'in_progress') {
       await prisma.lineageExpansionNode.update({
         where: { id: existing.id },
@@ -409,6 +453,7 @@ async function enqueueExpansion(
     }
     return false;
   }
+  if (!args.canCreate) return false; // frontier full — new node forbidden
   try {
     await prisma.lineageExpansionNode.create({
       data: {
@@ -428,20 +473,26 @@ async function enqueueExpansion(
   }
 }
 
-/** Distinct counterparties (in + out) observed for an address — service-node degree. */
-async function countDistinctCounterparties(prisma: PrismaClient, address: string): Promise<number> {
+/**
+ * Distinct counterparties (in + out) observed for an address — service-node
+ * degree. `cap` bounds the scan: we only need to know whether the degree
+ * MEETS the service threshold, so each direction fetches up to `cap` distinct
+ * rows (Codex round-2: an unbounded/undersized take could under-count above a
+ * high threshold and misclassify a real hub as a normal wallet).
+ */
+async function countDistinctCounterparties(prisma: PrismaClient, address: string, cap: number): Promise<number> {
   const [asSource, asDest] = await Promise.all([
     prisma.moneyFlowEdge.findMany({
       where: { sourceAddress: address, sourceChain: 'SOLANA' },
       select: { destinationAddress: true },
       distinct: ['destinationAddress'],
-      take: 1000
+      take: cap
     }),
     prisma.moneyFlowEdge.findMany({
       where: { destinationAddress: address, destinationChain: 'SOLANA' },
       select: { sourceAddress: true },
       distinct: ['sourceAddress'],
-      take: 1000
+      take: cap
     })
   ]);
   const set = new Set<string>();
