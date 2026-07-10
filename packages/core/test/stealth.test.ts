@@ -224,6 +224,34 @@ describe('stealth engine — trust-boundary invariants', () => {
     expect(computeStealth(plusOnePublic, cfg).stealthScore).toBeLessThanOrEqual(computeStealth(base, cfg).stealthScore);
   });
 
+  it('penalty overflow cannot raise the score (Number.MAX_VALUE weights)', () => {
+    // Codex CRITICAL repro: extreme-but-finite penalties overflow the sum to
+    // Infinity when a public buyer is added; clamp01 must map that to full
+    // penalty (score floored at 0), never wipe it.
+    const cfg = {
+      ...DEFAULT_STEALTH_CONFIG,
+      weights: { ...DEFAULT_STEALTH_CONFIG.weights, publicPenalty: Number.MAX_VALUE, crowdPenalty: Number.MAX_VALUE }
+    };
+    const base = input([
+      win('24h', {
+        eligible: flow({ distinctBuyers: 4, buyUsd: 30000, freshBuyers: 3, distinctClusters: 3 }),
+        crowd: flow({ distinctBuyers: 20, buyUsd: 100000 })
+      })
+    ]);
+    const plusPublic = input([
+      win('24h', {
+        eligible: flow({ distinctBuyers: 4, buyUsd: 30000, freshBuyers: 3, distinctClusters: 3 }),
+        crowd: flow({ distinctBuyers: 20, buyUsd: 100000 }),
+        publicKol: flow({ distinctBuyers: 1, buyUsd: 5000 })
+      })
+    ]);
+    const s0 = computeStealth(base, cfg).stealthScore;
+    const s1 = computeStealth(plusPublic, cfg).stealthScore;
+    expect(Number.isFinite(s0)).toBe(true);
+    expect(Number.isFinite(s1)).toBe(true);
+    expect(s1).toBeLessThanOrEqual(s0);
+  });
+
   it('does not treat one burst (present in all nested windows) as persistence', () => {
     // Codex HIGH repro: a single burst appears net-positive in every trailing
     // window; persistenceWindows must be 0 (no OUTER-ring growth), not 6.

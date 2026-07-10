@@ -207,9 +207,14 @@ const ZERO_FLOW: CohortFlow = {
   distinctClusters: 0
 };
 
+// Monotonic non-decreasing clamp to [0,1] across ALL reals. Crucially maps
+// +Infinity -> 1 (NOT 0): a penalty sum can overflow to Infinity under extreme
+// weights, and mapping it to 0 would WIPE the penalty and could raise the score
+// when a public/crowd buyer is added (the overflow point). Only NaN -> 0.
 function clamp01(x: number): number {
-  if (!Number.isFinite(x) || x <= 0) return 0;
-  return x >= 1 ? 1 : x;
+  if (Number.isNaN(x)) return 0;
+  if (x <= 0) return 0;
+  return x >= 1 ? 1 : x; // Infinity >= 1 is true -> returns 1
 }
 
 function safeShare(part: number, total: number): number {
