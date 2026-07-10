@@ -14,6 +14,7 @@ export * from './social/ingest';
 export * from './confluence/ingest';
 export * from './confluence/queries';
 export * from './candidateValidation';
+export * from './lineage/importRootWallets';
 export * from './tokenTopTraderBackfill';
 export * from './dune/duneOverlap';
 export * from './dune/localOverlap';

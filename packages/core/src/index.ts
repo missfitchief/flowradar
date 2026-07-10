@@ -11,6 +11,7 @@ export * from './scoring/flowScore';
 export * from './pnl/fifo';
 export * from './wallets/profitability';
 export * from './wallets/status';
+export * from './lineage/parseRootWalletFile';
 export * from './rules/ruleA';
 export * from './rules/ruleB';
 export * from './rules/ruleC';
