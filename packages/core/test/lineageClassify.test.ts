@@ -111,6 +111,30 @@ describe('classifyReceiverEnrollment', () => {
     expect(v.enroll).toBe(false);
   });
 
+  it('UNKNOWN not dust: an unavailable-USD non-gas transfer is unknown, never dust (Codex final review)', () => {
+    // A large SPL transfer we could not price: usdUnavailable, not native SOL,
+    // placeholder transferUsd 0. Must NOT be classified dust (that would treat
+    // unknown as benign); it is unknown and deferred to revaluation.
+    const v = classifyReceiverEnrollment(
+      ctx({ transferUsd: 0, usdUnavailable: true, isNativeSol: false, isReceiverFirstMeaningfulInbound: true, receiverBecameActiveWithinWindow: true }),
+      L
+    );
+    expect(v.enroll).toBe(false);
+    expect(v.unknown).toBe(true);
+    expect(v.dust).toBe(false);
+    expect(v.persistEdge).toBe(true);
+  });
+
+  it('UNKNOWN not dust: an out-of-range unavailable native-SOL transfer is unknown, not dust', () => {
+    const v = classifyReceiverEnrollment(
+      ctx({ transferUsd: 0, usdUnavailable: true, isNativeSol: true, rawSolAmount: L.gasFundingMaxSol * 2 }),
+      L
+    );
+    expect(v.enroll).toBe(false);
+    expect(v.unknown).toBe(true);
+    expect(v.dust).toBe(false);
+  });
+
   it('GAS EXCEPTION does NOT apply to a non-native-SOL tiny transfer', () => {
     const v = classifyReceiverEnrollment(
       ctx({ transferUsd: L.gasFundingMaxUsd - 1, isNativeSol: false, isReceiverFirstMeaningfulInbound: true }),

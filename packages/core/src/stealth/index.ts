@@ -357,7 +357,15 @@ function computeScore(m: StealthMetrics, cfg: StealthConfig): number {
   // independent of observation and the other penalised cohort — so adding
   // public, crowd, OR observation buyers can only lower the score, never raise
   // it (observation dilutes nothing because it is not in either denominator).
-  const penalty = w.publicPenalty * m.publicKolPressure + w.crowdPenalty * m.crowdPressure;
+  //
+  // Penalty weights are FLOORED at 0: a caller-supplied NEGATIVE penalty weight
+  // would flip a penalty into a bonus and let public/crowd activity RAISE the
+  // score — so a hostile/mistaken config can never breach the load-bearing
+  // invariant. (Positive-driver weights are left as-is; they only read the
+  // eligible cohort and so cannot break it whatever their sign.)
+  const publicPenalty = w.publicPenalty > 0 ? w.publicPenalty : 0;
+  const crowdPenalty = w.crowdPenalty > 0 ? w.crowdPenalty : 0;
+  const penalty = publicPenalty * m.publicKolPressure + crowdPenalty * m.crowdPressure;
 
   const score = 100 * positiveNorm - 100 * clamp01(penalty);
   if (!Number.isFinite(score) || score <= 0) return 0;

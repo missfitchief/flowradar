@@ -137,6 +137,20 @@ describe.skipIf(!(await probePort('localhost', 5439)))('importObservationUnivers
     expect(w!.stats[0]!.source).toBe('provider'); // provider_claimed
   });
 
+  it('does NOT fabricate a realized/unrealized split or a computed score (Codex final review)', async () => {
+    const csv = ['wallet_address,pnl_30d,win_rate,trade_count_30d,avg_trade_size_usd', `${A1},50000,0.6,40,500`].join('\n');
+    await importObservationUniverse(prisma, csv, { now: NOW });
+    const w = await prisma.wallet.findUnique({ where: { address_chain: { address: A1, chain: 'SOLANA' } }, include: { stats: true } });
+    const s = w!.stats[0]!;
+    expect(Number(s.pnlUsd)).toBe(50000); // provider total lives in pnlUsd
+    expect(Number(s.realizedPnlUsd)).toBe(0); // split NOT provided -> not asserted
+    expect(Number(s.unrealizedPnlUsd)).toBe(0);
+    expect(s.walletScore).toBe(0); // NOT computed
+    expect(s.pnlConfidence).toBe(0); // zero local confidence
+    expect((s.scoreComponents as { scoreComputed?: boolean }).scoreComputed).toBe(false);
+    expect((s.scoreComponents as { providerClaimed?: boolean }).providerClaimed).toBe(true);
+  });
+
   it('address-only rows create observation wallets with NO fabricated stats', async () => {
     const csv = ['wallet_address', A2].join('\n');
     const res = await importObservationUniverse(prisma, csv, { now: NOW });

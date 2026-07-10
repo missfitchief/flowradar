@@ -275,6 +275,30 @@ describe('stealth engine — trust-boundary invariants', () => {
     expect(s1).toBeLessThanOrEqual(s0); // more public -> not higher
   });
 
+  it('a NEGATIVE penalty weight cannot turn a penalty into a bonus (Codex final review)', () => {
+    // Codex CRITICAL repro: publicPenalty=-0.5 would flip the public penalty
+    // into a bonus. Penalty weights are floored at 0, so adding public buyers
+    // still cannot raise the score.
+    const cfg = {
+      ...DEFAULT_STEALTH_CONFIG,
+      weights: { ...DEFAULT_STEALTH_CONFIG.weights, publicPenalty: -0.5, crowdPenalty: 0.5 }
+    };
+    const base = input([
+      win('24h', {
+        eligible: flow({ distinctBuyers: 4, buyUsd: 30000, freshBuyers: 3, distinctClusters: 3 }),
+        crowd: flow({ distinctBuyers: 4, buyUsd: 20000 })
+      })
+    ]);
+    const plusPublic = input([
+      win('24h', {
+        eligible: flow({ distinctBuyers: 4, buyUsd: 30000, freshBuyers: 3, distinctClusters: 3 }),
+        crowd: flow({ distinctBuyers: 4, buyUsd: 20000 }),
+        publicKol: flow({ distinctBuyers: 4, buyUsd: 100000 })
+      })
+    ]);
+    expect(computeStealth(plusPublic, cfg).stealthScore).toBeLessThanOrEqual(computeStealth(base, cfg).stealthScore);
+  });
+
   it('does not treat one burst (present in all nested windows) as persistence', () => {
     // Codex HIGH repro: a single burst appears net-positive in every trailing
     // window; persistenceWindows must be 0 (no OUTER-ring growth), not 6.

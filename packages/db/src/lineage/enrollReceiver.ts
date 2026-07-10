@@ -63,6 +63,8 @@ export interface EnrollReceiverResult {
   relationshipKind?: WalletRelationshipKind;
   viaGasException: boolean;
   dust: boolean;
+  /** Inbound value was UNKNOWN (unavailable USD, no gas path) — edge stored, deferred to revaluation, never treated as dust. */
+  unknown: boolean;
   reason: string;
 }
 
@@ -256,7 +258,7 @@ export async function enrollReceiverFromTransfer(
   // round-3). A not_applicable (service/internal-swap leg) is never funding —
   // persist the edge and stop before enrollment.
   if (transfer.valuation?.status === 'not_applicable') {
-    return { edgePersisted, enrolled: false, replay: false, newReceiver: false, enqueued: false, viaGasException: false, dust: false, reason: 'not_applicable (service/internal leg) — edge persisted, never enrolled' };
+    return { edgePersisted, enrolled: false, replay: false, newReceiver: false, enqueued: false, viaGasException: false, dust: false, unknown: false, reason: 'not_applicable (service/internal leg) — edge persisted, never enrolled' };
   }
   const classificationUsd = transfer.valuation ? (transfer.valuation.valuedUsd ?? 0) : transfer.amountUsd;
   // USD is unavailable when a valuation is present but valuedUsd is null, or
@@ -277,7 +279,7 @@ export async function enrollReceiverFromTransfer(
 
   const verdict = classifyReceiverEnrollment(ctx, settings.lineage);
   if (!verdict.enroll) {
-    return { edgePersisted, enrolled: false, replay: false, newReceiver: false, enqueued: false, viaGasException: false, dust: verdict.dust, reason: verdict.reason };
+    return { edgePersisted, enrolled: false, replay: false, newReceiver: false, enqueued: false, viaGasException: false, dust: verdict.dust, unknown: verdict.unknown, reason: verdict.reason };
   }
 
   const senderAddr = transfer.fromAddress;
@@ -318,6 +320,7 @@ export async function enrollReceiverFromTransfer(
       enqueued: false,
       viaGasException: verdict.viaGasException,
       dust: false,
+      unknown: false,
       reason: 'cap reached for a NEW child/receiver — edge persisted only'
     };
   }
@@ -380,6 +383,7 @@ export async function enrollReceiverFromTransfer(
     relationshipKind: kind,
     viaGasException: verdict.viaGasException,
     dust: false,
+    unknown: false,
     reason: newChild ? verdict.reason : 'receiver already related — idempotent re-process'
   };
 }
@@ -493,10 +497,20 @@ async function upsertRelationship(
       sourceChain: 'SOLANA',
       actionType: { in: TRANSFER_FAMILY }
     },
-    select: { txHash: true, amountUsd: true }
+    select: { txHash: true, amountUsd: true, valuedUsd: true, valuationStatus: true }
   });
+  // Sum the HONEST valuation (Wave A) when present, not legacy amountUsd — a
+  // native-SOL edge Helius priced at $0 in amountUsd but revaluation valued in
+  // valuedUsd must contribute its real value to relationship strength (Codex
+  // final review). An UNAVAILABLE edge (valuationStatus set, valuedUsd null)
+  // contributes its legacy amountUsd (0 for native SOL) — unknown, never
+  // fabricated; revaluation reopens and re-sums once a price exists.
   const byTx = new Map<string, number>();
-  for (const e of edges) if (!byTx.has(e.txHash)) byTx.set(e.txHash, Number(e.amountUsd));
+  for (const e of edges) {
+    if (byTx.has(e.txHash)) continue;
+    const usd = e.valuationStatus != null && e.valuedUsd != null ? Number(e.valuedUsd) : Number(e.amountUsd);
+    byTx.set(e.txHash, usd);
+  }
   const interactionCount = byTx.size;
   const valueTransferredUsd = [...byTx.values()].reduce((s, v) => s + v, 0);
   const evidenceSample = [...byTx.entries()].slice(-EVIDENCE_SAMPLE_CAP).map(([txHash, usd]) => ({ txHash, usd }));

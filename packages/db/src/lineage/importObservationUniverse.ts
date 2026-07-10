@@ -212,8 +212,16 @@ export async function importObservationUniverse(
       result.walletsExisting += 1;
       if (existing.status !== 'observation_only') result.classificationsPreserved += 1;
     } else {
-      const created = await prisma.wallet.create({
-        data: {
+      // Atomic create-or-preserve (Codex final review): a non-cooperating writer
+      // (candidate promotion, ingestion — none of which take this advisory lock)
+      // may create this wallet between the findUnique above and here. upsert with
+      // an EMPTY update never P2002s and never re-statuses an existing row, so a
+      // concurrently-created public_kol/signal_eligible wallet is preserved. (In
+      // that rare race walletsCreated may over-count by 1 — a cosmetic stat; the
+      // write and the status-preservation invariant stay correct.)
+      const created = await prisma.wallet.upsert({
+        where: { address_chain: { address: row.address, chain: 'SOLANA' } },
+        create: {
           address: row.address,
           chain: 'SOLANA',
           firstSeenAt: now,
@@ -222,15 +230,18 @@ export async function importObservationUniverse(
           status: 'observation_only', // NEVER signal_eligible via this path
           notes: `observation-universe:${row.source}${opts.provenance ? ` (${opts.provenance})` : ''}`
         },
+        update: {}, // existing row: preserve status/everything — never re-status
         select: { id: true }
       });
       walletId = created.id;
       result.walletsCreated += 1;
     }
 
-    // Store provider stats as provider_claimed (source='provider') ONLY when
-    // the row supplied a complete set — never fabricated. Skip if a stats row
-    // for this window already exists (idempotent; don't clobber).
+    // Store provider stats as provider_claimed (source='provider') ONLY when the
+    // row supplied a complete set — never fabricated. Skip if a provider/30d row
+    // already exists (idempotent; don't clobber). Only THIS importer writes
+    // source='provider' window='30d' rows and it runs under the global lock, so
+    // the count→create is race-free against other provider-stats writers.
     if (row.providerStats) {
       const hasStats = await prisma.walletStats.count({ where: { walletId, source: 'provider', window: '30d' } });
       if (hasStats === 0) {
@@ -238,14 +249,26 @@ export async function importObservationUniverse(
           data: {
             walletId,
             window: '30d',
+            // The provider reports a single 30d PnL TOTAL — recorded in pnlUsd.
+            // We do NOT know the realized/unrealized split and do NOT compute a
+            // walletScore, so those are 0 = UNKNOWN/not-asserted (never a
+            // fabricated breakdown or a "computed score of 0"). source=provider
+            // (provider_claimed) + pnlConfidence=0 + the scoreComponents note
+            // are the untrust markers. On observation_only wallets these numbers
+            // carry zero signal weight regardless. (Codex final review.)
             pnlUsd: row.providerStats.pnl30d,
-            realizedPnlUsd: row.providerStats.pnl30d,
+            realizedPnlUsd: 0,
             unrealizedPnlUsd: 0,
             winRate: row.providerStats.winRate,
             tradeCount: row.providerStats.tradeCount,
             avgTradeSizeUsd: row.providerStats.avgTradeSizeUsd,
             walletScore: 0,
-            scoreComponents: {},
+            scoreComponents: {
+              providerClaimed: true,
+              breakdownProvided: false,
+              scoreComputed: false,
+              note: 'observation-universe provider stats: 30d PnL total only in pnlUsd; realized/unrealized split and walletScore NOT provided and NOT computed (0 = unknown, not asserted).'
+            },
             pnlConfidence: 0,
             source: 'provider', // provider_claimed trust — NOT locally verified
             computedAt: now

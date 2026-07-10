@@ -72,6 +72,15 @@ export interface EnrollmentVerdict {
   viaGasException: boolean;
   /** Inbound was dust (<= dustMaxUsd): edge only, no enrollment, no strong link. */
   dust: boolean;
+  /**
+   * Inbound value is UNKNOWN (a valuation was attempted but USD is unavailable
+   * and the raw-SOL gas path did not apply): edge stored, NOT enrolled, and —
+   * critically — NOT classified as dust. Unknown ≠ zero/safe: it is deferred to
+   * revaluation, which reopens the node and re-runs enrollment once a price is
+   * available. Distinct from `dust` so an unpriced (possibly large) transfer is
+   * never silently treated as benign.
+   */
+  unknown: boolean;
   /** Human-readable decision reason (audit + stop-reason persistence). */
   reason: string;
 }
@@ -83,7 +92,7 @@ export interface EnrollmentVerdict {
  * that enrolls below minTransferUsd.
  */
 export function classifyReceiverEnrollment(ctx: ReceiverContext, config: LineageConfig): EnrollmentVerdict {
-  const base = { persistEdge: true, hot: false, viaGasException: false, dust: false };
+  const base = { persistEdge: true, hot: false, viaGasException: false, dust: false, unknown: false };
 
   if (!ctx.senderTrusted) {
     return { ...base, enroll: false, reason: 'sender is untrusted (not root/signal_eligible/strong-linked)' };
@@ -118,6 +127,16 @@ export function classifyReceiverEnrollment(ctx: ReceiverContext, config: Lineage
       relationshipKind: 'first_funder',
       reason: 'raw-SOL gas-funding exception — first native-SOL funding within bounds + prompt activation (USD unavailable)'
     };
+  }
+
+  // UNKNOWN value (Codex final review): a transfer whose USD is unavailable and
+  // which the raw-SOL gas path above did NOT enroll must NOT fall through to the
+  // dust test below — its classificationUsd is a placeholder 0, and calling a
+  // possibly-large unpriced transfer "dust" would treat unknown as benign
+  // (violates "unknown ≠ zero/safe"). Persist the edge, do not enroll, and defer
+  // to revaluation (which reopens the node once a price exists).
+  if (ctx.usdUnavailable === true) {
+    return { ...base, enroll: false, unknown: true, reason: 'USD value unavailable — edge stored, value UNKNOWN (never dust); deferred to revaluation' };
   }
 
   // Dust is dust regardless of asset (2026-07-10 Codex review): the USD
