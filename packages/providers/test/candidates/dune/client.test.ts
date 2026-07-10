@@ -189,6 +189,109 @@ describe('createDuneClient', () => {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // Error-state honesty (2026-07-10 cross-model audit finding): a Dune
+  // execution that terminates FAILED/CANCELED/EXPIRED — or an HTTP-200
+  // results payload carrying the documented `error` field — must REJECT,
+  // never silently resolve as an empty-but-successful result set. Silent
+  // empty results are indistinguishable from "query genuinely matched
+  // nothing", which downstream code treats as a valid answer.
+  // ---------------------------------------------------------------------------
+  it('ERROR HONESTY: fresh execution ending QUERY_STATE_FAILED rejects and never fetches /results', async () => {
+    const calls: { url: string; method: string }[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, method: init?.method ?? 'GET' });
+      if (url.includes('/execute')) {
+        return fakeFetchResponse({ execution_id: 'exec_fail_1', state: 'QUERY_STATE_PENDING' });
+      }
+      if (url.includes('/status')) {
+        return fakeFetchResponse({
+          execution_id: 'exec_fail_1',
+          is_execution_finished: true,
+          state: 'QUERY_STATE_FAILED',
+          error: { type: 'FAILED_TYPE_EXECUTION_FAILED', message: 'division by zero' }
+        });
+      }
+      // /results must never be reached for a failed execution.
+      return fakeFetchResponse({ execution_id: 'exec_fail_1', state: 'QUERY_STATE_FAILED', result: { rows: [] } });
+    }) as unknown as typeof fetch;
+
+    const client = createDuneClient({ DUNE_API_KEY: 'k', DUNE_EXECUTE_FRESH: 'true' }, { rps: 100 });
+
+    await expect(client!.executeQuery('55', { useLatestCached: false })).rejects.toThrow(/QUERY_STATE_FAILED|division by zero/);
+    expect(calls.some((c) => c.url.includes('/execution/exec_fail_1/results'))).toBe(false);
+  });
+
+  it('ERROR HONESTY: fresh execution ending QUERY_STATE_CANCELED (no error field) rejects naming the state', async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/execute')) {
+        return fakeFetchResponse({ execution_id: 'exec_cancel_1', state: 'QUERY_STATE_PENDING' });
+      }
+      return fakeFetchResponse({ execution_id: 'exec_cancel_1', is_execution_finished: true, state: 'QUERY_STATE_CANCELED' });
+    }) as unknown as typeof fetch;
+
+    const client = createDuneClient({ DUNE_API_KEY: 'k', DUNE_EXECUTE_FRESH: 'true' }, { rps: 100 });
+    await expect(client!.executeQuery('55', { useLatestCached: false })).rejects.toThrow(/QUERY_STATE_CANCELED/);
+  });
+
+  it('ERROR HONESTY: cached-result payload carrying the `error` field rejects instead of resolving empty rows', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      fakeFetchResponse({
+        execution_id: 'exec_err_1',
+        state: 'QUERY_STATE_FAILED',
+        error: { type: 'FAILED_TYPE_EXECUTION_FAILED', message: 'last execution failed' }
+      })
+    ) as unknown as typeof fetch;
+
+    const client = createDuneClient({ DUNE_API_KEY: 'k' }, { rps: 100 });
+    await expect(client!.executeQuery('88')).rejects.toThrow(/last execution failed|QUERY_STATE_FAILED/);
+  });
+
+  it('ERROR HONESTY: COMPLETED_PARTIAL rejects — this client never sends allow_partial_results, so a partial payload is out-of-contract and must not masquerade as a complete result', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      fakeFetchResponse({
+        execution_id: 'exec_part_1',
+        state: 'QUERY_STATE_COMPLETED_PARTIAL',
+        result: { rows: [{ wallet_address: 'P1' }], metadata: { row_count: 1 } }
+      })
+    ) as unknown as typeof fetch;
+
+    const client = createDuneClient({ DUNE_API_KEY: 'k' }, { rps: 100 });
+    await expect(client!.executeQuery('99')).rejects.toThrow(/QUERY_STATE_COMPLETED_PARTIAL/);
+  });
+
+  it('ERROR HONESTY: cached result in QUERY_STATE_EXPIRED rejects', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      fakeFetchResponse({ execution_id: 'exec_exp_1', state: 'QUERY_STATE_EXPIRED' })
+    ) as unknown as typeof fetch;
+
+    const client = createDuneClient({ DUNE_API_KEY: 'k' }, { rps: 100 });
+    await expect(client!.executeQuery('66')).rejects.toThrow(/QUERY_STATE_EXPIRED/);
+  });
+
+  it('ERROR HONESTY: fresh path rejects when the status poll succeeds but the /results payload itself carries the error field', async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/execute')) {
+        return fakeFetchResponse({ execution_id: 'exec_late_1', state: 'QUERY_STATE_PENDING' });
+      }
+      if (url.includes('/status')) {
+        return fakeFetchResponse({ execution_id: 'exec_late_1', is_execution_finished: true, state: 'QUERY_STATE_COMPLETED' });
+      }
+      // /results: HTTP 200 but the payload reports an error.
+      return fakeFetchResponse({
+        execution_id: 'exec_late_1',
+        state: 'QUERY_STATE_COMPLETED',
+        error: { type: 'FAILED_TYPE_UNSPECIFIED', message: 'result store error' }
+      });
+    }) as unknown as typeof fetch;
+
+    const client = createDuneClient({ DUNE_API_KEY: 'k', DUNE_EXECUTE_FRESH: 'true' }, { rps: 100 });
+    await expect(client!.executeQuery('55', { useLatestCached: false })).rejects.toThrow(/result store error/);
+  });
+
   it('truncated=true when rowsReturned hits the requested limit', async () => {
     globalThis.fetch = vi.fn(async () =>
       fakeFetchResponse({

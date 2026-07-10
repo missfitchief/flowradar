@@ -125,16 +125,26 @@ export async function runCandidateValidation(
     return summary;
   }
 
-  // Mark the whole batch 'validating' up front (Task 35 binding decision 2's
-  // pending -> validating -> {promoted|rejected|pending} lifecycle) so a
-  // concurrent validation pass (worker + a manual seed run) never double-picks
-  // the same row.
-  await prisma.candidateWallet.updateMany({
-    where: { id: { in: pendingCandidates.map((c) => c.id) } },
-    data: { validationStatus: 'validating' }
-  });
-
   for (const candidate of pendingCandidates) {
+    // Atomic per-row claim (Task 35 binding decision 2's pending ->
+    // validating -> {promoted|rejected|pending} lifecycle; hardened 2026-07-10
+    // Codex-review Critical): the status guard makes claiming compare-and-set,
+    // so a row a concurrent pass (worker + manual seed run) already claimed or
+    // resolved since the batch select above is SKIPPED — the old blanket
+    // batch updateMany would re-claim it, double-process it, and could even
+    // demote a just-promoted row back to 'validating'.
+    const claim = await prisma.candidateWallet.updateMany({
+      where: { id: candidate.id, validationStatus: 'pending' },
+      data: { validationStatus: 'validating' }
+    });
+    if (claim.count === 0) {
+      log?.info('candidateValidation: candidate claimed/resolved by a concurrent pass — skipping', {
+        candidateId: candidate.id,
+        walletAddress: candidate.walletAddress
+      });
+      continue;
+    }
+
     try {
       const evidence = await assembleEvidence(prisma, candidate.chain as Chain, candidate.walletAddress, resolveProviderPnl);
 
@@ -160,21 +170,29 @@ export async function runCandidateValidation(
             `runCandidateValidation: 'promote' verdict with no computedPnl/evidenceSource for ${candidate.walletAddress} — programming error, evidence gate should have prevented this`
           );
         }
-        const walletId = await promoteCandidate(
-          prisma,
-          candidate,
-          evidence.evidence.computedPnl,
-          evidence.evidenceSource,
-          evidence.evidence.labels ?? []
-        );
-        await prisma.candidateWallet.update({
-          where: { id: candidate.id },
-          data: {
-            validationStatus: 'promoted',
-            promotedWalletId: walletId,
-            validationConfidence: result.confidence,
-            rejectionReason: null
-          }
+        // Atomic promotion (2026-07-10 audit): the wallet promotion
+        // (isWatched=true + stats row) and the candidate's 'promoted' status
+        // write commit or roll back TOGETHER. Pre-fix they were sequential
+        // writes, so a crash between them left a watched wallet (already
+        // counting toward signals) whose candidate row the error handler
+        // reset to 'pending'.
+        await prisma.$transaction(async (tx) => {
+          const walletId = await promoteCandidate(
+            tx,
+            candidate,
+            evidence.evidence.computedPnl!,
+            evidence.evidenceSource!,
+            evidence.evidence.labels ?? []
+          );
+          await tx.candidateWallet.update({
+            where: { id: candidate.id },
+            data: {
+              validationStatus: 'promoted',
+              promotedWalletId: walletId,
+              validationConfidence: result.confidence,
+              rejectionReason: null
+            }
+          });
         });
         promoted += 1;
       } else if (result.verdict === 'reject') {
@@ -213,9 +231,12 @@ export async function runCandidateValidation(
       const message = err instanceof Error ? err.message : String(err);
       // Reset to 'pending' so a transient failure doesn't strand the
       // candidate in 'validating' forever (never picked up again by the
-      // `validationStatus: 'pending'` query above).
+      // `validationStatus: 'pending'` query above). Guarded on 'validating'
+      // (2026-07-10 Codex-review Critical): if a concurrent pass committed a
+      // terminal status for this row in the meantime, the reset must not
+      // clobber it back to 'pending'.
       await prisma.candidateWallet
-        .update({ where: { id: candidate.id }, data: { validationStatus: 'pending' } })
+        .updateMany({ where: { id: candidate.id, validationStatus: 'validating' }, data: { validationStatus: 'pending' } })
         .catch(() => undefined);
       log?.error('candidateValidation: failed to validate candidate', {
         candidateId: candidate.id,
@@ -412,7 +433,12 @@ async function computeLocalPnlEvidence(prisma: PrismaClient, walletId: string): 
  * demote that wallet's Layer-1-authoritative CSV stats to no-longer-latest.
  */
 async function promoteCandidate(
-  prisma: PrismaClient,
+  // Transaction-compatible: runCandidateValidation calls this inside
+  // prisma.$transaction so the wallet promotion and the candidate's
+  // 'promoted' status write commit or roll back together (atomic-promotion
+  // fix, 2026-07-10 audit). Only model delegates are used here — a plain
+  // PrismaClient still satisfies this type for tests/direct callers.
+  prisma: Prisma.TransactionClient,
   candidate: { walletAddress: string; chain: Chain; source: string },
   computedPnl: ComputedPnlEvidence,
   evidenceSource: 'provider' | 'computed',

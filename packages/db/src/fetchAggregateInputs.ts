@@ -168,7 +168,8 @@ export async function fetchAggregateInputs(
         realizedPnlUsd: true,
         winRate: true,
         tradeCount: true,
-        avgTradeSizeUsd: true
+        avgTradeSizeUsd: true,
+        source: true
       }
     }),
     prisma.walletClassification.findMany({
@@ -203,21 +204,30 @@ export async function fetchAggregateInputs(
 
   const wallets: WalletInfoInput[] = walletIds.map((walletId) => {
     const stats = latestStatsByWallet.get(walletId);
-    const meetsProfitable = stats
-      ? isProfitableWallet(
-          {
-            pnlUsd: Number(stats.pnlUsd),
-            realizedPnlUsd: Number(stats.realizedPnlUsd),
-            winRate: stats.winRate,
-            tradeCount: stats.tradeCount,
-            avgTradeSizeUsd: Number(stats.avgTradeSizeUsd)
-          },
-          settings.profitableWallet
-        )
-      : false;
+    const isWatched = isWatchedByWallet.get(walletId) ?? false;
+    // Trust boundary (2026-07-10 audit): provider-REPORTED stats confer
+    // meetsProfitable only for a watched wallet (promotion sets isWatched, so
+    // candidate-validated wallets keep counting). An unwatched wallet whose
+    // only stats row is an external provider's claim (legacy walletDiscovery
+    // path, source='provider') must NOT count as smart money — csv stats are
+    // operator-vouched and computed stats are FIFO over real ingested trades,
+    // so both stay trusted on their own.
+    const meetsProfitable =
+      stats && (stats.source !== 'provider' || isWatched)
+        ? isProfitableWallet(
+            {
+              pnlUsd: Number(stats.pnlUsd),
+              realizedPnlUsd: Number(stats.realizedPnlUsd),
+              winRate: stats.winRate,
+              tradeCount: stats.tradeCount,
+              avgTradeSizeUsd: Number(stats.avgTradeSizeUsd)
+            },
+            settings.profitableWallet
+          )
+        : false;
     return {
       walletId,
-      isWatched: isWatchedByWallet.get(walletId) ?? false,
+      isWatched,
       walletScore: stats?.walletScore ?? 0,
       labels: labelsByWallet.get(walletId) ?? [],
       meetsProfitable
