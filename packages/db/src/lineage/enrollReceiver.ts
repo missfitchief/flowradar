@@ -248,18 +248,15 @@ export async function enrollReceiverFromTransfer(
   // interaction still counts, idempotent repair/promotion still runs). Decide
   // new-vs-existing up front so a capped node still services existing links.
   const receiverWalletIdForCap = receiverWallet?.id ?? null;
+  // "Existing child" is ANY-KIND (Codex round-8): a receiver already counted
+  // under first_funder that is later observed as direct_funding is NOT a new
+  // distinct child, so the child cap must not reject it. Match the driver's
+  // distinct-by-walletB child accounting.
   const relExists =
     receiverWalletIdForCap !== null &&
     senderWalletIdForRel !== null &&
-    (await prisma.walletRelationship.findUnique({
-      where: {
-        lineageRootId_walletAId_walletBId_kind: {
-          lineageRootId,
-          walletAId: senderWalletIdForRel,
-          walletBId: receiverWalletIdForCap,
-          kind
-        }
-      },
+    (await prisma.walletRelationship.findFirst({
+      where: { lineageRootId, walletAId: senderWalletIdForRel, walletBId: receiverWalletIdForCap },
       select: { id: true }
     })) !== null;
   const subExists =
