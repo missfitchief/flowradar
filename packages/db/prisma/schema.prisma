@@ -264,6 +264,9 @@ model Wallet {
   rotationsAsDest   ProfitRotationSignal[] @relation("ProfitRotationDest")
   /// Reverse side of CandidateWallet.promotedWalletId (Task 34/35 — Wave 4.5).
   promotedFromCandidates CandidateWallet[]
+  /// Capital Lineage Engine (Phase 6a): at most one permanent root record.
+  lineageRoot            LineageRoot?
+  monitoringSubscriptions MonitoringSubscription[]
 
   @@unique([address, chain])
   @@index([status])
@@ -1196,4 +1199,72 @@ model TokenConfluenceSnapshot {
   @@index([provider, snapshotType])
   @@index([observedAt])
   @@map("token_confluence_snapshots")
+}
+
+// ---------------------------------------------------------------------------
+// Capital Lineage Engine — Phase 6a (feat/pre-public-accumulation, operator
+// directive 2026-07-10). Roots are operator-supplied or validation-earned
+// wallets whose money flow is tracked permanently; monitoring subscriptions
+// are the scheduler's work queue (NO per-root timers — batches, cursors,
+// provider rate budgets).
+// ---------------------------------------------------------------------------
+
+/// MonitoringSubscription.priority — scheduler tiers, highest first.
+enum MonitoringPriority {
+  fresh_receiver_hot
+  root_permanent
+  standard
+  weak_cold
+}
+
+model LineageRoot {
+  id                  String   @id @default(cuid())
+  walletId            String   @unique
+  /// Where this root came from: 'operator_file' (manual import),
+  /// 'validated_promotion' (Phase 6b+: wallets that pass local validation
+  /// get their own root-expansion job), etc. Plain String, small vocab.
+  source              String
+  /// Optional operator label preserved from the import file's inline
+  /// comment ("addr | label" / "addr # label").
+  label               String?
+  /// Import provenance (filename), for audit. Never a parsing input.
+  fileProvenance      String?
+  /// Roots are permanent by contract: absence from a LATER import file
+  /// never deletes or deactivates a root (operator requirement 8).
+  permanent           Boolean  @default(true)
+  firstImportedAt     DateTime
+  /// Bumped on every import that mentions this root again (idempotent
+  /// re-import telemetry — NOT a liveness/expiry mechanism).
+  lastSeenInImportAt  DateTime
+
+  wallet              Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  subscriptions       MonitoringSubscription[]
+
+  @@index([source])
+  @@map("lineage_roots")
+}
+
+model MonitoringSubscription {
+  id            String             @id @default(cuid())
+  walletId      String
+  priority      MonitoringPriority
+  active        Boolean            @default(true)
+  /// Human-readable why: 'operator_root_import', 'first_funder of <addr>',
+  /// 'weak_link_cooldown', ... Probabilistic wording only — never identity
+  /// claims.
+  reason        String
+  /// The lineage root this subscription hangs off (a receiver's
+  /// subscription points at its funder's root). Null for standalone tiers.
+  lineageRootId String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  wallet        Wallet             @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  lineageRoot   LineageRoot?       @relation(fields: [lineageRootId], references: [id], onDelete: SetNull)
+
+  /// One subscription per wallet per tier — re-imports upsert, never stack.
+  @@unique([walletId, priority])
+  /// The scheduler's read path: active subscriptions by tier, batched.
+  @@index([priority, active])
+  @@map("monitoring_subscriptions")
 }
