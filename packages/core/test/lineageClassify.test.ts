@@ -86,6 +86,31 @@ describe('classifyReceiverEnrollment', () => {
     expect(v.viaGasException).toBe(true);
   });
 
+  it('RAW-SOL GAS: an unpriced ($0) first native-SOL funding within SOL bounds enrolls (USD unavailable)', () => {
+    const v = classifyReceiverEnrollment(
+      ctx({ transferUsd: 0, isNativeSol: true, rawSolAmount: 0.01, isReceiverFirstMeaningfulInbound: true, receiverBecameActiveWithinWindow: true }),
+      L
+    );
+    expect(v.enroll).toBe(true);
+    expect(v.viaGasException).toBe(true);
+    expect(v.relationshipKind).toBe('first_funder');
+  });
+
+  it('RAW-SOL GAS: below gasFundingMinSol does NOT enroll (dust-scale)', () => {
+    const v = classifyReceiverEnrollment(ctx({ transferUsd: 0, isNativeSol: true, rawSolAmount: L.gasFundingMinSol / 2 }), L);
+    expect(v.enroll).toBe(false);
+  });
+
+  it('RAW-SOL GAS: above gasFundingMaxSol does NOT enroll on the raw path', () => {
+    const v = classifyReceiverEnrollment(ctx({ transferUsd: 0, isNativeSol: true, rawSolAmount: L.gasFundingMaxSol * 2 }), L);
+    expect(v.enroll).toBe(false);
+  });
+
+  it('RAW-SOL GAS: requires activation in window', () => {
+    const v = classifyReceiverEnrollment(ctx({ transferUsd: 0, isNativeSol: true, rawSolAmount: 0.01, receiverBecameActiveWithinWindow: false }), L);
+    expect(v.enroll).toBe(false);
+  });
+
   it('GAS EXCEPTION does NOT apply to a non-native-SOL tiny transfer', () => {
     const v = classifyReceiverEnrollment(
       ctx({ transferUsd: L.gasFundingMaxUsd - 1, isNativeSol: false, isReceiverFirstMeaningfulInbound: true }),

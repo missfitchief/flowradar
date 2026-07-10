@@ -245,6 +245,7 @@ export async function enrollReceiverFromTransfer(
     senderTrusted,
     transferUsd: classificationUsd,
     isNativeSol: transfer.isNativeSol,
+    rawSolAmount: transfer.isNativeSol ? transfer.amountToken : null,
     receiverIsFreshOrInactive,
     receiverIsServiceOrProgram: receiverIsService,
     isReceiverFirstMeaningfulInbound: priorMeaningfulInbound === 0,

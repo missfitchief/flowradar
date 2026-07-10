@@ -13,6 +13,8 @@ import type { WalletRelationshipKind } from '../types';
 type LineageConfig = {
   minTransferUsd: number;
   gasFundingMaxUsd: number;
+  gasFundingMinSol: number;
+  gasFundingMaxSol: number;
   dustMaxUsd: number;
   serviceDegreeThreshold: number;
 };
@@ -43,6 +45,8 @@ export interface ReceiverContext {
   transferUsd: number;
   /** True when the transfer is native SOL (gas-funding exception is SOL-only). */
   isNativeSol: boolean;
+  /** Raw native-SOL amount (for the raw-SOL gas path when USD is unavailable); null otherwise. */
+  rawSolAmount?: number | null;
   /** Receiver is fresh / empty / previously unknown / long-inactive. */
   receiverIsFreshOrInactive: boolean;
   /** Receiver is a service/program/router/pool/bridge/CEX (never hot-enroll). */
@@ -85,10 +89,34 @@ export function classifyReceiverEnrollment(ctx: ReceiverContext, config: Lineage
   if (ctx.receiverIsServiceOrProgram) {
     return { ...base, enroll: false, reason: 'receiver is a service/program node — edge stored, never hot-enrolled' };
   }
-  // Dust is dust regardless of asset (2026-07-10 Codex review): the
-  // gas-funding exception below is the ONLY sub-dust enrollment path, and it
-  // requires transferUsd strictly ABOVE dustMaxUsd, so classifying native SOL
-  // as dust here cannot suppress a legitimate gas funding.
+
+  // RAW-SOL gas-funding path (Wave B2): a FIRST native-SOL funding whose USD
+  // value is UNAVAILABLE (Helius doesn't price native SOL) can still enroll on
+  // the RAW SOL amount alone — bounded to [gasFundingMinSol, gasFundingMaxSol]
+  // — when the receiver is fresh, this is its first meaningful inbound, and it
+  // becomes active within the window. Checked BEFORE the USD dust cutoff so an
+  // unpriced ($0-classified) gas funding is not swallowed as dust.
+  if (
+    ctx.isNativeSol &&
+    ctx.rawSolAmount != null &&
+    ctx.rawSolAmount >= config.gasFundingMinSol &&
+    ctx.rawSolAmount <= config.gasFundingMaxSol &&
+    ctx.receiverIsFreshOrInactive &&
+    ctx.isReceiverFirstMeaningfulInbound &&
+    ctx.receiverBecameActiveWithinWindow
+  ) {
+    return {
+      ...base,
+      enroll: true,
+      hot: true,
+      viaGasException: true,
+      relationshipKind: 'first_funder',
+      reason: 'raw-SOL gas-funding exception — first native-SOL funding within bounds + prompt activation (USD unavailable)'
+    };
+  }
+
+  // Dust is dust regardless of asset (2026-07-10 Codex review): the USD
+  // gas-funding exception below requires transferUsd strictly ABOVE dustMaxUsd.
   if (ctx.transferUsd <= config.dustMaxUsd) {
     return { ...base, enroll: false, dust: true, reason: 'inbound is dust — edge stored, no enrollment, no strong relationship' };
   }
