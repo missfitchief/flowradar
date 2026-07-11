@@ -7,6 +7,12 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     passWithNoTests: true,
+    // TEST/LIVE DB isolation (overnight Task A): provisions flowradar_test on
+    // the embedded cluster + deploys the SAME migrations before any project
+    // runs. Test-mode URL resolution itself lives in packages/db/src/testDb.ts
+    // (fail-closed under process.env.VITEST) — this setup only ensures the
+    // target database exists and matches live schema.
+    globalSetup: ['./test/vitestGlobalSetup.ts'],
     projects: [
       {
         test: {
