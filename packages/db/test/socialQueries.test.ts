@@ -88,7 +88,12 @@ describe.skipIf(!dbReachable)('social queries (DB integration)', () => {
       }
     });
 
-    const rows = await getRecentMentions(prisma, { limit: 10 });
+    // limit generously above any seeded-world mention count: this test's own
+    // rows are found by PREFIX filter, so it must not depend on being inside
+    // the global top-N — `db:seed` runs a real mock social-ingest pass whose
+    // newer mentions repeatedly pushed these fixtures out of a top-10 window
+    // (recurring dirty-DB flake, hardened 2026-07-10).
+    const rows = await getRecentMentions(prisma, { limit: 500 });
     const mine = rows.filter((r) => r.sourceName === `${PREFIX}tg`);
     expect(mine).toHaveLength(2);
     // Newest first.

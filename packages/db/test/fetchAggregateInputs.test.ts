@@ -63,7 +63,7 @@ async function seedTokenWithHistory(now: Date) {
     data: { chain: CHAIN, address: `${ADDR_PREFIX}_tok`, symbol: 'F8', name: 'F8 token', decimals: 9, firstSeenAt: now, riskFlags: [] }
   });
   const wallet = await prisma.wallet.create({
-    data: { address: `${ADDR_PREFIX}_w`, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true }
+    data: { address: `${ADDR_PREFIX}_w`, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: true, status: 'signal_eligible' }
   });
   // A few BUY trades over the last ~2h (so the window has real in-window trades).
   // Latest trade is at now-80m, so aggregateWindow anchors `to = now-80m`.

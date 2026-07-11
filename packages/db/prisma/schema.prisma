@@ -32,10 +32,32 @@ enum ChainId {
 }
 
 /// WalletStats.source — where a stats window's numbers ultimately came from.
+/// Trust mapping (Phase 0, feat/pre-public-accumulation; see
+/// @flowradar/core statsTrustOf): csv=operator_approved,
+/// computed=locally_verified, provider=provider_claimed,
+/// synthetic=synthetic (reserved for backtest continuations — no writer yet).
 enum StatsSource {
   csv
   computed
   provider
+  synthetic
+}
+
+/// Wallet.status — THE single signal-eligibility gate (Phase 0,
+/// feat/pre-public-accumulation). Only 'signal_eligible' wallets can ever
+/// count toward early smart-money metrics (enforced at ONE point:
+/// @flowradar/core isSignalEligibleStatus inside aggregateWindow's isSmart).
+/// public_kol / public_promoter / copytrader feed late-stage crowd-arrival
+/// metrics only (Phases 1-3). observation_only wallets are still polled and
+/// their activity persisted — they just carry zero signal weight.
+enum WalletStatus {
+  observation_only
+  signal_eligible
+  public_kol
+  public_promoter
+  copytrader
+  bot_or_service
+  excluded
 }
 
 /// WalletClassification.label — 11 values.
@@ -223,9 +245,16 @@ model Wallet {
   firstSeenAt     DateTime
   lastActiveAt    DateTime
   isWatched       Boolean   @default(false)
+  /// DEPRECATED (Phase 0, feat/pre-public-accumulation): superseded by
+  /// status='excluded'. Zero code references existed when status landed;
+  /// column kept only to avoid a destructive drop in the same migration.
   isExcluded      Boolean   @default(false)
   exclusionReason String?
   notes           String?
+  /// Single signal-eligibility gate — see WalletStatus enum docs. Default
+  /// observation_only: a wallet earns eligibility ONLY via operator CSV
+  /// import, candidate promotion, or explicit operator action.
+  status          WalletStatus @default(observation_only)
 
   stats           WalletStats[]
   classifications WalletClassification[]
@@ -235,8 +264,15 @@ model Wallet {
   rotationsAsDest   ProfitRotationSignal[] @relation("ProfitRotationDest")
   /// Reverse side of CandidateWallet.promotedWalletId (Task 34/35 — Wave 4.5).
   promotedFromCandidates CandidateWallet[]
+  /// Capital Lineage Engine (Phase 6a): at most one permanent root record.
+  lineageRoot            LineageRoot?
+  monitoringSubscriptions MonitoringSubscription[]
+  relationshipsAsSender   WalletRelationship[] @relation("RelationshipSender")
+  relationshipsAsReceiver WalletRelationship[] @relation("RelationshipReceiver")
+  observationSnapshots    ObservationProviderSnapshot[]
 
   @@unique([address, chain])
+  @@index([status])
   @@map("wallets")
 }
 
@@ -316,9 +352,64 @@ model Token {
   /// Token orphans (never deletes) its confluence snapshots — they keep pointing at
   /// the (chain, tokenAddress) pair. NEVER feeds FlowScore / signals / wallet scoring.
   confluenceSnapshots TokenConfluenceSnapshot[]
+  stealthSnapshots    StealthSnapshot[]
+  riskSnapshot        TokenRiskSnapshot?
 
   @@unique([chain, address])
   @@map("tokens")
+}
+
+/// StealthSnapshot.state — the shadow accumulation lifecycle (Wave F engine).
+enum StealthState {
+  WATCHING
+  STEALTH_ACCUMULATION
+  EARLY_INDEPENDENT_CONFIRMATION
+  PUBLIC_KOL_ARRIVAL
+  CROWD_EXPANSION
+  DISTRIBUTION_RISK
+  INVALIDATED
+}
+
+/// StealthSnapshot — SHADOW-ONLY persisted output of the pure stealth
+/// accumulation engine (packages/core/src/stealth). One row per
+/// (token, evaluation bucket); re-running a pass inside the same bucket
+/// UPSERTS (replay-idempotent, never duplicates). NOTHING reads this model
+/// for FlowScore, signals, thresholds, or eligibility — it is evidence +
+/// lifecycle state for operators and later forward-outcome evaluation.
+model StealthSnapshot {
+  id                  String       @id @default(cuid())
+  tokenId             String
+  chain               ChainId
+  state               StealthState
+  /// State of the previous bucket's snapshot (null for the first).
+  previousState       StealthState?
+  stateChanged        Boolean
+  /// 0-100 SHADOW score from the pure engine. NOT a FlowScore.
+  stealthScore        Float
+  /// Full StealthMetrics object (~27 structural fields), verbatim.
+  metrics             Json
+  /// Extra evidence components the engine input was built from:
+  /// per-window cohort flows, fresh-funded-receiver buyer count,
+  /// liquidity/holder/social conflict notes, windows covered.
+  evidence            Json
+  /// Plain-English one-paragraph explanation of state + why.
+  explanation         String
+  /// Plain-English invalidation/risk reasons (empty array unless the state
+  /// carries risk: DISTRIBUTION_RISK / INVALIDATED / PUBLIC_KOL_ARRIVAL).
+  invalidationReasons Json
+  /// Evaluation bucket start (computedAt floored to the pass interval) —
+  /// the replay-idempotency key component.
+  bucketTs            DateTime
+  computedAt          DateTime
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  token               Token        @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@unique([tokenId, bucketTs])
+  @@index([state, bucketTs])
+  @@index([tokenId, computedAt])
+  @@map("stealth_snapshots")
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +591,60 @@ model ProviderSyncState {
   @@map("provider_sync_states")
 }
 
+/// TokenRiskSnapshot.status — the RESULT of the last risk fetch (freshness is
+/// DERIVED at read time from observedAt/expiresAt, not stored here).
+enum RiskSnapshotStatus {
+  ok // holder/supply data fetched, penalty+flags meaningful
+  unavailable // honestly unavailable (e.g. mega-holder mint) — penalty 0 is NOT "safe"
+  throttled // provider 429 — nextRefreshAt backs off
+  error // other provider/RPC error — retried with backoff
+}
+
+/// TokenRiskSnapshot — canonical cache of per-token risk (Helius holder/supply
+/// checks). Eliminates the per-token, per-cycle live risk calls that
+/// flowScoring + entityClustering were each issuing (the 429 burst). The
+/// bounded tokenRiskRefresh job is the ONLY writer of live provider data here;
+/// scoring/clustering READ this cache. Does NOT change FlowScore: a fresh row
+/// returns the exact {penalty, flags} the live call produced.
+model TokenRiskSnapshot {
+  id            String             @id @default(cuid())
+  tokenId       String             @unique
+  chain         ChainId
+  tokenAddress  String
+  provider      String
+  /// When a refresh was last ATTEMPTED (success or failure).
+  requestedAt   DateTime
+  /// When the underlying provider data was OBSERVED (success only). Drives freshness.
+  observedAt    DateTime?
+  status        RiskSnapshotStatus
+  /// RiskReport.flags verbatim (JSON) — reconstructs the exact report on read.
+  flags         Json
+  /// RiskReport.penalty (0..1) — the ONLY field FlowScore reads.
+  penalty       Float
+  /// 0..100 confidence in this snapshot (lower when stale/unavailable/derived).
+  confidence    Float
+  /// Non-null when status != ok — the failure class ('rate_limited'|'mega_holder'|'rpc'|...).
+  errorCategory String?
+  /// Consecutive failures — drives exponential backoff of nextRefreshAt.
+  failCount     Int                @default(0)
+  /// Hard freshness edge: after this the cached report is STALE (still usable, labeled).
+  expiresAt     DateTime
+  /// Earliest time the refresh job should re-fetch this token.
+  nextRefreshAt DateTime
+  /// Bumped when the risk-computation logic changes (invalidate cache semantics).
+  sourceVersion Int                @default(1)
+  metadataJson  Json?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  token         Token              @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@unique([chain, tokenAddress])
+  @@index([nextRefreshAt])
+  @@index([status])
+  @@map("token_risk_snapshots")
+}
+
 // ---------------------------------------------------------------------------
 // 12. Settings
 // ---------------------------------------------------------------------------
@@ -534,6 +679,21 @@ model ImportJob {
 // 14. MoneyFlowEdge
 // ---------------------------------------------------------------------------
 
+/// MoneyFlowEdge.valuationStatus — HONEST value provenance (Wave A, Capital
+/// Lineage). Distinguishes a genuine zero from an unavailable valuation, and
+/// a current-price estimate from an exact historical price. `valuedUsd` is
+/// NULL whenever status is `unavailable` — never coerced to 0 (hard rule 9).
+/// The legacy `amountUsd` column is left untouched for existing FlowScore-path
+/// consumers; the lineage/shadow path reads valuedUsd + valuationStatus.
+enum ValuationStatus {
+  exact_provider_historical
+  nearest_prior_snapshot
+  stablecoin_nominal
+  current_price_estimate
+  unavailable
+  not_applicable
+}
+
 model MoneyFlowEdge {
   id                 String              @id @default(cuid())
   sourceAddress      String
@@ -541,7 +701,12 @@ model MoneyFlowEdge {
   sourceChain        ChainId
   destinationChain   ChainId
   asset              String
+  /// SPL mint address when known (token_transfer); NULL for native SOL. Used
+  /// to classify the asset by REGISTRY (not symbol text) during valuation.
+  assetMint          String?
   amountToken        Decimal             @db.Decimal(38, 18)
+  /// Legacy nominal USD (existing consumers; may be 0 for unpriced). NOT the
+  /// honest value — read valuedUsd/valuationStatus for that.
   amountUsd          Decimal             @db.Decimal(20, 4)
   ts                 DateTime
   txHash             String
@@ -551,7 +716,24 @@ model MoneyFlowEdge {
   providerSource     String
   metadata           Json
 
+  // --- Honest valuation (Wave A) — all nullable/additive ---
+  /// Honest USD value; NULL == unavailable (never 0-for-unknown).
+  valuedUsd          Decimal?            @db.Decimal(20, 4)
+  /// Unit price used; NULL when unavailable/not_applicable.
+  priceUsd           Decimal?            @db.Decimal(24, 12)
+  /// Timestamp of the price observation used (never a future time).
+  priceTimestamp     DateTime?
+  valuationStatus    ValuationStatus?
+  /// Provenance of the price (e.g. 'wsol_prior_snapshot', 'stablecoin_registry', 'dexscreener_current').
+  valuationSource    String?
+  /// 0-100; lower for current-price estimates, higher for exact historical.
+  valuationConfidence Float?
+  /// Age of the price observation relative to the transfer, seconds.
+  valuationAgeSeconds Int?
+  valuationReason    String?
+
   @@unique([txHash, sourceAddress, destinationAddress, actionType])
+  @@index([valuationStatus])
   @@index([sourceAddress, ts])
   @@index([destinationAddress, ts])
   @@index([txHash])
@@ -1166,4 +1348,231 @@ model TokenConfluenceSnapshot {
   @@index([provider, snapshotType])
   @@index([observedAt])
   @@map("token_confluence_snapshots")
+}
+
+// ---------------------------------------------------------------------------
+// Capital Lineage Engine — Phase 6a (feat/pre-public-accumulation, operator
+// directive 2026-07-10). Roots are operator-supplied or validation-earned
+// wallets whose money flow is tracked permanently; monitoring subscriptions
+// are the scheduler's work queue (NO per-root timers — batches, cursors,
+// provider rate budgets).
+// ---------------------------------------------------------------------------
+
+/// MonitoringSubscription.priority — scheduler tiers, highest first.
+enum MonitoringPriority {
+  fresh_receiver_hot
+  root_permanent
+  strong_link
+  probable_link
+  standard
+  weak_cold
+  cold_archive
+}
+
+model LineageRoot {
+  id                  String   @id @default(cuid())
+  walletId            String   @unique
+  /// Where this root came from: 'operator_file' (manual import),
+  /// 'validated_promotion' (Phase 6b+: wallets that pass local validation
+  /// get their own root-expansion job), etc. Plain String, small vocab.
+  source              String
+  /// Optional operator label preserved from the import file's inline
+  /// comment ("addr | label" / "addr # label").
+  label               String?
+  /// Import provenance (filename), for audit. Never a parsing input.
+  fileProvenance      String?
+  /// Roots are permanent by contract: absence from a LATER import file
+  /// never deletes or deactivates a root (operator requirement 8).
+  permanent           Boolean  @default(true)
+  firstImportedAt     DateTime
+  /// Bumped on every import that mentions this root again (idempotent
+  /// re-import telemetry — NOT a liveness/expiry mechanism).
+  lastSeenInImportAt  DateTime
+
+  wallet              Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  subscriptions       MonitoringSubscription[]
+  relationships       WalletRelationship[]
+  expansionNodes      LineageExpansionNode[]
+
+  @@index([source])
+  @@map("lineage_roots")
+}
+
+model MonitoringSubscription {
+  id            String             @id @default(cuid())
+  walletId      String
+  priority      MonitoringPriority
+  active        Boolean            @default(true)
+  /// Human-readable why: 'operator_root_import', 'first_funder of <addr>',
+  /// 'weak_link_cooldown', ... Probabilistic wording only — never identity
+  /// claims.
+  reason        String
+  /// The lineage root this subscription hangs off (a receiver's
+  /// subscription points at its funder's root). Null for standalone tiers.
+  lineageRootId String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  // --- Scheduler fields (Wave C) — queue-based, NO per-wallet timers ---
+  /// When this subscription is next due to be polled. NULL = due immediately.
+  nextPollAt        DateTime?
+  lastPolledAt      DateTime?
+  pollCount         Int      @default(0)
+  /// Consecutive poll errors — drives exponential backoff.
+  consecutiveErrors Int      @default(0)
+  /// fresh_receiver_hot expiry: after this the tier demotes to probable_link.
+  hotUntil          DateTime?
+  /// Set when a scheduler batch claims this row; cleared on completion. A
+  /// stale claim (older than the reclaim window) is reclaimable.
+  claimedAt         DateTime?
+  /// Explicit tier rank (0=highest) for DB-side priority ordering. The
+  /// MonitoringPriority ENUM's on-disk order reflects migration order, NOT
+  /// tier priority, so ordering by the enum is wrong — this integer is the
+  /// source of truth. Maintained by every writer via @flowradar/core tierRank.
+  tierPriority      Int      @default(99)
+
+  wallet        Wallet             @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  lineageRoot   LineageRoot?       @relation(fields: [lineageRootId], references: [id], onDelete: SetNull)
+
+  /// Scheduler read path: due, active subscriptions by explicit tier rank.
+  @@index([active, tierPriority, nextPollAt])
+  /// One subscription per wallet per tier — re-imports upsert, never stack.
+  @@unique([walletId, priority])
+  /// The scheduler's read path: active subscriptions by tier, batched.
+  @@index([priority, active])
+  @@map("monitoring_subscriptions")
+}
+
+/// WalletRelationship.kind — probabilistic on-chain relationship vocabulary
+/// (possible/probable/strong wording lives in `confidence`, never identity
+/// claims).
+enum WalletRelationshipKind {
+  first_funder
+  direct_funding
+  repeated_transfer
+  fresh_wallet_activation
+  service_interrupted
+  unknown
+}
+
+model WalletRelationship {
+  id                  String                 @id @default(cuid())
+  lineageRootId       String
+  /// Sender side of the observed flow.
+  walletAId           String
+  /// Receiver side of the observed flow.
+  walletBId           String
+  kind                WalletRelationshipKind
+  /// 0-100. Bands map to possible (<50) / probable (50-79) / strong (>=80)
+  /// via @flowradar/core confidenceBand — same vocabulary as /flow.
+  confidence          Float
+  firstSeenAt         DateTime
+  lastSeenAt          DateTime
+  interactionCount    Int                    @default(1)
+  /// Sum of KNOWN transfer value across interactions. Unavailable/unknown-value
+  /// legs contribute nothing here (never fabricated as $0); their count lives in
+  /// unknownValueTxCount so this figure's incompleteness is explicit.
+  valueTransferredUsd Decimal                @db.Decimal(20, 4)
+  /// How many counted interactions had UNAVAILABLE (unpriced) value — so
+  /// valueTransferredUsd is honestly "sum of known value", not a claimed total.
+  /// Revaluation lowers this as edges get priced.
+  unknownValueTxCount Int                    @default(0)
+  /// Evidence trail: tx signatures, edge ids, classification inputs.
+  evidence            Json
+
+  lineageRoot         LineageRoot            @relation(fields: [lineageRootId], references: [id], onDelete: Cascade)
+  walletA             Wallet                 @relation("RelationshipSender", fields: [walletAId], references: [id], onDelete: Cascade)
+  walletB             Wallet                 @relation("RelationshipReceiver", fields: [walletBId], references: [id], onDelete: Cascade)
+
+  /// One relationship row per (root, pair, kind) — repeat observations bump
+  /// interactionCount/lastSeenAt/value instead of stacking rows.
+  @@unique([lineageRootId, walletAId, walletBId, kind])
+  @@index([walletBId])
+  @@index([lineageRootId, kind])
+  @@map("wallet_relationships")
+}
+
+/// ObservationProviderSnapshot — SHADOW-ONLY store for provider-CLAIMED wallet
+/// stats gathered by the observation-universe importer (Wave D). Deliberately
+/// SEPARATE from WalletStats: WalletStats is read by the FlowScore path
+/// (fetchAggregateInputs -> computeFlowScore averages walletScore across ALL
+/// buyers), so writing an uncomputed provider row there would corrupt FlowScore
+/// (hard-rule-1). Nothing reads this model for scoring/eligibility — it is pure
+/// provider-claimed context on observation_only wallets. Fields the provider
+/// did NOT supply are NULLABLE (honest unknown, never a fabricated 0). Upserted
+/// on (walletId, source, window) so re-import is idempotent and concurrent
+/// writes cannot duplicate.
+model ObservationProviderSnapshot {
+  id              String   @id @default(cuid())
+  walletId        String
+  /// Provider/source label the claim came from (e.g. 'solana_tracker'). NOT locally verified.
+  source          String
+  /// Rolling window label, e.g. '30d'.
+  window          String
+  /// Provider-claimed 30d PnL TOTAL. Null when not supplied — never 0-as-unknown.
+  pnlUsd          Decimal? @db.Decimal(20, 4)
+  winRate         Float?
+  tradeCount      Int?
+  avgTradeSizeUsd Decimal? @db.Decimal(20, 4)
+  /// Always true — these numbers are provider-CLAIMED, never locally verified.
+  providerClaimed Boolean  @default(true)
+  observedAt      DateTime
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  wallet          Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([walletId, source, window])
+  @@index([walletId])
+  @@map("observation_provider_snapshot")
+}
+
+/// LineageExpansionNode.priority — expansion queue order (spec order).
+enum ExpansionPriority {
+  first_funder
+  direct_high_value
+  fresh_activation
+  post_funding_buy
+  bridge_correlated
+  repeated_transfer
+  profit_rotation
+  weak
+}
+
+/// LineageExpansionNode.status — queue lifecycle.
+enum ExpansionNodeStatus {
+  pending
+  in_progress
+  done
+  skipped
+}
+
+/// The PERSISTENT priority frontier for bounded recursive expansion — a
+/// queue table consumed in priority batches under provider budgets (never
+/// one timer per wallet). `cursor` checkpoints provider pagination so an
+/// interrupted backfill resumes instead of restarting.
+model LineageExpansionNode {
+  id            String              @id @default(cuid())
+  lineageRootId String
+  walletAddress String
+  chain         ChainId
+  depth         Int
+  priority      ExpansionPriority
+  status        ExpansionNodeStatus @default(pending)
+  /// Persisted when expansion stops: 'max_depth', 'service_node',
+  /// 'node_cap', 'edge_cap', 'receiver_day_cap', 'below_min_usd', ...
+  stopReason    String?
+  /// How this node entered the frontier (audit): 'root', 'first_funder of
+  /// <addr>', 'bridge_correlated', ...
+  discoveredVia String
+  /// Provider pagination checkpoint (resume-safe interrupted backfill).
+  cursor        String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  lineageRoot   LineageRoot         @relation(fields: [lineageRootId], references: [id], onDelete: Cascade)
+
+  @@unique([lineageRootId, walletAddress])
+  @@index([status, priority])
+  @@map("lineage_expansion_nodes")
 }

@@ -30,6 +30,12 @@ interface FakeWallet {
   id: string;
   address: string;
   chain: 'SOLANA' | 'BSC';
+  /** Phase 0 taxonomy — defaults to signal_eligible in the fake findMany. */
+  status?: string;
+  /** Defaults true (legacy fixtures model watched wallets). */
+  isWatched?: boolean;
+  /** Defaults true (legacy fixtures model wallets with stats rows). */
+  hasStats?: boolean;
 }
 
 function makeTx(seq = 0): NormalizedTx {
@@ -86,7 +92,41 @@ function makeCtx(wallets: FakeWallet[], provider: unknown) {
   const log = { info: vi.fn(), error: vi.fn(), warn: vi.fn(), debug: vi.fn() };
   const cursors = new Map<string, string | null>();
   const prisma = {
-    wallet: { findMany: vi.fn(async () => wallets) },
+    wallet: {
+      // Honors the FULL where-shape walletActivity actually sends
+      // (status: { not } + OR [isWatched / stats.some / status equality]) so
+      // the selection assertions exercise real Prisma semantics rather than
+      // a fake that returns everything (2026-07-10 Phase 0 review: a fake
+      // ignoring the OR predicate made the observation-polling test vacuous).
+      findMany: vi.fn(
+        async (
+          {
+            where
+          }: {
+            where?: {
+              status?: { not?: string };
+              OR?: ({ isWatched?: boolean } | { stats?: { some: object } } | { status?: string })[];
+            };
+          } = {}
+        ) => {
+          return wallets.filter((w) => {
+            const status = w.status ?? 'signal_eligible';
+            const isWatched = w.isWatched ?? true;
+            const hasStats = w.hasStats ?? true;
+            if (where?.status?.not !== undefined && status === where.status.not) return false;
+            if (where?.OR) {
+              return where.OR.some((clause) => {
+                if ('isWatched' in clause) return isWatched === clause.isWatched;
+                if ('stats' in clause) return hasStats;
+                if ('status' in clause) return status === clause.status;
+                return false;
+              });
+            }
+            return true;
+          });
+        }
+      )
+    },
     providerSyncState: {
       findUnique: vi.fn(async ({ where }: { where: { provider_chain_scope: { scope: string } } }) => {
         const scope = where.provider_chain_scope.scope;
@@ -272,5 +312,61 @@ describe('walletActivity — bounded backfill (F7)', () => {
     const secondPollFirstCall = calls[firstPollCalls];
     expect(secondPollFirstCall).toBeDefined();
     expect(secondPollFirstCall!.since).toBeInstanceOf(Date); // cursor from poll 1 used as `since` on poll 2
+  });
+});
+
+describe('walletActivity — status exclusion (Phase 0, pre-public-accumulation)', () => {
+  it('excluded wallets are never polled; observation_only wallets ARE — even with no stats row at all', async () => {
+    const { provider, calls } = makeFakeProvider({ NORMAL: 3, OBSERVED: 3, FRESHOBS: 3, BANNED: 3 });
+    const { ctx } = makeCtx(
+      [
+        { id: 'w1', address: 'NORMAL', chain: 'SOLANA', status: 'signal_eligible', isWatched: true, hasStats: true },
+        { id: 'w2', address: 'OBSERVED', chain: 'SOLANA', status: 'observation_only', isWatched: false, hasStats: true },
+        // The spec guarantee: a stats-less observation wallet (flow-graph
+        // receiver, fresh discovery) is STILL polled so its activity is
+        // persisted — the legacy watched-or-has-stats predicate alone
+        // would silently skip it.
+        { id: 'w3', address: 'FRESHOBS', chain: 'SOLANA', status: 'observation_only', isWatched: false, hasStats: false },
+        { id: 'w4', address: 'BANNED', chain: 'SOLANA', status: 'excluded', isWatched: true, hasStats: true }
+      ],
+      provider
+    );
+
+    await run(ctx);
+
+    const polledAddresses = new Set(calls.map((c) => c.address));
+    expect(polledAddresses.has('NORMAL')).toBe(true);
+    expect(polledAddresses.has('OBSERVED')).toBe(true); // observation persists
+    expect(polledAddresses.has('FRESHOBS')).toBe(true); // ...even stats-less
+    expect(polledAddresses.has('BANNED')).toBe(false); // excluded is never polled
+  });
+});
+
+describe('walletActivity — per-cycle wallet budget (overnight 2026-07-11)', () => {
+  it('selectPollWindow rotates deterministic windows that cover the whole set', async () => {
+    const { selectPollWindow } = await import('../src/jobs/walletActivity');
+    const all = Array.from({ length: 648 }, (_, i) => `w${i}`);
+    const budget = 200;
+    const seen = new Set<string>();
+    const windows = Math.ceil(all.length / budget); // 4
+    for (let cycle = 0; cycle < windows; cycle++) {
+      const r = selectPollWindow(all, budget, cycle);
+      expect(r.windows).toBe(windows);
+      expect(r.window.length).toBeLessThanOrEqual(budget);
+      for (const w of r.window) seen.add(w);
+    }
+    expect(seen.size).toBe(all.length); // full coverage across one rotation
+    // Deterministic: same cycle index -> identical window.
+    expect(selectPollWindow(all, budget, 1)).toEqual(selectPollWindow(all, budget, 1));
+    // Wrap-around: cycle N === cycle 0.
+    expect(selectPollWindow(all, budget, windows)).toEqual(selectPollWindow(all, budget, 0));
+  });
+
+  it('under-budget sets are returned whole (pre-import behavior unchanged)', async () => {
+    const { selectPollWindow } = await import('../src/jobs/walletActivity');
+    const all = Array.from({ length: 150 }, (_, i) => `w${i}`);
+    const r = selectPollWindow(all, 200, 7);
+    expect(r.window).toEqual(all);
+    expect(r.windows).toBe(1);
   });
 });

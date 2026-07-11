@@ -62,6 +62,41 @@ const TERMINAL_STATES = new Set([
   'QUERY_STATE_COMPLETED_PARTIAL'
 ]);
 
+// Terminal-but-unusable states. A poll or results payload landing on one of
+// these must THROW, never resolve as an empty-but-successful result set — an
+// empty success is indistinguishable from "query matched nothing", which
+// callers (runDuneQuerySync, overlap search) treat as a real answer.
+// COMPLETED_PARTIAL is unusable TOO (2026-07-10 Codex review, doc-verified):
+// Dune only serves partial results when the request sets
+// allow_partial_results=true, which this client never sends — so a partial
+// payload reaching us is out-of-contract, and silently treating one as a
+// complete result would misreport coverage. Deliberate partial-result support
+// would mean sending that flag AND forcing truncated=true; until someone
+// needs it, refuse-and-surface is the honest behavior.
+const FAILURE_STATES = new Set([
+  'QUERY_STATE_FAILED',
+  'QUERY_STATE_CANCELED',
+  'QUERY_STATE_EXPIRED',
+  'QUERY_STATE_COMPLETED_PARTIAL'
+]);
+
+/**
+ * Throws when a Dune payload reports a failed/canceled/expired execution or
+ * carries the documented `error` object. `error.message`/`error.type` come
+ * from Dune's own response body (same trust stance as throwForNonOk) and
+ * never contain this client's API key.
+ */
+function assertExecutionUsable(
+  state: string | undefined,
+  error: { type?: string; message?: string } | undefined,
+  context: string
+): void {
+  if (error || (state !== undefined && FAILURE_STATES.has(state))) {
+    const detail = error?.message ?? error?.type ?? state ?? 'unknown error';
+    throw new Error(`Dune API ${context}: execution unsuccessful (state=${state ?? 'unknown'}): ${detail}`);
+  }
+}
+
 interface ExecuteResponse {
   execution_id: string;
   state: string;
@@ -137,6 +172,7 @@ export function createDuneClient(env: DuneEnv, opts: { rps?: number } = {}): Dun
       await throwForNonOk(response, `get-query-result(query_id=${queryId})`);
     }
     const json = await readJson<ResultsResponse>(response);
+    assertExecutionUsable(json.state, json.error, `get-query-result(query_id=${queryId})`);
     const rows = json.result?.rows ?? [];
 
     return {
@@ -169,6 +205,7 @@ export function createDuneClient(env: DuneEnv, opts: { rps?: number } = {}): Dun
 
     const deadline = Date.now() + DEFAULT_POLL_TIMEOUT_MS;
     let finished = false;
+    let finalStatus: StatusResponse | undefined;
     while (!finished) {
       await limiter.acquire();
       const statusUrl = new URL(`/api/v1/execution/${executionId}/status`, DUNE_API_BASE);
@@ -184,8 +221,15 @@ export function createDuneClient(env: DuneEnv, opts: { rps?: number } = {}): Dun
           throw new Error(`Dune API execute-query(query_id=${queryId}): polling timed out after ${DEFAULT_POLL_TIMEOUT_MS}ms`);
         }
         await new Promise((resolve) => setTimeout(resolve, DEFAULT_POLL_INTERVAL_MS));
+      } else {
+        finalStatus = statusJson;
       }
     }
+
+    // A terminal-but-failed execution must throw HERE, before the results
+    // fetch — /results for a failed execution is a wasted call whose empty
+    // payload would otherwise masquerade as a successful zero-row answer.
+    assertExecutionUsable(finalStatus?.state, finalStatus?.error, `execute-query(query_id=${queryId})`);
 
     await limiter.acquire();
     const resultsUrl = new URL(`/api/v1/execution/${executionId}/results`, DUNE_API_BASE);
@@ -195,6 +239,7 @@ export function createDuneClient(env: DuneEnv, opts: { rps?: number } = {}): Dun
       await throwForNonOk(resultsResponse, `get-execution-result(execution_id=${executionId})`);
     }
     const resultsJson = await readJson<ResultsResponse>(resultsResponse);
+    assertExecutionUsable(resultsJson.state, resultsJson.error, `get-execution-result(execution_id=${executionId})`);
     const rows = resultsJson.result?.rows ?? [];
 
     return {

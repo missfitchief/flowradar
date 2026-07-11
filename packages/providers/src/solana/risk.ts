@@ -42,10 +42,22 @@ import type { RateLimiter } from '../rateLimiter';
 
 export interface HeliusRiskEnv {
   HELIUS_API_KEY?: string;
+  /** Risk-RPC requests/second (default 9, clamped 1..9). The 2026-07-11
+   *  rollout showed this key sustains well under 9 rps on the risk methods
+   *  (sustained 429s at the hardcoded rate) — operators tune this to the
+   *  plan's real budget (e.g. 4) instead of relying on backoff to absorb it. */
+  HELIUS_RISK_RPS?: string;
 }
 
 const HELIUS_RPC_BASE = 'https://mainnet.helius-rpc.com';
 const HELIUS_RPS = 9;
+
+/** Resolves the risk-RPC rate: env override clamped to [1, 9], else 9. */
+export function resolveRiskRps(env: HeliusRiskEnv): number {
+  const n = Number(env.HELIUS_RISK_RPS);
+  if (!Number.isFinite(n) || n <= 0) return HELIUS_RPS;
+  return Math.max(1, Math.min(HELIUS_RPS, Math.floor(n)));
+}
 
 const TOP1_DANGER_THRESHOLD = 0.3; // >=30% top-1 holder -> danger
 const TOP5_WARN_THRESHOLD = 0.6; // >=60% top-5 holders -> warn
@@ -171,6 +183,48 @@ export function buildRiskReport(concentration: HolderConcentration, mintAuthorit
 const RPC_INVALID_REQUEST = -32600;
 
 /**
+ * An HTTP-level failure from the Helius RPC proxy (the `!response.ok` branch of
+ * callRpc) — carries the numeric `status` and, for 429s, the parsed
+ * `retryAfterSec` from the Retry-After header so a caller (the risk cache's
+ * refresh backoff) can honor the provider's requested wait WITHOUT string-
+ * parsing the message. The formatted message is unchanged from the prior plain
+ * Error (same redaction — url/apiKey are never interpolated), so existing
+ * message expectations still hold; this only ADDS typed fields.
+ */
+export class HeliusHttpError extends Error {
+  readonly status: number;
+  /** Parsed Retry-After (delta-seconds, or derived from an HTTP-date), if present and valid. */
+  readonly retryAfterSec?: number;
+  readonly method: string;
+  constructor(method: string, status: number, statusText: string, bodyText: string, retryAfterSec?: number) {
+    super(`Helius RPC ${method} failed (${status} ${statusText}): ${bodyText}`);
+    this.name = 'HeliusHttpError';
+    this.status = status;
+    this.method = method;
+    this.retryAfterSec = retryAfterSec;
+  }
+}
+
+/**
+ * Parses an HTTP `Retry-After` header into whole seconds from now. Supports the
+ * two RFC-9110 forms: delta-seconds (e.g. "120") and an HTTP-date. Returns
+ * undefined when absent/unparseable/negative so the caller falls back to its
+ * own bounded backoff. `nowMs` is injectable for deterministic tests.
+ */
+export function parseRetryAfterSeconds(headerValue: string | null, nowMs: number = Date.now()): number | undefined {
+  if (!headerValue) return undefined;
+  const trimmed = headerValue.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const secs = Number(trimmed);
+    return Number.isFinite(secs) && secs >= 0 ? secs : undefined;
+  }
+  const dateMs = Date.parse(trimmed);
+  if (Number.isNaN(dateMs)) return undefined;
+  const deltaSec = Math.ceil((dateMs - nowMs) / 1000);
+  return deltaSec >= 0 ? deltaSec : undefined;
+}
+
+/**
  * A Helius JSON-RPC `error` response (the `json.error` branch of callRpc),
  * carrying the raw RPC `code` + `message` so callers can classify specific
  * conditions (e.g. -32600 "too many accounts") WITHOUT string-parsing the
@@ -251,8 +305,11 @@ async function callRpc<T>(apiKey: string, limiter: RateLimiter, method: string, 
 
   if (!response.ok) {
     const bodyText = await response.text().catch(() => '<no response body>');
+    const retryAfterSec = parseRetryAfterSeconds(response.headers.get('retry-after'));
     // Never interpolate the raw url/apiKey into the thrown message — redact.
-    throw new Error(`Helius RPC ${method} failed (${response.status} ${response.statusText}): ${bodyText}`);
+    // Typed so the risk cache can read status/Retry-After for backoff without
+    // string-parsing (message format is unchanged from the prior plain Error).
+    throw new HeliusHttpError(method, response.status, response.statusText, bodyText, retryAfterSec);
   }
 
   const json = (await response.json()) as JsonRpcResponse<T>;
@@ -275,7 +332,7 @@ export function createHeliusRiskProvider(env: HeliusRiskEnv): RiskProvider | nul
   const apiKey = env.HELIUS_API_KEY;
   if (!apiKey) return null;
 
-  const limiter = createRateLimiter({ rps: HELIUS_RPS });
+  const limiter = createRateLimiter({ rps: resolveRiskRps(env) });
 
   return {
     providerName: 'Helius',

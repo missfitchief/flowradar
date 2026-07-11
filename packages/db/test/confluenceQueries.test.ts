@@ -3,8 +3,12 @@
 // SHADOW-ONLY reads over TokenConfluenceSnapshot + ExternalConfluenceSource.
 // Requires LITE Postgres on 5439; skips cleanly otherwise (sibling-test convention).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { PrismaClient } from '@prisma/client';
 import net from 'node:net';
+// Shared singleton, NOT a zero-argument Prisma client — a bare client resolves
+// env(DATABASE_URL) itself (root .env = LIVE URL) and would bypass the vitest
+// test-DB redirect in src/testDb.ts, writing fixtures into the live DB (the
+// exact incident overnight Task A fixed). Enforced by dbTestClientGuard.test.ts.
+import { prisma } from '../src/client';
 import { getTokenConfluence } from '../src/confluence/queries';
 
 function probePort(port: number): Promise<boolean> {
@@ -21,7 +25,6 @@ const HAS_DB = await probePort(5439);
 const d = HAS_DB ? describe : describe.skip;
 
 d('getTokenConfluence (Task E)', () => {
-  const prisma = new PrismaClient();
   let tokenId = '';
   const addr = 'ConfTestMint1111111111111111111111111111111';
 

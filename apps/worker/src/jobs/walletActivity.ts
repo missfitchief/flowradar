@@ -50,6 +50,38 @@ function maxBackfillPages(): number {
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_BACKFILL_PAGES;
 }
 
+/**
+ * Per-CYCLE wallet budget (WALLET_ACTIVITY_MAX_WALLETS env, default 200;
+ * invalid/≤0 → default). Overnight 2026-07-11 (Codex final delta review): the
+ * observation-universe import grew the pollable set from ~150 to 650 wallets
+ * in one commit — without a wallet budget, a worker (re)start would silently
+ * commit the FULL set to provider polling every cycle (global rule 19:
+ * bounded budgets). Wallets over budget are NOT dropped: cycles rotate
+ * deterministic windows over the id-ordered set, so every wallet is still
+ * covered every ceil(N/budget) cycles.
+ */
+const DEFAULT_MAX_WALLETS_PER_CYCLE = 200;
+function maxWalletsPerCycle(): number {
+  const raw = process.env.WALLET_ACTIVITY_MAX_WALLETS;
+  const n = raw !== undefined ? Number(raw) : NaN;
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_WALLETS_PER_CYCLE;
+}
+
+/**
+ * Deterministic rotation window: cycle k over N wallets with budget B polls
+ * ids[ (k mod ceil(N/B))·B .. +B ). Pure — exported for unit tests. A worker
+ * restart resets the counter to window 0; while running, consecutive cycles
+ * cover the whole set.
+ */
+export function selectPollWindow<T>(all: T[], budget: number, cycle: number): { window: T[]; windows: number; windowIndex: number } {
+  if (all.length <= budget) return { window: all, windows: 1, windowIndex: 0 };
+  const windows = Math.ceil(all.length / budget);
+  const windowIndex = ((cycle % windows) + windows) % windows;
+  return { window: all.slice(windowIndex * budget, (windowIndex + 1) * budget), windows, windowIndex };
+}
+
+let pollCycleCounter = 0;
+
 interface WalletPollResult {
   pagesFetched: number;
   txsIngested: number;
@@ -59,12 +91,29 @@ interface WalletPollResult {
 export async function run(ctx: JobContext): Promise<void> {
   const { prisma, log } = ctx;
 
-  const wallets = await prisma.wallet.findMany({
+  const allWallets = await prisma.wallet.findMany({
     where: {
-      OR: [{ isWatched: true }, { stats: { some: {} } }]
+      // Phase 0 taxonomy (feat/pre-public-accumulation): excluded wallets
+      // are never polled; observation_only wallets are ALWAYS pollable (the
+      // spec's "polled but zero signal weight" guarantee — a stats-less
+      // receiver/discovery wallet must still have its activity persisted,
+      // which the legacy watched-or-has-stats predicate alone would skip).
+      // Other statuses keep the original activity criteria. Signal weight is
+      // enforced downstream (aggregateWindow status gate, Rule E/F gates).
+      status: { not: 'excluded' },
+      OR: [{ isWatched: true }, { stats: { some: {} } }, { status: 'observation_only' }]
     },
-    select: { id: true, address: true, chain: true }
+    select: { id: true, address: true, chain: true },
+    orderBy: { id: 'asc' } // stable order — rotation windows are deterministic
   });
+  const budget = maxWalletsPerCycle();
+  const { window: wallets, windows, windowIndex } = selectPollWindow(allWallets, budget, pollCycleCounter);
+  pollCycleCounter += 1;
+  if (windows > 1) {
+    log.info(
+      `walletActivity budget: polling ${wallets.length}/${allWallets.length} wallets (window ${windowIndex + 1}/${windows}, budget ${budget}) — full set covered every ${windows} cycles`
+    );
+  }
 
   let totalIngestedTxs = 0;
   let totalPagesFetched = 0;

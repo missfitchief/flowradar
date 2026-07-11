@@ -58,6 +58,7 @@ import * as marketDataHot from './jobs/marketDataHot';
 import * as marketDataNormal from './jobs/marketDataNormal';
 import * as flowScoring from './jobs/flowScoring';
 import * as entityClustering from './jobs/entityClustering';
+import * as tokenRiskRefresh from './jobs/tokenRiskRefresh';
 import * as moneyFlow from './jobs/moneyFlow';
 import * as bridgeFlow from './jobs/bridgeFlow';
 import * as profitRotation from './jobs/profitRotation';
@@ -68,6 +69,9 @@ import * as walletImport from './jobs/walletImport';
 import * as walletGraph from './jobs/walletGraph';
 import * as walletStatsRefresh from './jobs/walletStatsRefresh';
 import * as walletDiscovery from './jobs/walletDiscovery';
+import * as lineageExpansion from './jobs/lineageExpansion';
+import * as monitoringScheduler from './jobs/monitoringScheduler';
+import * as stealthAccumulation from './jobs/stealthAccumulation';
 import * as externalWalletSource from './jobs/externalWalletSource';
 import * as walletCandidateValidation from './jobs/walletCandidateValidation';
 import * as tokenTopTraderBackfill from './jobs/tokenTopTraderBackfill';
@@ -180,6 +184,11 @@ async function main(): Promise<void> {
     { name: 'walletActivity', run: walletActivity.run, intervalSec: settings.intervals.walletActivitySec },
     { name: 'marketDataHot', run: marketDataHot.run, intervalSec: settings.intervals.marketDataHotSec },
     { name: 'marketDataNormal', run: marketDataNormal.run, intervalSec: settings.intervals.marketDataNormalSec },
+    // tokenRiskRefresh (Task 1, Helius 429 fix): the ONE bounded job that
+    // fetches token risk and keeps the TokenRiskSnapshot cache warm. flowScoring
+    // and entityClustering read that cache instead of calling Helius per token
+    // per pass. Bounded per run by intervals.tokenRiskRefreshBatch.
+    { name: 'tokenRiskRefresh', run: tokenRiskRefresh.run, intervalSec: settings.intervals.tokenRiskRefreshSec },
     { name: 'flowScoring', run: flowScoring.run, intervalSec: settings.intervals.flowScoringSec },
     { name: 'entityClustering', run: entityClustering.run, intervalSec: settings.intervals.entityClusteringSec },
     { name: 'moneyFlow', run: moneyFlow.run, intervalSec: settings.intervals.moneyFlowSec },
@@ -203,6 +212,29 @@ async function main(): Promise<void> {
       name: 'walletDiscovery',
       run: walletDiscovery.run,
       intervalSec: settings.intervals.walletDiscoveryHours * 3600
+    },
+    // lineageExpansion (Capital Lineage 6b): bounded frontier consumption
+    // driving the same Helius wallet-tx provider — reuses the walletActivity
+    // cadence class. The frontier persists across ticks; each pass is bounded.
+    {
+      name: 'lineageExpansion',
+      run: lineageExpansion.run,
+      intervalSec: settings.intervals.walletActivitySec
+    },
+    // monitoringScheduler (Wave C): queue-based tier scheduler that reopens
+    // due wallets' expansion nodes for lineageExpansion to re-scan.
+    {
+      name: 'monitoringScheduler',
+      run: monitoringScheduler.run,
+      intervalSec: settings.intervals.walletActivitySec
+    },
+    // stealthAccumulation (P2, 2026-07-11): SHADOW-ONLY lifecycle snapshots
+    // from the pure stealth engine over recent trade cohorts. Writes only
+    // stealth_snapshots; bounded token budget; replay-idempotent per bucket.
+    {
+      name: 'stealthAccumulation',
+      run: stealthAccumulation.run,
+      intervalSec: settings.intervals.stealthAccumulationSec
     },
     // externalWalletSource (Task 34, Wave 4.5): also expressed in HOURS —
     // same *3600 conversion as backtestHours/walletStatsRefreshHours/

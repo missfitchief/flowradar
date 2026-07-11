@@ -124,7 +124,21 @@ const IntervalsSchema = z.object({
   profitRotationSec: z.number(),
   walletStatsRefreshHours: z.number(),
   walletDiscoveryHours: z.number(),
-  backtestHours: z.number()
+  backtestHours: z.number(),
+  /** Shadow stealth-accumulation pass cadence (P2, 2026-07-11). Additive with
+   *  a default so stored settings rows without it keep parsing; a job
+   *  interval, NOT a signal threshold. Floor 30s: PUT /api/settings must not
+   *  be able to configure a near-zero worker loop (Codex P2 review). */
+  stealthAccumulationSec: z.number().min(30).default(300),
+  /** Bounded token-risk-refresh job cadence (Task 1, Helius 429 fix). Additive
+   *  with a default so stored settings rows without it keep parsing. The job is
+   *  bounded PER RUN by tokenRiskRefreshBatch (below), so this cadence never
+   *  controls burst size — only how often the bounded batch advances. Floor
+   *  30s for the same near-zero-loop guard as stealthAccumulationSec. */
+  tokenRiskRefreshSec: z.number().min(30).default(120),
+  /** Max tokens the risk-refresh job fetches PER run — the hard cap on Helius
+   *  risk calls per cycle regardless of universe size (Task 1). */
+  tokenRiskRefreshBatch: z.number().int().min(1).default(200)
 });
 
 // Task 34 (Wave 4.5, Spec §5b) — external smart-wallet source connectors.
@@ -197,6 +211,43 @@ const ConnectorsSchema = z.object({
   externalConfluence: ExternalConfluenceConfigSchema
 });
 
+// Capital Lineage Engine (Phase 6b) — bounded recursive expansion knobs.
+// Every cap is an explicit operational bound (no hidden fixed limits); the
+// engine persists a stop reason whenever one bites.
+const LineageConfigSchema = z.object({
+  /** Recursive expansion depth from each root. Operator-bounded 1-4. */
+  maxDepth: z.number().int().min(1).max(4),
+  /** Transfers below this USD value neither enroll receivers nor enqueue expansion (dust/gas exceptions aside). */
+  minTransferUsd: z.number().min(0),
+  /** Gas-funding exception ceiling: a small FIRST meaningful native-SOL funding from a trusted sender may enroll below minTransferUsd. */
+  gasFundingMaxUsd: z.number().min(0),
+  /** Receiver must become active within this many hours of the gas funding for the exception to qualify. */
+  gasFundingActivationHours: z.number().min(1),
+  /** At or below this USD value an inbound is dust: edge stored, no enrollment, no relationship strength. */
+  dustMaxUsd: z.number().min(0),
+  /** Max children enqueued per expanded node. */
+  maxChildrenPerNode: z.number().int().min(1),
+  /** Max frontier nodes per root (expansion stops with stop reason). */
+  maxNodesPerRoot: z.number().int().min(1),
+  /** Max persisted flow edges attributed per root per expansion run. */
+  maxEdgesPerRoot: z.number().int().min(1),
+  /** Max NEW hot-enrolled receivers per root per UTC day. */
+  maxNewReceiversPerRootPerDay: z.number().int().min(1),
+  /** fresh_receiver_hot subscriptions stay hot for this many hours. */
+  hotWindowHours: z.number().min(1),
+  /** Distinct-counterparty count above which an unregistered address is treated as a high-degree service node (no expansion). */
+  serviceDegreeThreshold: z.number().int().min(10),
+  /** Bounded shallow backfill: provider pages fetched per node per pass. */
+  backfillMaxPagesPerNode: z.number().int().min(1),
+  /** A wallet inactive this many days counts as long-inactive (re-funding it re-triggers enrollment). */
+  freshInactiveDays: z.number().min(1),
+  /** Max age of a "nearest prior" market snapshot still usable to value a transfer, seconds (Wave A). */
+  priceMaxSnapshotAgeSec: z.number().min(60),
+  /** Gas-funding raw-SOL bounds (Wave B): a first native-SOL funding within [min,max] lamports-as-SOL may enroll without USD pricing. */
+  gasFundingMinSol: z.number().min(0),
+  gasFundingMaxSol: z.number().min(0)
+});
+
 export const SettingsSchema = z
   .object({
     chainsEnabled: ChainsEnabledSchema,
@@ -206,7 +257,8 @@ export const SettingsSchema = z
     entityConfidenceThreshold: z.number(),
     alerts: AlertsSchema,
     intervals: IntervalsSchema,
-    connectors: ConnectorsSchema
+    connectors: ConnectorsSchema,
+    lineage: LineageConfigSchema
   })
   // .strict() on the TOP-LEVEL object: a PUT /api/settings body carrying an
   // unknown top-level key (typo like `interval`, or a stale/removed field) now
@@ -321,7 +373,10 @@ export const DEFAULT_SETTINGS: Settings = {
     profitRotationSec: 120,
     walletStatsRefreshHours: 6,
     walletDiscoveryHours: 24,
-    backtestHours: 6
+    backtestHours: 6,
+    stealthAccumulationSec: 300,
+    tokenRiskRefreshSec: 120,
+    tokenRiskRefreshBatch: 200
   },
   connectors: {
     // Spec §5b's 6 external candidate-wallet feeders, priority order.
@@ -370,6 +425,31 @@ export const DEFAULT_SETTINGS: Settings = {
         ratioFragilityBands: [0.02, 0.05, 0.15]
       }
     }
+  },
+  // Capital Lineage Engine (Phase 6b). Conservative first-run bounds — every
+  // one operator-tunable; the engine records a stop reason when a cap bites.
+  lineage: {
+    maxDepth: 2,
+    minTransferUsd: 50,
+    gasFundingMaxUsd: 20,
+    gasFundingActivationHours: 48,
+    dustMaxUsd: 1,
+    maxChildrenPerNode: 25,
+    maxNodesPerRoot: 500,
+    maxEdgesPerRoot: 5000,
+    maxNewReceiversPerRootPerDay: 50,
+    hotWindowHours: 48,
+    serviceDegreeThreshold: 200,
+    backfillMaxPagesPerNode: 3,
+    freshInactiveDays: 30,
+    priceMaxSnapshotAgeSec: 3600,
+    // Gas-funding raw-SOL window (Wave B). Initial defaults; observed dataset
+    // distribution to be recorded in the overnight report. Solana account
+    // rent-exemption is ~0.002 SOL and typical gas top-ups are small, so a
+    // 0.001-0.5 SOL window captures genuine first-gas funding without
+    // admitting dust (below) or real value transfers priced separately.
+    gasFundingMinSol: 0.001,
+    gasFundingMaxSol: 0.5
   }
 };
 

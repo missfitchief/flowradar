@@ -35,7 +35,8 @@
 //     wallet's only BUY was earlier — a buyer can sell an out-of-window
 //     entry position within this window). firstBuyTs/blockOrSlot are the
 //     EARLIEST in-window BUY only.
-//   - smartWalletCount = buyers where isWatched OR meetsProfitable (union).
+//   - smartWalletCount = buyers where isSignalEligibleStatus(status) AND
+//     (isWatched OR meetsProfitable) — Phase 0 status gate; see isSmart below.
 //   - humanOrSmartLabelCount (Task 15 Fix A): buyers whose labels include
 //     'human_like' OR 'smart_money' (union) — feeds Rule C's ratio per the
 //     product brief's literal "70%+ buying wallets are human_like OR
@@ -104,6 +105,8 @@
 //     sellUsd > 0.
 
 import type { TokenWindowAggregate } from '../types';
+import { isSignalEligibleStatus } from '../wallets/status';
+import type { WalletStatus } from '../wallets/status';
 
 // ---------------------------------------------------------------------------
 // Input row types
@@ -126,6 +129,15 @@ export interface WalletInfoInput {
   labels: string[];
   /** Result of @flowradar/core's isProfitableWallet for this wallet's latest stats row (false if no stats row exists). */
   meetsProfitable: boolean;
+  /**
+   * Wallet.status (Phase 0, feat/pre-public-accumulation) — THE signal-
+   * eligibility gate. Smartness additionally requires
+   * isSignalEligibleStatus(status): public_kol / public_promoter /
+   * copytrader / bot_or_service / observation_only / excluded wallets never
+   * count toward early smart-money metrics, however good their stats look.
+   * REQUIRED (no default) so every producer decides eligibility explicitly.
+   */
+  status: WalletStatus;
 }
 
 export interface ClusterMembershipInput {
@@ -290,10 +302,15 @@ export function aggregateWindow(input: AggregateWindowInput): TokenWindowAggrega
     trackedSellVolumeUsd > 0 ? trackedBuyVolumeUsd / trackedSellVolumeUsd : trackedBuyVolumeUsd > 0 ? 999 : 0;
 
   // -- smartWalletCount / humanLikeCount / possibleBotCount ---------------
+  // Status gate first (Phase 0, feat/pre-public-accumulation): only
+  // signal_eligible wallets can be smart — public KOL/promoter/copytrader/
+  // bot/observation/excluded carry zero early-signal weight by definition,
+  // even when watched or profitable. Their trades still count in buyers[]
+  // and volume fields above (observation persists; weight does not).
   const isSmart = (walletId: string): boolean => {
     const info = walletById.get(walletId);
     if (!info) return false;
-    return info.isWatched || info.meetsProfitable;
+    return isSignalEligibleStatus(info.status) && (info.isWatched || info.meetsProfitable);
   };
   const smartBuyerIds = buyerWalletIds.filter(isSmart);
   const smartWalletCount = smartBuyerIds.length;
@@ -502,6 +519,13 @@ export function aggregateWindow(input: AggregateWindowInput): TokenWindowAggrega
       for (const t of trades) {
         if (t.action !== 'BUY') continue;
         if (!walletById.has(t.walletId)) continue;
+        // Phase 0 status gate (2026-07-10 Codex review Critical): these
+        // counts are NAMED smartWalletCount* and drive Rule A's tiered
+        // accumulation thresholds — they must count SMART buyers, not any
+        // buyer. Pre-taxonomy this was a latent misname (every tracked
+        // buyer was watched or vetted); with public_kol/copytrader statuses
+        // in the model, an ungated count would let a KOL crowd fire Rule A.
+        if (!isSmart(t.walletId)) continue;
         if (t.ts.getTime() >= trailingStart && t.ts.getTime() <= to.getTime()) {
           seen.add(t.walletId);
         }

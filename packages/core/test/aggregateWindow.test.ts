@@ -24,6 +24,9 @@ function wallet(walletId: string, overrides: Partial<WalletInfoInput> = {}): Wal
     walletScore: 50,
     labels: [],
     meetsProfitable: false,
+    // Pre-taxonomy tests exercise watched/profitable semantics WITHIN the
+    // eligible cohort; the status gate has its own suite (aggregateStatusGate).
+    status: 'signal_eligible',
     ...overrides
   };
 }
@@ -938,12 +941,15 @@ describe('aggregateWindow', () => {
         trade('buyer-3h-ago', 'BUY', new Date(now.getTime() - 3 * 60 * 60_000), 100), // inside 6h only
         trade('buyer-12h-ago', 'BUY', new Date(now.getTime() - 12 * 60 * 60_000), 100) // outside all three
       ];
+      // Phase 0: these counts are smart-gated (status + watched/profitable),
+      // so the fixtures are SMART buyers — this test pins the trailing-window
+      // time arithmetic; the gate itself is pinned in aggregateStatusGate.
       const wallets: WalletInfoInput[] = [
-        wallet('anchor'),
-        wallet('buyer-25m-ago'),
-        wallet('buyer-45m-ago'),
-        wallet('buyer-3h-ago'),
-        wallet('buyer-12h-ago')
+        wallet('anchor', { isWatched: true }),
+        wallet('buyer-25m-ago', { isWatched: true }),
+        wallet('buyer-45m-ago', { isWatched: true }),
+        wallet('buyer-3h-ago', { isWatched: true }),
+        wallet('buyer-12h-ago', { isWatched: true })
       ];
       const result = aggregateWindow({ trades, wallets, clusters: [], market: [], windowMinutes: 1440, now });
 

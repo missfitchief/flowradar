@@ -472,10 +472,19 @@ async function upsertWalletFromCsvRow(prisma: PrismaClient, row: ParsedRow): Pro
       firstSeenAt: now,
       lastActiveAt: now,
       isWatched: true,
+      // Operator-vouched Layer-1 import (Phase 0 taxonomy): CSV rows are the
+      // one intake path that confers eligibility directly.
+      status: 'signal_eligible',
       notes: row.sourceNote !== null ? sourceNoteLine(row.sourceNote) : null
     },
+    // Existing wallet re-imported by the operator: eligibility is granted,
+    // but a terminal manual status is never silently overwritten — matching
+    // the file's own anti-clobber stance for stats. Only observation_only
+    // rows are upgraded (raw update {} preserved everything before; the
+    // status upgrade is the Phase 0 delta and is applied conditionally in
+    // code below rather than here).
     update: {},
-    select: { id: true, notes: true }
+    select: { id: true, notes: true, status: true }
   });
 
   // The `create` branch above already sets notes for a brand-new wallet;
@@ -486,6 +495,24 @@ async function upsertWalletFromCsvRow(prisma: PrismaClient, row: ParsedRow): Pro
   const updatedNotes = nextNotes(wallet.notes, row.sourceNote);
   if (updatedNotes !== null) {
     await prisma.wallet.update({ where: { id: wallet.id }, data: { notes: updatedNotes } });
+  }
+
+  // Phase 0 taxonomy: re-importing a pre-existing wallet upgrades ONLY
+  // observation_only -> signal_eligible (the operator vouched for it by
+  // putting it in the CSV), granting isWatched in the same write so a
+  // discovery-created wallet gets identical treatment to a fresh CSV create.
+  // Any classified status — public_kol, public_promoter, copytrader,
+  // bot_or_service, excluded — survives re-import: a KOL stays a KOL even
+  // when the operator imports its stats; the import supplies FIGURES,
+  // classification decides SIGNAL WEIGHT. Compare-and-set on the CURRENT
+  // status (2026-07-10 Phase 0 review): the read above and this write are
+  // not atomic, so the guard lives in the WHERE — a classifier that flips
+  // the wallet to public_kol between the two loses nothing.
+  if (wallet.status === 'observation_only') {
+    await prisma.wallet.updateMany({
+      where: { id: wallet.id, status: 'observation_only' },
+      data: { status: 'signal_eligible', isWatched: true }
+    });
   }
 
   const scoreInput = deriveWalletScoreInput(row);

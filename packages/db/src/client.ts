@@ -3,19 +3,13 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { config as loadDotenv } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
+import { LIVE_LITE_DATABASE_URL, resolveDatabaseUrlForEnv } from './testDb';
 
-// LITE-mode default connection string (spec §13). Must stay in sync with the
-// LITE_HOST/LITE_PORT/LITE_USER/LITE_PASSWORD/LITE_DATABASE constants in
-// scripts/db-local.ts, which is the source of truth for the actual running
-// cluster's credentials/port — this is only the last-resort fallback used
-// when neither a root .env nor packages/db/.env (written by db-local.ts
-// ensure) supplies DATABASE_URL.
-const LITE_DEFAULT_HOST = 'localhost';
-const LITE_DEFAULT_PORT = 5439;
-const LITE_DEFAULT_USER = 'flowradar';
-const LITE_DEFAULT_PASSWORD = 'flowradar';
-const LITE_DEFAULT_DATABASE = 'flowradar';
-const LITE_DEFAULT_DATABASE_URL = `postgresql://${LITE_DEFAULT_USER}:${LITE_DEFAULT_PASSWORD}@${LITE_DEFAULT_HOST}:${LITE_DEFAULT_PORT}/${LITE_DEFAULT_DATABASE}`;
+// LITE-mode default connection string (spec §13) now lives in ./testDb
+// (LIVE_LITE_DATABASE_URL) so the TEST/LIVE isolation rule and the default
+// share one definition. Must stay in sync with the LITE_* constants in
+// scripts/db-local.ts (source of truth for the running cluster).
+const LITE_DEFAULT_DATABASE_URL = LIVE_LITE_DATABASE_URL;
 
 function loadEnvFromRepoRoot(): void {
   // packages/db/src -> repo root is two levels up.
@@ -28,9 +22,17 @@ function loadEnvFromRepoRoot(): void {
   }
 }
 
+/**
+ * TEST/LIVE isolation (overnight Task A): under vitest this resolves to the
+ * dedicated *_test database and FAILS CLOSED on any live/test collision —
+ * tests can no longer write to the live/operator DB (the root cause of the
+ * earlier leaked-fixture incident). Outside vitest, behavior is unchanged.
+ * All ambient consumers (the prisma singleton below, withGlobalJobLock's
+ * single-connection client) flow through this one rule.
+ */
 function resolveDatabaseUrl(): string {
   loadEnvFromRepoRoot();
-  return process.env.DATABASE_URL ?? LITE_DEFAULT_DATABASE_URL;
+  return resolveDatabaseUrlForEnv(process.env);
 }
 
 /**

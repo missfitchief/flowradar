@@ -10,3 +10,7 @@ build/
 coverage/
 .superpowers/
 *.tsbuildinfo
+db-backups/
+runs/
+.superpowers-ledger.md
+runs/

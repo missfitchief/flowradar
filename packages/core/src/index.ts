@@ -10,6 +10,11 @@ export * from './scoring/walletScore';
 export * from './scoring/flowScore';
 export * from './pnl/fifo';
 export * from './wallets/profitability';
+export * from './wallets/status';
+export * from './lineage/parseRootWalletFile';
+export * from './lineage/lineageClassify';
+export * from './lineage/valuation';
+export * from './lineage/monitoringSchedule';
 export * from './rules/ruleA';
 export * from './rules/ruleB';
 export * from './rules/ruleC';
@@ -26,6 +31,7 @@ export * from './cluster/unionFind';
 export * from './cluster/clusterer';
 export * from './rotation/matcher';
 export * from './flow/sankeyBuilder';
+export * from './flow/snapshotPersistence';
 export * from './backtest/evaluate';
 export * from './backtest/summarize';
 export * from './backtest/replay';
@@ -38,6 +44,9 @@ export * from './feed/explain';
 export * from './candidates/validate';
 export * from './social/index';
 export * from './confluence/index';
+export * from './stealth/index';
+export * from './runnermining/index';
+export * from './risk/freshness';
 
 // Graph module: the unused sketch GraphNode/GraphEdge/RawGraphEdge that used
 // to live in ./types (never implemented or consumed — confirmed by repo-wide

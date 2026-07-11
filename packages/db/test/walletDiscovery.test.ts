@@ -82,6 +82,9 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runWalletDiscovery', () 
     });
     expect(wallet1).not.toBeNull();
     expect(wallet1!.isWatched).toBe(false);
+    // Phase 0 taxonomy: provider-discovered wallets are observation-only —
+    // a mutant that escalated discovery to signal_eligible must fail here.
+    expect(wallet1!.status).toBe('observation_only');
     expect(wallet1!.notes).toBe('discovered:mock');
 
     const stats1 = await prisma.walletStats.findFirst({ where: { walletId: wallet1!.id } });
@@ -123,7 +126,7 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runWalletDiscovery', () 
         chain: CHAIN,
         firstSeenAt: now,
         lastActiveAt: now,
-        isWatched: true,
+        isWatched: true, status: 'signal_eligible',
         notes: 'manually watched before discovery ran'
       }
     });

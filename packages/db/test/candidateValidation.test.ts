@@ -295,6 +295,11 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runCandidateValidation',
     expect(row!.validationStatus).toBe('promoted');
     expect(row!.promotedWalletId).not.toBeNull();
 
+    // Create-branch status (Phase 0): a promotion that CREATES the wallet
+    // row must mint it signal_eligible.
+    const createdWallet = await prisma.wallet.findUnique({ where: { id: row!.promotedWalletId! } });
+    expect(createdWallet!.status).toBe('signal_eligible');
+
     const stats = await prisma.walletStats.findFirst({ where: { walletId: row!.promotedWalletId! } });
     expect(stats).not.toBeNull();
     expect(stats!.source).toBe('provider');
@@ -498,6 +503,9 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runCandidateValidation',
 
     const walletAfter = await prisma.wallet.findUnique({ where: { id: freshWallet.id } });
     expect(walletAfter!.isWatched).toBe(true);
+    // Phase 0 taxonomy: promotion is one of the only paths that confers
+    // signal eligibility.
+    expect(walletAfter!.status).toBe('signal_eligible');
 
     // --- AFTER promotion: re-aggregate and assert it NOW counts ---
     const inputsAfter = await fetchAggregateInputs(prisma, token.id, DEFAULT_SETTINGS);
@@ -508,5 +516,249 @@ describe.skipIf(!(await probePort('localhost', 5439)))('runCandidateValidation',
     expect(freshBuyerAfter!.isWatched).toBe(true);
     expect(aggregateAfter.smartWalletCount).toBeGreaterThanOrEqual(1);
     expect(aggregateAfter.uniqueEntityCount).toBeGreaterThanOrEqual(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Atomic promotion (2026-07-10 cross-model audit finding): promoteCandidate
+  // (Wallet.isWatched=true + WalletStats write) and the CandidateWallet
+  // 'promoted' status write must be ONE transaction. Pre-fix, the wallet was
+  // promoted first and the status written second, so a crash between the two
+  // left a WATCHED wallet (already influencing signals) whose candidate row
+  // was reset to 'pending' by the error handler — a wallet in the tracked set
+  // that validation bookkeeping says was never promoted.
+  //
+  // The proxy below simulates that crash: it lets every DB call through
+  // except the candidateWallet.update that writes validationStatus='promoted'
+  // (both on the root client and inside any interactive $transaction).
+  // ---------------------------------------------------------------------------
+  it('ATOMIC PROMOTION: a crash on the candidate status write rolls back the wallet promotion (no watched wallet without a promoted candidate)', async () => {
+    const address = `${ADDR_PREFIX}_atomicpromo`;
+    await makeCandidate({ walletAddress: address, claimedPnlUsd: 9500, claimedWinRate: 0.6, claimedTradeCount: 20 });
+
+    function crashingStatusWriteProxy<T extends object>(client: T): T {
+      return new Proxy(client, {
+        get(target, prop, receiver) {
+          if (prop === 'candidateWallet') {
+            const delegate = Reflect.get(target, prop, receiver) as Record<string, unknown>;
+            return new Proxy(delegate, {
+              get(dTarget, dProp, dReceiver) {
+                const original = Reflect.get(dTarget, dProp, dReceiver);
+                if (dProp === 'update' && typeof original === 'function') {
+                  return (args: { data?: { validationStatus?: string } }) => {
+                    if (args?.data?.validationStatus === 'promoted') {
+                      throw new Error('simulated crash between wallet promotion and candidate status write');
+                    }
+                    return (original as (a: unknown) => unknown).call(dTarget, args);
+                  };
+                }
+                return typeof original === 'function' ? (original as CallableFunction).bind(dTarget) : original;
+              }
+            });
+          }
+          if (prop === '$transaction') {
+            const original = Reflect.get(target, prop, receiver) as CallableFunction;
+            return (arg: unknown, opts?: unknown) => {
+              if (typeof arg === 'function') {
+                return original.call(target, (tx: object) => (arg as (t: object) => unknown)(crashingStatusWriteProxy(tx)), opts);
+              }
+              return original.call(target, arg, opts);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? (value as CallableFunction).bind(target) : value;
+        }
+      });
+    }
+
+    const crashingPrisma = crashingStatusWriteProxy(prisma);
+    const result = await runCandidateValidation(crashingPrisma as typeof prisma, DEFAULT_SETTINGS, async (chain, walletAddress) => {
+      if (walletAddress !== address) return null;
+      return { pnl30d: 9500, realizedPnlUsd: 6000, winRate: 0.6, tradeCount: 20, avgTradeSizeUsd: 500, confidence: 80 };
+    });
+
+    // The crash is counted as an error, not a promotion. promoted===0 is
+    // exact-safe even against foreign pending rows in the shared LITE DB (the
+    // proxy blocks EVERY 'promoted' status write); errors uses >= like the
+    // rest of this file because foreign candidates can add their own.
+    expect(result.promoted).toBe(0);
+    expect(result.errors).toBeGreaterThanOrEqual(1);
+
+    // Error handler resets the candidate to pending (existing behavior).
+    const candidate = await prisma.candidateWallet.findFirst({ where: { walletAddress: address } });
+    expect(candidate!.validationStatus).toBe('pending');
+    expect(candidate!.promotedWalletId).toBeNull();
+
+    // THE invariant: the interrupted promotion must not leave a watched
+    // wallet behind. Rolled back => no Wallet row (it was created inside the
+    // transaction) and no stats row.
+    const wallet = await prisma.wallet.findUnique({
+      where: { address_chain: { address, chain: CHAIN } },
+      include: { stats: true }
+    });
+    expect(wallet?.isWatched ?? false).toBe(false);
+    expect(wallet?.stats ?? []).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Concurrent-pass safety (2026-07-10 Codex review Critical): two validation
+  // passes racing on the same pending candidate must not double-process it or
+  // clobber each other's terminal writes. Two guards under test:
+  //   1. CLAIM: each row is claimed with an atomic pending->validating
+  //      updateMany; a row whose status changed since the batch select is
+  //      skipped, never re-claimed (the old blanket updateMany would even
+  //      demote a just-promoted row back to 'validating').
+  //   2. RESET: the error handler's reset-to-pending only fires while the row
+  //      is still 'validating' — it must not overwrite a terminal status a
+  //      concurrent pass committed.
+  // ---------------------------------------------------------------------------
+  it('CLAIM GUARD: a candidate whose status changed after the batch select is skipped, not re-processed', async () => {
+    const address = `${ADDR_PREFIX}_claimrace`;
+    const created = await makeCandidate({ walletAddress: address, claimedPnlUsd: 9500, claimedWinRate: 0.6, claimedTradeCount: 20 });
+
+    // Proxy: after runCandidateValidation's batch findMany returns, simulate
+    // a concurrent pass claiming the row (status -> 'validating') before this
+    // pass gets to claim it.
+    const raceyPrisma = new Proxy(prisma, {
+      get(target, prop, receiver) {
+        if (prop === 'candidateWallet') {
+          const delegate = Reflect.get(target, prop, receiver) as Record<string, unknown>;
+          return new Proxy(delegate, {
+            get(dTarget, dProp, dReceiver) {
+              const original = Reflect.get(dTarget, dProp, dReceiver);
+              if (dProp === 'findMany' && typeof original === 'function') {
+                return async (args: unknown) => {
+                  const rows = await (original as (a: unknown) => Promise<unknown[]>).call(dTarget, args);
+                  await prisma.candidateWallet.update({ where: { id: created.id }, data: { validationStatus: 'validating' } });
+                  return rows;
+                };
+              }
+              return typeof original === 'function' ? (original as CallableFunction).bind(dTarget) : original;
+            }
+          });
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? (value as CallableFunction).bind(target) : value;
+      }
+    });
+
+    const result = await runCandidateValidation(raceyPrisma as typeof prisma, DEFAULT_SETTINGS, async (chain, walletAddress) => {
+      if (walletAddress !== address) return null;
+      return { pnl30d: 9500, realizedPnlUsd: 6000, winRate: 0.6, tradeCount: 20, avgTradeSizeUsd: 500, confidence: 80 };
+    });
+
+    // The row belongs to the other pass now: skipped, untouched. Row-level
+    // assertions only — global counters could see foreign pending rows from
+    // the shared LITE DB (seed leaves some behind by design), and with 100+
+    // foreign rows the batch could even exclude this candidate entirely;
+    // either way the row-level invariant below is what the guard promises.
+    const row = await prisma.candidateWallet.findFirst({ where: { walletAddress: address } });
+    expect(row!.validationStatus).toBe('validating');
+    const wallet = await prisma.wallet.findUnique({ where: { address_chain: { address, chain: CHAIN } } });
+    expect(wallet).toBeNull();
+  });
+
+  it('RESET GUARD: the error-handler reset must not clobber a terminal status a concurrent pass committed', async () => {
+    const address = `${ADDR_PREFIX}_resetrace`;
+    const created = await makeCandidate({ walletAddress: address, claimedPnlUsd: 9500, claimedWinRate: 0.6, claimedTradeCount: 20 });
+
+    // Proxy: this pass's own 'promoted' status write first observes a
+    // concurrent pass committing 'promoted' for the same row, then crashes.
+    // The catch handler's reset must leave the concurrent 'promoted' intact.
+    function crashingAfterConcurrentCommitProxy<T extends object>(client: T): T {
+      return new Proxy(client, {
+        get(target, prop, receiver) {
+          if (prop === 'candidateWallet') {
+            const delegate = Reflect.get(target, prop, receiver) as Record<string, unknown>;
+            return new Proxy(delegate, {
+              get(dTarget, dProp, dReceiver) {
+                const original = Reflect.get(dTarget, dProp, dReceiver);
+                if (dProp === 'update' && typeof original === 'function') {
+                  return async (args: { data?: { validationStatus?: string } }) => {
+                    if (args?.data?.validationStatus === 'promoted') {
+                      await prisma.candidateWallet.update({
+                        where: { id: created.id },
+                        data: { validationStatus: 'promoted' }
+                      });
+                      throw new Error('simulated crash after a concurrent pass committed promoted');
+                    }
+                    return (original as (a: unknown) => unknown).call(dTarget, args);
+                  };
+                }
+                return typeof original === 'function' ? (original as CallableFunction).bind(dTarget) : original;
+              }
+            });
+          }
+          if (prop === '$transaction') {
+            const original = Reflect.get(target, prop, receiver) as CallableFunction;
+            return (arg: unknown, opts?: unknown) => {
+              if (typeof arg === 'function') {
+                return original.call(target, (tx: object) => (arg as (t: object) => unknown)(crashingAfterConcurrentCommitProxy(tx)), opts);
+              }
+              return original.call(target, arg, opts);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? (value as CallableFunction).bind(target) : value;
+        }
+      });
+    }
+
+    const result = await runCandidateValidation(
+      crashingAfterConcurrentCommitProxy(prisma) as typeof prisma,
+      DEFAULT_SETTINGS,
+      async (chain, walletAddress) => {
+        if (walletAddress !== address) return null;
+        return { pnl30d: 9500, realizedPnlUsd: 6000, winRate: 0.6, tradeCount: 20, avgTradeSizeUsd: 500, confidence: 80 };
+      }
+    );
+
+    expect(result.errors).toBeGreaterThanOrEqual(1);
+    const row = await prisma.candidateWallet.findFirst({ where: { walletAddress: address } });
+    expect(row!.validationStatus).toBe('promoted');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Classification survives promotion (Phase 0 review, both reviewers):
+  // a wallet an operator/classifier marked public_kol (or excluded, bot,
+  // copytrader...) must NOT be re-enabled just because a candidate for the
+  // same address later clears automated validation. Classification wins;
+  // promotion may only upgrade observation_only.
+  // ---------------------------------------------------------------------------
+  it('CLASSIFICATION WINS: promoting a candidate whose wallet is public_kol leaves the status untouched (no re-enable)', async () => {
+    const now = new Date();
+    const address = `${ADDR_PREFIX}_kolpromo`;
+    await prisma.wallet.create({
+      data: { address, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: false, status: 'public_kol' }
+    });
+    await makeCandidate({ walletAddress: address, claimedPnlUsd: 9500, claimedWinRate: 0.6, claimedTradeCount: 20 });
+
+    const result = await runCandidateValidation(prisma, DEFAULT_SETTINGS, async (chain, walletAddress) => {
+      if (walletAddress !== address) return null;
+      return { pnl30d: 9500, realizedPnlUsd: 6000, winRate: 0.6, tradeCount: 20, avgTradeSizeUsd: 500, confidence: 80 };
+    });
+    expect(result.promoted).toBeGreaterThanOrEqual(1);
+
+    const wallet = await prisma.wallet.findUnique({ where: { address_chain: { address, chain: CHAIN } } });
+    expect(wallet!.status).toBe('public_kol'); // classification survives
+    const candidate = await prisma.candidateWallet.findFirst({ where: { walletAddress: address } });
+    expect(candidate!.validationStatus).toBe('promoted'); // evidence was valid — bookkeeping records it
+  });
+
+  it('CLASSIFICATION WINS: an observation_only wallet IS upgraded to signal_eligible by promotion', async () => {
+    const now = new Date();
+    const address = `${ADDR_PREFIX}_obspromo`;
+    await prisma.wallet.create({
+      data: { address, chain: CHAIN, firstSeenAt: now, lastActiveAt: now, isWatched: false, status: 'observation_only' }
+    });
+    await makeCandidate({ walletAddress: address, claimedPnlUsd: 9500, claimedWinRate: 0.6, claimedTradeCount: 20 });
+
+    await runCandidateValidation(prisma, DEFAULT_SETTINGS, async (chain, walletAddress) => {
+      if (walletAddress !== address) return null;
+      return { pnl30d: 9500, realizedPnlUsd: 6000, winRate: 0.6, tradeCount: 20, avgTradeSizeUsd: 500, confidence: 80 };
+    });
+
+    const wallet = await prisma.wallet.findUnique({ where: { address_chain: { address, chain: CHAIN } } });
+    expect(wallet!.status).toBe('signal_eligible');
+    expect(wallet!.isWatched).toBe(true);
   });
 });

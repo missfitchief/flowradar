@@ -23,8 +23,8 @@
 // marketWindow (backtest replay, tests) keep the original full-history load.
 
 import type { PrismaClient } from '@prisma/client';
-import { isProfitableWallet, resolveWindowBounds } from '@flowradar/core';
-import type { Settings } from '@flowradar/core';
+import { isProfitableWallet, resolveWindowBounds, statsTrustOf } from '@flowradar/core';
+import type { Settings, WalletStatus } from '@flowradar/core';
 import type {
   ClusterMembershipInput,
   MarketPointInput,
@@ -156,7 +156,7 @@ export async function fetchAggregateInputs(
   const [walletRows, statsRows, classificationRows, clusterRows, marketRows] = await Promise.all([
     prisma.wallet.findMany({
       where: { id: { in: walletIds } },
-      select: { id: true, isWatched: true }
+      select: { id: true, isWatched: true, status: true }
     }),
     prisma.walletStats.findMany({
       where: { walletId: { in: walletIds } },
@@ -168,7 +168,8 @@ export async function fetchAggregateInputs(
         realizedPnlUsd: true,
         winRate: true,
         tradeCount: true,
-        avgTradeSizeUsd: true
+        avgTradeSizeUsd: true,
+        source: true
       }
     }),
     prisma.walletClassification.findMany({
@@ -183,6 +184,7 @@ export async function fetchAggregateInputs(
   ]);
 
   const isWatchedByWallet = new Map(walletRows.map((w) => [w.id, w.isWatched]));
+  const statusByWallet = new Map(walletRows.map((w) => [w.id, w.status]));
 
   // Latest WalletStats row per wallet (rows already ordered computedAt
   // desc, so first occurrence per walletId wins) — same reduction pattern
@@ -203,24 +205,38 @@ export async function fetchAggregateInputs(
 
   const wallets: WalletInfoInput[] = walletIds.map((walletId) => {
     const stats = latestStatsByWallet.get(walletId);
-    const meetsProfitable = stats
-      ? isProfitableWallet(
-          {
-            pnlUsd: Number(stats.pnlUsd),
-            realizedPnlUsd: Number(stats.realizedPnlUsd),
-            winRate: stats.winRate,
-            tradeCount: stats.tradeCount,
-            avgTradeSizeUsd: Number(stats.avgTradeSizeUsd)
-          },
-          settings.profitableWallet
-        )
-      : false;
+    const isWatched = isWatchedByWallet.get(walletId) ?? false;
+    // Trust boundary (2026-07-10 audit + Phase 0 review): meetsProfitable is
+    // decided through the trust taxonomy, not raw source strings —
+    // operator_approved (csv) and locally_verified (computed) are trusted on
+    // their own; provider_claimed confers only for a watched wallet
+    // (promotion sets isWatched, so candidate-validated wallets keep
+    // counting); synthetic (backtest continuations) is machine-marked
+    // never-evidence and NEVER confers, watched or not.
+    const trust = stats ? statsTrustOf(stats.source) : null;
+    const meetsProfitable =
+      stats && trust !== 'synthetic' && (trust !== 'provider_claimed' || isWatched)
+        ? isProfitableWallet(
+            {
+              pnlUsd: Number(stats.pnlUsd),
+              realizedPnlUsd: Number(stats.realizedPnlUsd),
+              winRate: stats.winRate,
+              tradeCount: stats.tradeCount,
+              avgTradeSizeUsd: Number(stats.avgTradeSizeUsd)
+            },
+            settings.profitableWallet
+          )
+        : false;
     return {
       walletId,
-      isWatched: isWatchedByWallet.get(walletId) ?? false,
+      isWatched,
       walletScore: stats?.walletScore ?? 0,
       labels: labelsByWallet.get(walletId) ?? [],
-      meetsProfitable
+      meetsProfitable,
+      // Wallet.status is NOT NULL with default observation_only, so a wallet
+      // that appears in trade history but somehow lacks a row here (deleted
+      // mid-flight) degrades to zero signal weight — the safe direction.
+      status: (statusByWallet.get(walletId) ?? 'observation_only') as WalletStatus
     };
   });
 

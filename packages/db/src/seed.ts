@@ -25,6 +25,7 @@ import { createMockWorld, GRAPH_DEMO_ROOT_ADDRESS, MockCandidateSource, MockSoci
 import type { MockWorld } from '@flowradar/providers';
 import type { Prisma } from '@prisma/client';
 import { prisma } from './client';
+import { withGlobalJobLock } from './locks/globalJobLock';
 import { ingestNormalizedTxs, snapshotMarket } from './ingest';
 import { runFlowScoringPass } from './scoring-pass';
 import { runEntityClustering } from './clustering';
@@ -110,6 +111,14 @@ async function wipeAllTables(): Promise<void> {
   // below (Task D, External Confluence).
   await prisma.tokenConfluenceSnapshot.deleteMany();
   await prisma.externalConfluenceSource.deleteMany();
+  // Second lineage guard at the point of no return (2026-07-10 Codex
+  // re-review): main() checks before the wipe starts, but a concurrent root
+  // import could land between that check and this deleteMany — re-checking
+  // here narrows the data-loss window to milliseconds. Full cross-process
+  // serialization (advisory locks) is deliberately deferred to the lineage
+  // scheduler build; operator practice is to not run seed and imports
+  // simultaneously.
+  await assertNoLineageRootsOrExplicitOverride();
   await prisma.wallet.deleteMany();
   await prisma.token.deleteMany();
   await prisma.importJob.deleteMany();
@@ -429,7 +438,7 @@ const EXTERNAL_CONFLUENCE_SOURCE_SEED_ROWS = [
     provider: 'gmgn',
     apiKeyEnvName: 'GMGN_API_KEY',
     rateLimitPerMinute: 30,
-    notes: 'Query-only external intel — disabled by default; stub until confirmed query-only docs/key. NEVER references swap/order/private-key/wallet endpoints (query-only, design rule 8).'
+    notes: 'Query-only external intel — disabled by default; stub until confirmed query-only docs/key. NEVER references execution, trading, or key-management endpoints (query-only, design rule 8).'
   }
 ] as const;
 
@@ -933,9 +942,10 @@ async function seedComputedWalletStats(world: MockWorld): Promise<number> {
         chain: mockWallet.chain,
         firstSeenAt: mockWallet.firstTxTs ?? now,
         lastActiveAt: mockWallet.firstTxTs ?? now,
-        isWatched: true
+        isWatched: true,
+        status: 'signal_eligible'
       },
-      update: { isWatched: true },
+      update: { isWatched: true, status: 'signal_eligible' },
       select: { id: true }
     });
 
@@ -1149,7 +1159,7 @@ async function seedQualifyingCandidateTrades(
   for (const candidate of goodCandidates) {
     const wallet = await prisma.wallet.upsert({
       where: { address_chain: { address: candidate.walletAddress, chain: 'SOLANA' } },
-      create: { address: candidate.walletAddress, chain: 'SOLANA', firstSeenAt: now, lastActiveAt: now, isWatched: false },
+      create: { address: candidate.walletAddress, chain: 'SOLANA', firstSeenAt: now, lastActiveAt: now, isWatched: false, status: 'observation_only' },
       update: {}
     });
 
@@ -1513,13 +1523,21 @@ async function runSelfCheck(
   // check's own comment already anticipated: "28 world tokens plus any
   // quote-asset stubs ingest correctly auto-creates"), not a magic constant
   // that silently drifts whenever the token universe legitimately grows.
-  const flowSnapshotCount = await prisma.tokenFlowSnapshot.count();
+  // Task 0 (snapshot dedup): signal detection now records a REAL status
+  // transition as its own row (trigger-time snapshot) instead of rewriting the
+  // latest row in place, so a signal-firing token legitimately carries MORE
+  // than one row after the seed's score->detect sequence. The invariant is
+  // therefore per-TOKEN coverage (every scoreable token has snapshots, no
+  // token missed), not a raw row-count equality.
+  const tokensWithFlowSnapshots = (
+    await prisma.tokenFlowSnapshot.groupBy({ by: ['tokenId'] })
+  ).length;
   const tokensWithMarketData = await prisma.token.count({ where: { marketSnapshots: { some: {} } } });
   rows.push({
-    check: `flow snapshots == tokens-with-market-data count (one snapshot per scoreable token, no dupes)`,
+    check: `tokens with flow snapshots == tokens-with-market-data count (every scoreable token covered)`,
     expected: String(tokensWithMarketData),
-    actual: String(flowSnapshotCount),
-    pass: flowSnapshotCount === tokensWithMarketData
+    actual: String(tokensWithFlowSnapshots),
+    pass: tokensWithFlowSnapshots === tokensWithMarketData
   });
 
   const csvImportJob = await prisma.importJob.findFirst({
@@ -1537,11 +1555,19 @@ async function runSelfCheck(
   const novaAddress = world.meta.scenarios.nova.tokenAddress;
   const rugzAddress = world.meta.scenarios.rugz.tokenAddress;
 
-  const topFlowSnapshots = await prisma.tokenFlowSnapshot.findMany({
+  // Task 0 (snapshot dedup): a token may now carry >1 row (signal transitions
+  // persist as their own rows), so rank TOKENS by their best row — raw-row
+  // ranking would let one token fill several leaderboard slots.
+  const rankedRows = await prisma.tokenFlowSnapshot.findMany({
     orderBy: { flowScore: 'desc' },
-    take: 5,
     include: { token: { select: { symbol: true, address: true } } }
   });
+  const seenTokens = new Set<string>();
+  const topFlowSnapshots = rankedRows.filter((s) => {
+    if (seenTokens.has(s.tokenId)) return false;
+    seenTokens.add(s.tokenId);
+    return true;
+  }).slice(0, 5);
 
   // Recalibrated 2026-07-05 (controller): after the window-anchor fix QUIET
   // legitimately scores ~even with NOVA (88.0 vs 87.9). The demo guarantee is
@@ -2231,11 +2257,13 @@ async function printSummaryTable(): Promise<void> {
     prisma.alert.count()
   ]);
 
-  const top5 = await prisma.tokenFlowSnapshot.findMany({
+  // Per-token best row (transition rows would otherwise duplicate a token).
+  const rankedAll = await prisma.tokenFlowSnapshot.findMany({
     orderBy: { flowScore: 'desc' },
-    take: 5,
     include: { token: { select: { symbol: true } } }
   });
+  const seenTop = new Set<string>();
+  const top5 = rankedAll.filter((s) => (seenTop.has(s.tokenId) ? false : (seenTop.add(s.tokenId), true))).slice(0, 5);
 
   console.log('Seed summary:');
   console.log(`  wallets:              ${wallets}`);
@@ -2259,10 +2287,41 @@ async function printSummaryTable(): Promise<void> {
 // Orchestration
 // ---------------------------------------------------------------------------
 
+/**
+ * Lineage-root wipe guard (2026-07-10 Capital Lineage review): operator-
+ * imported roots are PERMANENT by contract, but wipeAllTables() deletes every
+ * wallet and LineageRoot/MonitoringSubscription cascade from Wallet — so a
+ * routine `npm run db:seed` on the shared LITE DB would silently destroy the
+ * operator's real root imports. Refuse when roots exist unless the operator
+ * explicitly opts in (SEED_WIPE_LINEAGE=true). Exported for tests; same
+ * fail-closed guard style as seedBacktestContinuation's MOCK_MODE refusal.
+ */
+export async function assertNoLineageRootsOrExplicitOverride(): Promise<void> {
+  const rootCount = await prisma.lineageRoot.count();
+  if (rootCount > 0 && process.env.SEED_WIPE_LINEAGE !== 'true') {
+    throw new Error(
+      `db:seed refused: ${rootCount} permanent lineage root(s) exist in this database — seeding wipes ALL wallets ` +
+        `and their roots/subscriptions cascade away. Re-run with SEED_WIPE_LINEAGE=true ONLY if you intend to ` +
+        `destroy the imported roots (they can be re-imported from the operator file afterwards).`
+    );
+  }
+}
+
 async function main(): Promise<void> {
   loadEnv();
   const startedAt = Date.now();
 
+  // Global job serialization (Prerequisite B): the destructive wipe must
+  // never interleave with a root import, lineage backfill, or live reset.
+  // Held for the entire seed — a concurrent job fails honestly with
+  // GlobalJobLockBusyError instead of racing the wipe.
+  await withGlobalJobLock('db-seed', async () => {
+    await mainLocked(startedAt);
+  });
+}
+
+async function mainLocked(startedAt: number): Promise<void> {
+  await assertNoLineageRootsOrExplicitOverride();
   await wipeAllTables();
 
   await bootstrapChains();
