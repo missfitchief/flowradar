@@ -46,7 +46,7 @@
 
 import { aggregateWindow, evaluateAllRules, firedRules } from '@flowradar/core';
 import type { Settings, TokenWindowAggregate } from '@flowradar/core';
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient, Prisma } from '@prisma/client';
 import { fetchAggregateInputs } from './fetchAggregateInputs';
 import { buildFundingEvents } from './fundingEvents';
 import { runProfitRotation } from './rotation';
@@ -247,8 +247,8 @@ async function updateSnapshotSignalStatus(
 ): Promise<void> {
   const latestSnapshot = await prisma.tokenFlowSnapshot.findFirst({
     where: { tokenId },
-    orderBy: { ts: 'desc' },
-    select: { id: true, flowScore: true }
+    orderBy: [{ ts: 'desc' }, { id: 'desc' }], // deterministic under ms ties (Task 0 review)
+    select: { id: true, flowScore: true, signalStatus: true, ts: true }
   });
   if (!latestSnapshot) return;
 
@@ -271,8 +271,23 @@ async function updateSnapshotSignalStatus(
     signalStatus = 'watching';
   }
 
-  await prisma.tokenFlowSnapshot.update({
-    where: { id: latestSnapshot.id },
-    data: { signalStatus }
+  if (signalStatus === latestSnapshot.signalStatus) return; // no transition — nothing to record
+
+  // Task 0 (snapshot dedup) fix, Codex Critical: on a REAL status transition,
+  // clone the latest row at the transition time instead of rewriting it in
+  // place. Pre-dedup, the latest row was always seconds old so an in-place
+  // update effectively WAS the trigger-time record; with unchanged-row
+  // suppression the latest row can be up to a heartbeat old, and rewriting it
+  // would falsely backdate the transition and lose the trigger-time snapshot.
+  const clone = await prisma.tokenFlowSnapshot.findUnique({ where: { id: latestSnapshot.id } });
+  if (!clone) return;
+  const { id: _id, ts: _ts, signalStatus: _st, componentBreakdown, ...fields } = clone;
+  await prisma.tokenFlowSnapshot.create({
+    data: {
+      ...fields,
+      ts: new Date(),
+      signalStatus,
+      componentBreakdown: (componentBreakdown ?? {}) as Prisma.InputJsonValue
+    }
   });
 }
