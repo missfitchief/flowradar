@@ -63,7 +63,7 @@ Full capability audit: [docs/CURRENT_STATE_RECONCILIATION.md](CURRENT_STATE_RECO
 - **P6 universe scaling to 750/1,000:** deferred **gate-honestly** — the scale-up gates
   require observed Helius 400/429 safety under the budgeted poller, and no polling window
   has run yet. The shadow run produces exactly that evidence; scale after its first
-  checkpoints. Verified current universe: **647 observation wallets** (+1 eligible).
+  checkpoints. Verified universe at gate: **648 observation wallets** (+1 eligible; grew by 1 during the P1 smoke enrollments).
 - **Bridge correlation / profit rotation:** live-unexercised until the shadow run
   ingests trades (0 bridge edges / 0 trades in live DB at gate time).
 
