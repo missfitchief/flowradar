@@ -7,10 +7,16 @@
 // full history, including the aggregate-window-anchor bug found and fixed
 // during this job's original Task 5 verification).
 
-import { runFlowScoringPass } from '@flowradar/db';
+import { runFlowScoringPass, warmingRiskResolver } from '@flowradar/db';
 import type { JobContext } from '../context';
+import { buildRiskCache } from '../risk';
 
 export async function run(ctx: JobContext): Promise<void> {
-  const { prisma, providers, settings, log } = ctx;
-  await runFlowScoringPass(prisma, settings, (chain) => providers(chain, 'risk'), log);
+  const { prisma, settings, log } = ctx;
+  // Task 1 (Helius 429 fix): score off the cached risk layer. The warming
+  // resolver serves fresh/stale cached penalties verbatim (FlowScore
+  // unchanged) and inline-fetches (deduped) only for a genuinely new token —
+  // eliminating the per-token-per-pass Helius burst without changing scores.
+  const riskCache = buildRiskCache(ctx);
+  await runFlowScoringPass(prisma, settings, warmingRiskResolver(riskCache), log);
 }

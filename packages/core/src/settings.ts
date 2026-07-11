@@ -129,7 +129,16 @@ const IntervalsSchema = z.object({
    *  a default so stored settings rows without it keep parsing; a job
    *  interval, NOT a signal threshold. Floor 30s: PUT /api/settings must not
    *  be able to configure a near-zero worker loop (Codex P2 review). */
-  stealthAccumulationSec: z.number().min(30).default(300)
+  stealthAccumulationSec: z.number().min(30).default(300),
+  /** Bounded token-risk-refresh job cadence (Task 1, Helius 429 fix). Additive
+   *  with a default so stored settings rows without it keep parsing. The job is
+   *  bounded PER RUN by tokenRiskRefreshBatch (below), so this cadence never
+   *  controls burst size — only how often the bounded batch advances. Floor
+   *  30s for the same near-zero-loop guard as stealthAccumulationSec. */
+  tokenRiskRefreshSec: z.number().min(30).default(120),
+  /** Max tokens the risk-refresh job fetches PER run — the hard cap on Helius
+   *  risk calls per cycle regardless of universe size (Task 1). */
+  tokenRiskRefreshBatch: z.number().int().min(1).default(200)
 });
 
 // Task 34 (Wave 4.5, Spec §5b) — external smart-wallet source connectors.
@@ -365,7 +374,9 @@ export const DEFAULT_SETTINGS: Settings = {
     walletStatsRefreshHours: 6,
     walletDiscoveryHours: 24,
     backtestHours: 6,
-    stealthAccumulationSec: 300
+    stealthAccumulationSec: 300,
+    tokenRiskRefreshSec: 120,
+    tokenRiskRefreshBatch: 200
   },
   connectors: {
     // Spec §5b's 6 external candidate-wallet feeders, priority order.
