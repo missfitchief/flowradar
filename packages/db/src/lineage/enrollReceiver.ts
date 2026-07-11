@@ -516,9 +516,18 @@ async function upsertRelationship(
     if (byTx.has(e.txHash)) continue;
     if (e.valuationStatus === 'not_applicable') continue;
     let usd: number | null;
-    if (e.valuationStatus === null) usd = Number(e.amountUsd);
-    else if (e.valuedUsd != null) usd = Number(e.valuedUsd);
-    else usd = null; // unavailable → UNKNOWN, never 0
+    if (e.valuationStatus === null) {
+      // Legacy (pre-Wave-A) edge: its amountUsd is KNOWN only when > 0. A
+      // legacy $0 is almost always an unpriced native-SOL edge, i.e. UNKNOWN —
+      // not a confirmed $0 — so it is null (counted in unknownValueTxCount)
+      // pending revaluation, never summed as a known zero. (Codex final review.)
+      const legacy = Number(e.amountUsd);
+      usd = legacy > 0 ? legacy : null;
+    } else if (e.valuedUsd != null) {
+      usd = Number(e.valuedUsd);
+    } else {
+      usd = null; // unavailable → UNKNOWN, never 0
+    }
     byTx.set(e.txHash, usd);
   }
   const interactionCount = byTx.size;
