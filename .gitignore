@@ -12,3 +12,4 @@ coverage/
 *.tsbuildinfo
 db-backups/
 runs/
+.superpowers-ledger.md
