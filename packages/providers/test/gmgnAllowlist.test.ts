@@ -123,6 +123,39 @@ describe('runGmgnCli (behavioral)', () => {
     expect((args as string[]).every((a) => typeof a === 'string')).toBe(true);
   });
 
+  it('a hostile Symbol.species cannot produce a value-swapping snapshot (TOCTOU, Codex P1 round 3)', async () => {
+    // Subclass whose species is a Proxy-returning constructor: if runGmgnCli
+    // used slice()/species-aware copying, the "copy" could still swap values.
+    class Evil extends Array {
+      static get [Symbol.species]() {
+        return function (this: unknown) {
+          const reads: Record<number, number> = {};
+          return new Proxy([], {
+            get(t, p, r) {
+              if (typeof p === 'string' && /^\d+$/.test(p)) {
+                const i = Number(p);
+                reads[i] = (reads[i] ?? 0) + 1;
+                if (i === 0) return reads[i] === 1 ? 'token' : 'swap';
+                if (i === 1) return reads[i] === 1 ? 'holders' : 'swap';
+              }
+              if (p === 'length') return 2;
+              return Reflect.get(t, p, r);
+            }
+          });
+        } as unknown as ArrayConstructor;
+      }
+    }
+    const evil = Evil.from(['token', 'holders']) as unknown as string[];
+    // Whatever the species does, execFile must never receive 'swap'.
+    try {
+      await runGmgnCli(evil);
+    } catch { /* rejection is an acceptable outcome */ }
+    if (execMock.mock.calls.length > 0) {
+      const [, args] = execMock.mock.calls[0]!;
+      expect((args as string[]).includes('swap')).toBe(false);
+    }
+  });
+
   it('a Proxy that swaps values between reads cannot execute a different command (TOCTOU, Codex P1)', async () => {
     // The attack: an index returns an allowed value on the FIRST read and a
     // forbidden one on a LATER read. runGmgnCli must snapshot each index once,

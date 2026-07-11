@@ -104,7 +104,15 @@ export async function runGmgnCli(argv: readonly unknown[], opts: GmgnCliOptions 
   // (structuredClone of a length-fixed shallow array), reject non-string
   // elements, validate the snapshot, and execute that immutable snapshot.
   if (!Array.isArray(argv)) throw new GmgnForbiddenCommandError(argv);
-  const snapshot: unknown[] = Array.prototype.slice.call(argv); // single read per index
+  // Copy into a GUARANTEED-plain array element-by-element (Codex P1 round 3):
+  // Array.prototype.slice honors the input's constructor[Symbol.species], so a
+  // hostile species could hand back a Proxy "snapshot" that still swaps values
+  // between the validate read and the exec read. A hand-built literal array +
+  // a fixed numeric length (coerced once, capped) consults no input species and
+  // reads each index exactly once.
+  const len = Math.min(Number((argv as { length: unknown }).length) | 0, 256);
+  const snapshot: unknown[] = [];
+  for (let i = 0; i < len; i++) snapshot.push((argv as readonly unknown[])[i]);
   assertGmgnCommandAllowed(snapshot); // rejects any non-string element too
   const safeArgv = snapshot as string[]; // proven all-string by the assert
   const cli = resolveCliPath(opts.cliPath);
