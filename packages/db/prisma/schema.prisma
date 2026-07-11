@@ -1651,3 +1651,85 @@ model WalletBehaviorProfile {
   @@index([dataQuality])
   @@map("wallet_behavior_profiles")
 }
+
+/// Runner Mining Task 1-2 — canonical historical token universe + runner
+/// classification (one row per canonical Solana mint). SHADOW-ONLY analytics.
+model TokenLifecycle {
+  id                String    @id @default(cuid())
+  /// Canonical Solana mint — THE dedupe key (one lifecycle per mint, ever).
+  mint              String    @unique
+  tokenId           String?
+  enteredUniverseAt DateTime
+  /// Provenance: which local sources evidence this token (tables, counts, spans).
+  sourcesJson       Json
+  /// covered | partially_covered | unavailable | invalid | unsupported | quarantined
+  coverage          String
+  seriesPointCount  Int       @default(0)
+  firstObservedAt   DateTime?
+  lastObservedAt    DateTime?
+  /// Task 2 (null until classified): verified_above_10m | verified_below_10m |
+  /// insufficient_history | conflicting_evidence | invalid
+  runnerClass       String?
+  athMcapUsd        Decimal?  @db.Decimal(20, 4)
+  athTs             DateTime?
+  baselineMcapUsd   Decimal?  @db.Decimal(20, 4)
+  outcomeLabels     Json?
+  /// high | medium | low — from series anchoring + point density.
+  confidence        String?
+  evidenceJson      Json?
+  classifiedAt      DateTime?
+  engineVersion     Int       @default(1)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([coverage])
+  @@index([runnerClass])
+  @@map("token_lifecycles")
+}
+
+/// Runner Mining Task 3 — matched control per verified runner (or an explicit
+/// no-valid-control record). Matching uses PRE-OUTCOME features only.
+model CohortMatch {
+  id           String   @id @default(cuid())
+  runnerMint   String   @unique
+  controlMint  String?
+  /// matched_tier1 | matched_tier2 | no_valid_control
+  status       String
+  tier         String?
+  distance     Float?
+  featuresJson Json
+  /// Candidate mints considered-but-rejected with reasons (bounded sample).
+  excludedJson Json?
+  confidence   String
+  reason       String?
+  createdAt    DateTime @default(now())
+
+  @@index([status])
+  @@map("cohort_matches")
+}
+
+/// Runner Mining Task 4 — early-buyer entries below configured mcap bands
+/// for runner + control tokens. Receipts-level rows (tx-anchored).
+model EarlyBuyerEntry {
+  id            String   @id @default(cuid())
+  mint          String
+  cohort        String
+  walletAddress String
+  txHash        String
+  blockOrSlot   BigInt
+  ts            DateTime
+  entryMcapUsd  Decimal? @db.Decimal(20, 4)
+  /// under_5k | 5k_to_10k | 10k_to_20k | 20k_to_50k (research bands)
+  band          String
+  /// Chronological buyer rank within the mint (1 = first observed buyer).
+  buyerRank     Int
+  /// Confidence honestly lowered when pre-trade coverage is incomplete.
+  confidence    String
+  sourceJson    Json
+  createdAt     DateTime @default(now())
+
+  @@unique([mint, txHash, walletAddress])
+  @@index([mint])
+  @@index([band])
+  @@map("early_buyer_entries")
+}
