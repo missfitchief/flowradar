@@ -41,3 +41,55 @@ describe('GMGN confluence adapter — query-only enforcement (grep guard)', () =
     expect(src).toContain('creategmgnprovider');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Repo-wide GMGN capability guard (overnight GMGN policy item 8). gmgn-cli is
+// now installed on operator machines and exposes swap / multi-swap / order /
+// cooking / wallet-management / key subcommands. Any FUTURE FlowRadar code
+// that talks to GMGN (CLI shell-out or API) must stay in the query-only
+// families — this guard scans EVERY gmgn-mentioning source file in the
+// integration surface (packages/providers, packages/db, apps/worker src trees)
+// for forbidden CAPABILITY tokens. Tokens are strict (multi-swap, cooking,
+// GMGN_PRIVATE_KEY, sign_transaction, wallet_management, and explicit
+// forbidden `gmgn-cli <cmd>` invocations) so innocent prose like "swap the
+// parser" in unrelated comments cannot false-positive; the single-file guard
+// above stays the stricter gate for the confluence adapter itself.
+// ---------------------------------------------------------------------------
+
+import { globSync } from 'node:fs';
+
+const REPO_ROOT = join(__dirname, '..', '..', '..');
+const SURFACE_GLOBS = ['packages/*/src/**/*.ts', 'apps/*/src/**/*.ts'];
+const CAPABILITY_TOKENS = [
+  'multi-swap',
+  'multiswap',
+  'cooking',
+  'gmgn_' + 'private_key',
+  'sign' + 'transaction',
+  'sign_' + 'transaction',
+  'wallet' + 'management',
+  'wallet_' + 'management'
+];
+// Forbidden gmgn-cli subcommand invocations (string form a shell-out would use).
+const CLI_INVOCATIONS = ['gmgn-cli swap', 'gmgn-cli multi-swap', 'gmgn-cli order', 'gmgn-cli cooking'];
+
+describe('repo-wide GMGN capability guard (grep guard)', () => {
+  const gmgnFiles = SURFACE_GLOBS.flatMap((g) => globSync(g, { cwd: REPO_ROOT }))
+    .map((f) => join(REPO_ROOT, f))
+    .filter((f) => readFileSync(f, 'utf8').toLowerCase().includes('gmgn'));
+
+  it('finds the gmgn integration surface (guard is not vacuous)', () => {
+    expect(gmgnFiles.length).toBeGreaterThan(0);
+  });
+
+  it('no gmgn-mentioning source file references a forbidden capability or CLI subcommand', () => {
+    const offenders: { file: string; token: string }[] = [];
+    for (const file of gmgnFiles) {
+      const content = readFileSync(file, 'utf8').toLowerCase();
+      for (const token of [...CAPABILITY_TOKENS, ...CLI_INVOCATIONS]) {
+        if (content.includes(token)) offenders.push({ file, token });
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});
