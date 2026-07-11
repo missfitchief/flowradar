@@ -1472,6 +1472,53 @@ model ObservationProviderSnapshot {
   @@map("observation_provider_snapshot")
 }
 
+/// GmgnObservation — append-only RAW query-only GMGN feed rows (Task 2). Every
+/// row is provider-CLAIMED evidence, never locally verified: it feeds the
+/// candidate buffer + behavior reconstruction, and NOTHING here grants smart
+/// votes or eligibility (the WalletStatus gate is enforced separately). One
+/// row per distinct (sourceCommand, wallet, token, activityTs, side) — the
+/// dedupe key makes re-polling idempotent.
+model GmgnObservation {
+  id                  String   @id @default(cuid())
+  chain               ChainId
+  /// The read-only gmgn-cli command family this came from
+  /// (e.g. 'track smartmoney', 'token traders', 'portfolio activity').
+  sourceCommand       String
+  walletAddress       String
+  tokenAddress        String?
+  /// GMGN activity/event type verbatim ('buy'|'sell'|'transferIn'|'transferOut'|null).
+  activityType        String?
+  /// Normalized side when derivable ('buy'|'sell'|'transfer'|null-unknown).
+  side                String?
+  amountToken         Decimal? @db.Decimal(38, 18)
+  amountUsd           Decimal? @db.Decimal(20, 4)
+  /// Provider-claimed metrics (NEVER treated as locally verified).
+  providerPnlUsd      Decimal? @db.Decimal(20, 4)
+  providerWinRate     Float?
+  providerTradeCount  Int?
+  /// Raw provider label(s) verbatim (wallet_tag_v2 / maker_info / tags…).
+  rawClassification   Json?
+  /// Provider KOL/promoter indicators present on this row.
+  isKolTagged         Boolean  @default(false)
+  isPromoterTagged    Boolean  @default(false)
+  /// When the activity happened (provider unix ts) vs when we fetched it.
+  activityTs          DateTime?
+  retrievedAt         DateTime
+  /// Pagination cursor/provenance this row was retrieved under.
+  cursor              String?
+  /// 'complete' | 'partial' | 'unknown' — never silently 'ok'.
+  dataQuality         String   @default("complete")
+  /// Stable hash of the dedupe tuple (sourceCommand|wallet|token|activityTs|side).
+  dedupeKey           String
+  createdAt           DateTime @default(now())
+
+  @@unique([dedupeKey])
+  @@index([walletAddress])
+  @@index([tokenAddress])
+  @@index([sourceCommand, retrievedAt])
+  @@map("gmgn_observations")
+}
+
 /// LineageExpansionNode.priority — expansion queue order (spec order).
 enum ExpansionPriority {
   first_funder

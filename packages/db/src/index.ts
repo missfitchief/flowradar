@@ -37,3 +37,4 @@ export * from './graph/runSearch';
 export * from './graph/csv';
 export * from '@prisma/client';
 export * from './stealth/runStealthPass';
+export * from './gmgn/ingest';
