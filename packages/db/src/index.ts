@@ -41,5 +41,6 @@ export * from './gmgn/ingest';
 export * from './gmgn/candidateBuffer';
 export * from './behavior/reconstruct';
 export * from './runnermining/universe';
+export * from './runnermining/enrich';
 export * from './risk/tokenRiskCache';
 export * from './risk/runTokenRiskRefresh';

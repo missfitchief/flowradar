@@ -1733,3 +1733,34 @@ model EarlyBuyerEntry {
   @@index([band])
   @@map("early_buyer_entries")
 }
+
+/// Runner Mining — Birdeye historical enrichment (one row per mint). Evidence
+/// layer only: candles + labeled supply assumption -> reconstructed ATH mcap.
+/// SHADOW-ONLY; never read by FlowScore/signals/eligibility.
+model TokenEnrichment {
+  id             String    @id @default(cuid())
+  mint           String    @unique
+  provider       String    @default("birdeye")
+  /// Earliest provable market timestamp (first returned candle).
+  ohlcvStartTs   DateTime?
+  ohlcvEndTs     DateTime?
+  candleCount    Int       @default(0)
+  /// Bounded 1D candles [{t,o,h,l,c}] (candle-END semantics for no-lookahead).
+  candlesJson    Json?
+  /// { supply, source: 'current_supply_assumption' | 'unavailable' } — labeled, never claimed historical.
+  supplyJson     Json?
+  athMcapUsd     Decimal?  @db.Decimal(24, 4)
+  athTs          DateTime?
+  /// enriched | no_ohlcv | no_supply | provider_error
+  status         String
+  confidence     String
+  receiptsJson   Json
+  retryCount     Int       @default(0)
+  lastError      String?
+  lastSuccessAt  DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([status])
+  @@map("token_enrichments")
+}

@@ -25,6 +25,7 @@ import {
   DEFAULT_RUNNER_MINING_CONFIG
 } from '@flowradar/core';
 import type { MatchFeatures, TokenSeriesPoint } from '@flowradar/core';
+import { enrichmentSeriesPoints } from './enrich';
 
 /** The known quarantined pollution class (docs/STALE_BSC_FIXTURE.md). */
 const QUARANTINED_ADDRESSES = new Set(['0x1234567890abcdef1234567890abcdef12345678']);
@@ -223,29 +224,99 @@ export async function classifyRunnerCohort(
       const anchoredAtLaunch = anchorDelta !== null && anchorDelta >= 0 && anchorDelta <= LAUNCH_ANCHOR_TOLERANCE_MS;
 
       const outcome = computeTokenOutcome(points, DEFAULT_RUNNER_MINING_CONFIG, { anchoredAtLaunch });
-      const effectiveCoverage = truncated && lc.coverage === 'covered' ? 'partially_covered' : lc.coverage;
+      // ENRICHMENT PRECEDENCE: when Birdeye evidence exists, the full-life
+      // candle series is authoritative — its first candle is the earliest
+      // provable market timestamp ('ohlcv_market_start' anchoring, confidence
+      // capped by the labeled current-supply assumption). A local ATH that
+      // disagrees >3x with enriched ATH is a cross-provider conflict: the
+      // token is downgraded, never left simultaneously verified and suspect.
+      const enrichment = await prisma.tokenEnrichment.findUnique({ where: { mint: lc.mint } });
+      let effOutcome = outcome;
+      let effAnchored = anchoredAtLaunch;
+      let effCoverage = truncated && lc.coverage === 'covered' ? 'partially_covered' : lc.coverage;
+      let crossProviderDisagreement: number | null = null;
+      let enrichedAth: number | null = null;
+      let enrichmentApplied = false;
+      if (enrichment?.status === 'enriched') {
+        const ePoints = enrichmentSeriesPoints(enrichment).filter((pt) => pt.ts.getTime() <= now.getTime()); // a partial current candle END lies in the future — not yet knowable, excluded
+        // Market-start anchoring is PROVEN only when (a) the stored series was
+        // NOT truncated (no launch-era candles dropped) and (b) the first
+        // candle lands strictly AFTER the request-window start — meaning the
+        // provider has no earlier market data (Codex C1). Otherwise enrichment
+        // still improves ATH evidence but can never enable verified_below.
+        const eReceipts = enrichment.receiptsJson as { storedTruncated?: boolean; requestFromTs?: number } | null;
+        const notTruncated = eReceipts?.storedTruncated !== true;
+        // COMPLETENESS gates (Codex final round): a below-verdict additionally
+        // requires a gap-free series (no consecutive-candle gap > 7d — a
+        // retention gap could hide the peak) that extends to the present
+        // (last candle within 1d + 1h of now). Dead tokens whose candles stop
+        // early stay insufficient — conservative: absence of data is never
+        // proof that no peak occurred.
+        let gapFree = true;
+        for (let i = 1; i < ePoints.length; i++) {
+          if (ePoints[i].ts.getTime() - ePoints[i - 1].ts.getTime() > 86_400_000 + 3_600_000) { gapFree = false; break; } // consecutive daily candles required: 1d + 1h jitter allowance only
+        }
+        const lastUsable = ePoints.length > 0 ? ePoints[ePoints.length - 1].ts.getTime() : null; // post-filter: last CLOSED candle END
+        const endsCurrent = lastUsable !== null && now.getTime() - lastUsable <= 86_400_000 + 3_600_000;
+        if (ePoints.length >= DEFAULT_RUNNER_MINING_CONFIG.minSeriesPoints) {
+          enrichmentApplied = true;
+          // PROVEN launch coverage ONLY (Codex final): tokenCreatedAt must
+          // exist AND the first candle must land within 48h of it AND the
+          // stored series must be untruncated. Provider-absence inference
+          // (first candle after request start) is NOT proof — retention and
+          // indexing gaps exist — so it never anchors and never enables
+          // verified_below; it remains evidence for ABOVE-verdicts only.
+          const launchTsE = token?.tokenCreatedAt ?? null;
+          const marketStartProven =
+            notTruncated &&
+            launchTsE !== null &&
+            enrichment.ohlcvStartTs !== null &&
+            enrichment.ohlcvStartTs.getTime() >= launchTsE.getTime() - 86_400_000 &&
+            enrichment.ohlcvStartTs.getTime() <= launchTsE.getTime() + 172_800_000;
+          const fullLifeProven = marketStartProven && gapFree && endsCurrent;
+          effOutcome = computeTokenOutcome(ePoints, DEFAULT_RUNNER_MINING_CONFIG, { anchoredAtLaunch: fullLifeProven });
+          effAnchored = fullLifeProven;
+          effCoverage = fullLifeProven ? 'covered' : 'partially_covered';
+          enrichedAth = effOutcome.athMcapUsd;
+          if (outcome.athMcapUsd !== null && enrichedAth !== null && enrichedAth > 0) {
+            const ratio = Math.max(outcome.athMcapUsd / enrichedAth, enrichedAth / outcome.athMcapUsd);
+            if (ratio > 3) crossProviderDisagreement = ratio;
+          }
+        }
+      }
       const cls = classifyRunner({
-        outcome,
-        coverage: effectiveCoverage as never,
-        anchoredAtLaunch,
-        sourceCount: (bySource.marketSnapshots > 0 ? 1 : 0) + (bySource.tradeObservations > 0 ? 1 : 0),
-        maxSourceDisagreement
+        outcome: effOutcome,
+        coverage: effCoverage as never,
+        anchoredAtLaunch: effAnchored,
+        sourceCount:
+          (bySource.marketSnapshots > 0 ? 1 : 0) + (bySource.tradeObservations > 0 ? 1 : 0) + (enrichmentApplied ? 1 : 0),
+        maxSourceDisagreement: crossProviderDisagreement ?? maxSourceDisagreement
       });
+      // The current-supply assumption caps ANY enrichment-derived verdict at
+      // medium confidence (Codex C3) — never high on an assumed supply.
+      const finalConfidence = enrichmentApplied && cls.confidence === 'high' ? 'medium' : cls.confidence;
 
       await prisma.tokenLifecycle.update({
         where: { mint: lc.mint },
         data: {
           runnerClass: cls.runnerClass,
-          athMcapUsd: outcome.athMcapUsd,
-          athTs: outcome.athTs,
-          baselineMcapUsd: outcome.baselineMcapUsd,
-          outcomeLabels: outcome.labels as unknown as Prisma.InputJsonValue,
-          confidence: cls.confidence,
+          athMcapUsd: effOutcome.athMcapUsd,
+          athTs: effOutcome.athTs,
+          baselineMcapUsd: effOutcome.baselineMcapUsd,
+          outcomeLabels: effOutcome.labels as unknown as Prisma.InputJsonValue,
+          confidence: finalConfidence,
           evidenceJson: {
             reasons: cls.reasons,
-            anchoredAtLaunch,
+            anchoredAtLaunch: effAnchored,
+            anchorBasis: enrichmentApplied
+              ? (effAnchored ? 'ohlcv_market_start PROVEN (untruncated series starting after request window; supply = labeled current-supply assumption)' : 'enrichment applied WITHOUT market-start proof - below-verdicts disabled')
+              : 'tokenCreatedAt',
+            enrichmentApplied,
             anchorDeltaMs: anchorDelta,
             seriesTruncated: truncated,
+            enrichment: enrichment
+              ? { status: enrichment.status, athMcapUsd: enrichedAth, localAthMcapUsd: outcome.athMcapUsd, crossProviderDisagreement, candleCount: enrichment.candleCount }
+              : null,
             bySource,
             maxSourceDisagreement,
             validPointCount: validPoints.length,
@@ -389,7 +460,11 @@ export async function extractEarlyBuyers(
     // from a FUTURE snapshot by ingest's fallback, so bands come from
     // computeEntryContext over STRICTLY-PRIOR snapshot observations only;
     // trades without a usable prior snapshot stay unknown (no band).
-    const { points } = await loadSeries(prisma, token.id);
+    const { points: localPoints } = await loadSeries(prisma, token.id);
+    const enr = await prisma.tokenEnrichment.findUnique({ where: { mint: target.mint } });
+    const nowMs = Date.now();
+    const enrichedPoints = (enr?.status === 'enriched' ? enrichmentSeriesPoints(enr) : []).filter((pt) => pt.ts.getTime() <= nowMs);
+    const points = [...localPoints, ...enrichedPoints].sort((a, b) => a.ts.getTime() - b.ts.getTime());
     const buys = await prisma.walletTokenTrade.findMany({
       where: { tokenId: token.id, action: 'BUY' },
       orderBy: [{ ts: 'asc' }, { id: 'asc' }],
