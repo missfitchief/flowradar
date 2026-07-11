@@ -121,10 +121,24 @@ describe('computeEntryContext (no-lookahead, unknown stays unknown)', () => {
     expect(e.belowFocusCeiling).toBe(false);
   });
 
-  it('an exact-timestamp point is used with age 0', () => {
+  it('a point at EXACTLY buyTs is excluded (could postdate the trade within the same second)', () => {
+    // Strictly-prior rule: buying at minute 30 must use minute 10 (12k),
+    // never the same-timestamp minute-30 snapshot (55k).
     const e = computeEntryContext(new Date(T0 + 30 * MIN), RUNNER_SERIES, DEFAULT_RUNNER_MINING_CONFIG);
-    expect(e.entryMarketCapUsd).toBe(55_000);
-    expect(e.valuationAgeSeconds).toBe(0);
+    expect(e.entryMarketCapUsd).toBe(12_000);
+    expect(e.valuationAgeSeconds).toBe(20 * 60);
+  });
+
+  it('duplicate-timestamp ties resolve deterministically to the HIGHEST mcap with halved confidence', () => {
+    const tied: TokenSeriesPoint[] = [pt(0, 10_000), pt(10, 30_000), pt(10, 90_000)];
+    const reversed: TokenSeriesPoint[] = [pt(0, 10_000), pt(10, 90_000), pt(10, 30_000)];
+    const buyTs = new Date(T0 + 12 * MIN);
+    const a = computeEntryContext(buyTs, tied, DEFAULT_RUNNER_MINING_CONFIG);
+    const b = computeEntryContext(buyTs, reversed, DEFAULT_RUNNER_MINING_CONFIG);
+    expect(a).toEqual(b); // input order can never change the answer
+    expect(a.entryMarketCapUsd).toBe(90_000); // conservative: never claim the lower entry
+    const unambiguous = computeEntryContext(buyTs, [pt(0, 10_000), pt(10, 90_000)], DEFAULT_RUNNER_MINING_CONFIG);
+    expect(a.valuationConfidence).toBeCloseTo(unambiguous.valuationConfidence / 2, 10);
   });
 
   it('NO-LOOKAHEAD property: truncated-at-buy series gives the IDENTICAL context', () => {
@@ -190,5 +204,82 @@ describe('entryMcapBucket', () => {
     expect(entryMcapBucket(1_000_000)).toBe('above_1m');
     expect(entryMcapBucket(null)).toBe('unknown');
     expect(entryMcapBucket(Number.NaN)).toBe('unknown');
+  });
+
+  it('zero/negative mcap is UNKNOWN, never a low-mcap bucket (unknown-as-zero artifact)', () => {
+    expect(entryMcapBucket(0)).toBe('unknown');
+    expect(entryMcapBucket(-5)).toBe('unknown');
+  });
+});
+
+describe('config validation (fail closed)', () => {
+  it('rejects minSeriesPoints < 1 and non-finite maxEntrySnapshotAgeSec', () => {
+    expect(() =>
+      computeTokenOutcome([], { ...DEFAULT_RUNNER_MINING_CONFIG, minSeriesPoints: 0 })
+    ).toThrow(RangeError);
+    for (const bad of [Number.NaN, Infinity, -1]) {
+      expect(() =>
+        computeEntryContext(new Date(T0), RUNNER_SERIES, { ...DEFAULT_RUNNER_MINING_CONFIG, maxEntrySnapshotAgeSec: bad })
+      ).toThrow(RangeError);
+    }
+  });
+
+  it('maxEntrySnapshotAgeSec=0 accepts nothing older than 0ms (no rounding leniency)', () => {
+    const cfg = { ...DEFAULT_RUNNER_MINING_CONFIG, maxEntrySnapshotAgeSec: 0 };
+    // 400ms-old point: rounding to seconds would call it 0s old — must still reject.
+    const series = [{ ts: new Date(T0 - 400), priceUsd: 1e-5, marketCapUsd: 10_000, liquidityUsd: 5_000 }];
+    const e = computeEntryContext(new Date(T0), series, cfg);
+    expect(e.valuationStatus).toBe('unavailable');
+  });
+});
+
+describe('outcome hardening (Codex round)', () => {
+  it('duplicate-timestamp input order can never flip an outcome label', () => {
+    const a = [pt(0, 10_000), pt(10, 10_000), pt(10, 100_000), pt(20, 50_000)];
+    const b = [pt(0, 10_000), pt(10, 100_000), pt(10, 10_000), pt(20, 50_000)];
+    const oa = computeTokenOutcome(a, DEFAULT_RUNNER_MINING_CONFIG);
+    const ob = computeTokenOutcome(b, DEFAULT_RUNNER_MINING_CONFIG);
+    expect(oa.labels).toEqual(ob.labels);
+    expect(oa.maxDrawdownPct).toBe(ob.maxDrawdownPct);
+    expect(oa.dataQuality.join()).toMatch(/duplicate timestamps/);
+  });
+
+  it('a terminal liquidity-death point WITHOUT valid mcap still counts as liquidity evidence', () => {
+    // Never 2x; last point has null mcap but zero liquidity — failed_launch
+    // must still be detected (the old code discarded that point entirely).
+    const series: TokenSeriesPoint[] = [
+      pt(0, 8_000, 5_000), pt(30, 9_000, 3_000), pt(90, 8_500, 2_000),
+      { ts: new Date(T0 + 240 * MIN), priceUsd: null, marketCapUsd: null, liquidityUsd: 0 }
+    ];
+    const o = computeTokenOutcome(series, DEFAULT_RUNNER_MINING_CONFIG);
+    expect(o.finalLiquidityUsd).toBe(0);
+    expect(o.labels).toContain('failed_launch');
+  });
+
+  it('window-relative baseline is stated and caps confidence at medium; launch-anchored can be high', () => {
+    const long = [pt(0, 10_000), pt(10, 12_000), pt(30, 55_000), pt(60, 140_000), pt(120, 900_000), pt(240, 2_500_000)];
+    const windowed = computeTokenOutcome(long, DEFAULT_RUNNER_MINING_CONFIG);
+    expect(windowed.dataQuality.join()).toMatch(/window-relative/);
+    expect(windowed.confidence).not.toBe('high');
+    const anchored = computeTokenOutcome(long, DEFAULT_RUNNER_MINING_CONFIG, { anchoredAtLaunch: true });
+    expect(anchored.confidence).toBe('high');
+    expect(anchored.dataQuality.join()).not.toMatch(/window-relative/);
+  });
+});
+
+describe('no-lookahead wall is ARCHITECTURAL (static leak guard)', () => {
+  it('entry.ts imports only ./types and never references outcome types/functions', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const path = await import('node:path');
+    const src = readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'runnermining', 'entry.ts'),
+      'utf-8'
+    );
+    // Only ./types may be imported.
+    const imports = [...src.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);
+    expect(imports.every((i) => i === './types')).toBe(true);
+    // No reference to the outcome side at all.
+    expect(src).not.toMatch(/TokenOutcome|computeTokenOutcome|RunnerOutcomeLabel|\.\/outcome/);
   });
 });

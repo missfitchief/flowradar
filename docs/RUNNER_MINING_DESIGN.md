@@ -30,7 +30,7 @@ qualified survivors as shadow signals.
 ### MISSING (and how we'll get it — provider-gated, NOT tonight)
 | Gap | Consequence | Path |
 |---|---|---|
-| Historical price/mcap series BEFORE a token entered our DB | can't reconstruct entry mcap for pre-DB buys | Birdeye OHLCV (plan-gated, unverified), Dune batch (present but operator-disabled: needs `DUNE_API_KEY` + queryIds; `DUNE_EXECUTE_FRESH=false` stands) |
+| Historical price/mcap series BEFORE a token entered our DB | can't reconstruct entry mcap for pre-DB buys | Birdeye OHLCV (plan-gated, unverified). Dune: the CLIENT exists (overlap/trader queries) but a historical-OHLCV/runner-universe QUERY + adapter must be **added** and operator-enabled (`DUNE_API_KEY` + queryIds; `DUNE_EXECUTE_FRESH=false` stands) |
 | Supply assumptions per token | mcap = price × supply needs a dated supply value | Helius token supply at slot (RPC), else FDV-based assumption labeled as such |
 | Launch/pool-creation timestamps | lifecycle anchoring | Pump.fun/Raydium/Meteora program logs via Helius (batch job), Dune |
 | ATH mcap / drawdown | outcome labels at scale | derivable from acquired series; never fabricated |
@@ -48,10 +48,13 @@ the module's external dependency, not silently faked with synthetic series (hard
 - `TokenOutcome` — evaluation-only labels: `runner_2x|5x|10x|50x`, `reached_1m|10m|100m_mcap`,
   `seven_figure_runner`, `eight_figure_runner`, `failed_launch`, `rug_or_collapse`,
   `illiquid_untradeable`, `insufficient_data` + peak/drawdown metrics + provenance/confidence.
-- `EntryContext` — per-buy reconstruction: `entryPriceUsd?`, `entryMarketCapUsd?`,
-  `entryLiquidityUsd?`, `priceTimestamp?`, `supplyValue?`, `supplySource`, `valuationSource`,
-  `valuationStatus` (reuses Wave A statuses), `valuationConfidence`, `valuationAgeSeconds?`,
-  `bucket` (`under_5k … above_1m`, `unknown`).
+- `EntryContext` (IMPLEMENTED, Task 2) — per-buy reconstruction: `entryPriceUsd?`,
+  `entryMarketCapUsd?`, `entryLiquidityUsd?`, `priceTimestamp?`, `valuationStatus`
+  (`nearest_prior_snapshot | unavailable` — historical mining deliberately has NO
+  `current_price_estimate`), `valuationConfidence`, `valuationAgeSeconds?`, `bucket`
+  (`under_5k … above_1m`, `unknown`). **Task 3 additions (NOT yet implemented):**
+  `supplyValue?`, `supplySource`, `valuationSource` — these require the provider-gated
+  supply/series backfill and are listed here as forward shapes only.
 - Config: `RunnerMiningConfig` — thresholds (runner multiples, mcap milestones, rug collapse pct,
   illiquidity floor, max snapshot age at entry, low-mcap focus ceiling default $20k) — all
   configurable, defaults derived later from observed distributions with sensitivity reporting
@@ -62,9 +65,14 @@ the module's external dependency, not silently faked with synthetic series (hard
 1. `computeEntryContext(buyTs, series, …)` may only read points with `ts <= buyTs` (nearest PRIOR,
    bounded by max age). Structurally enforced: the function first truncates the series at `buyTs`.
 2. `computeTokenOutcome(series, …)` reads the FULL series — it is an OUTCOME, stored separately and
-   joined to entries only at evaluation/report time. No entry-time feature may read outcome fields;
-   the wallet-quality model consumes `{ entryContext, outcome }` pairs where the entry side was
-   provably computable at entry time.
+   joined to entries only at evaluation/report time. The wall is ARCHITECTURAL, not procedural:
+   `entry.ts` may import only `types.ts` and never the outcome module (static leak-guard test), so
+   no entry-time feature can even name an outcome type. The Task-4 wallet-quality model will keep
+   this split: feature builders accept `EntryContext[]` only; outcomes join in a separate evaluator
+   whose outputs are labels/metrics, never inputs back into feature construction for the same token.
+   Outcomes also carry their window honestly: baselines are first-OBSERVED-point relative
+   (forward-only history), stated in `dataQuality`, with confidence capped at `medium` unless the
+   caller proves the series is launch-anchored (`anchoredAtLaunch`).
 3. Property test (the leak detector): for every fixture buy,
    `computeEntryContext(ts, truncate(series, ts))` ≡ `computeEntryContext(ts, fullSeries)`.
 4. Unknown stays unknown: missing prior point ⇒ `valuationStatus: 'unavailable'`, bucket `unknown`,
