@@ -495,23 +495,12 @@ export async function runEntityClustering(
 
   const { clusters: rawClusters } = clusterWallets({ links, threshold: settings.entityConfidenceThreshold });
 
-  // Wipe prior clusters first (determinism — see file header).
-  await prisma.walletTokenTrade.updateMany({
-    where: { entityClusterId: { not: null } },
-    data: { entityClusterId: null }
-  });
-  await prisma.entityClusterWallet.deleteMany();
-  await prisma.entityCluster.deleteMany();
-
-  // Re-verify every member wallet id still exists right before the write
-  // phase: `trackedWallets` was read at the START of this pass, and this
-  // function makes several `await`-separated DB round trips between then and
-  // the EntityClusterWallet inserts below (each with its own FK to Wallet).
-  // In single-process production use (worker tick / seed script) no other
-  // actor deletes Wallet rows mid-pass, so this is a no-op filter; it exists
-  // so a wallet that genuinely vanished between read and write (e.g. a
-  // concurrent process) degrades to "drop that member" instead of throwing
-  // and abandoning the whole pass.
+  // Re-verify every member wallet id still exists before the write phase:
+  // `trackedWallets` was read at the START of this pass, and this function
+  // makes several `await`-separated DB round trips between then and the
+  // EntityClusterWallet inserts below (each with its own FK to Wallet). A
+  // wallet that genuinely vanished between read and write degrades to "drop
+  // that member" instead of throwing and abandoning the whole pass.
   const stillExistingIds = new Set(
     (await prisma.wallet.findMany({ select: { id: true } })).map((w) => w.id)
   );
@@ -522,6 +511,27 @@ export async function runEntityClustering(
   let walletsClustered = 0;
   let largestClusterSize = 0;
   let tradesStamped = 0;
+
+  // PRECOMPUTE every per-cluster payload with plain reads FIRST, so the
+  // destructive wipe + rewrite below can run as ONE atomic transaction.
+  // The old shape wiped memberships in separate commits from the rebuild,
+  // so ANY concurrent reader (stealth cohort aggregation, graph queries)
+  // could observe an empty/partial membership set and inflate "independent
+  // entities" (Codex P2 review, 2026-07-11). With the single transaction,
+  // MVCC readers see the previous cluster set until the new one commits.
+  interface ClusterPayload {
+    create: {
+      confidence: number;
+      walletCount: number;
+      total30dPnlUsd: number;
+      chains: Chain[];
+      evidence: object;
+      mainFundingSource?: string;
+    };
+    memberRows: { walletId: string; linkConfidence: number; evidence: object }[];
+    memberIds: string[];
+  }
+  const payloads: ClusterPayload[] = [];
 
   for (const cluster of clusters) {
     largestClusterSize = Math.max(largestClusterSize, cluster.members.length);
@@ -575,17 +585,7 @@ export async function runEntityClustering(
       }
     }
 
-    const createdCluster = await prisma.entityCluster.create({
-      data: {
-        confidence: cluster.confidence,
-        walletCount: cluster.members.length,
-        total30dPnlUsd,
-        chains: [...memberChains],
-        evidence: cluster.evidenceByPair as unknown as object,
-        ...(mainFundingSource ? { mainFundingSource } : {})
-      }
-    });
-
+    const memberRows: { walletId: string; linkConfidence: number; evidence: object }[] = [];
     for (const walletId of cluster.members) {
       // Per-member linkConfidence: this member's OWN max-confidence
       // qualifying pair (searching every pair touching it under either
@@ -610,38 +610,67 @@ export async function runEntityClustering(
       }
       memberConfidence ??= cluster.confidence;
       const evidenceForRow = memberEvidence ?? ({} as LinkEvidence);
-
-      try {
-        await prisma.entityClusterWallet.create({
-          data: {
-            clusterId: createdCluster.id,
-            walletId,
-            linkConfidence: memberConfidence,
-            evidence: evidenceForRow as unknown as object
-          }
-        });
-        walletsClustered += 1;
-      } catch (error) {
-        // P2003 = FK violation (walletId no longer exists). This can only
-        // happen if another actor deleted the Wallet row between this
-        // pass's initial read and this write — never true in single-process
-        // production use (worker tick / seed script), but a real
-        // possibility when multiple test files race against the same
-        // shared LITE-mode Postgres instance. Skip this member rather than
-        // aborting the whole clustering pass.
-        if (isForeignKeyViolation(error)) {
-          log?.error('entityClustering: skipped a member whose Wallet row vanished mid-pass', { walletId });
-          continue;
-        }
-        throw error;
-      }
+      memberRows.push({ walletId, linkConfidence: memberConfidence, evidence: evidenceForRow as unknown as object });
     }
 
-    const stampResult = await prisma.walletTokenTrade.updateMany({
-      where: { walletId: { in: cluster.members } },
-      data: { entityClusterId: createdCluster.id }
+    payloads.push({
+      create: {
+        confidence: cluster.confidence,
+        walletCount: cluster.members.length,
+        total30dPnlUsd,
+        chains: [...memberChains],
+        evidence: cluster.evidenceByPair as unknown as object,
+        ...(mainFundingSource ? { mainFundingSource } : {})
+      },
+      memberRows,
+      memberIds: cluster.members
     });
-    tradesStamped += stampResult.count;
+  }
+
+  // ATOMIC wipe + rewrite. A caught FK error inside a transaction would
+  // POISON it (known Prisma gotcha), so instead of per-row catch we
+  // RE-FILTER members against an in-transaction wallet read (the tx snapshot)
+  // and retry the whole transaction once if a wallet still vanishes in the
+  // tiny window between that read and the write.
+  const writeOnce = async (): Promise<void> => {
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.walletTokenTrade.updateMany({
+          where: { entityClusterId: { not: null } },
+          data: { entityClusterId: null }
+        });
+        await tx.entityClusterWallet.deleteMany();
+        await tx.entityCluster.deleteMany();
+
+        const liveIds = new Set(
+          (await tx.wallet.findMany({ where: { id: { in: payloads.flatMap((p) => p.memberIds) } }, select: { id: true } })).map((w) => w.id)
+        );
+        walletsClustered = 0;
+        tradesStamped = 0;
+        for (const payload of payloads) {
+          const rows = payload.memberRows.filter((m) => liveIds.has(m.walletId));
+          if (rows.length < 2) continue; // cluster degraded below 2 members mid-pass
+          const createdCluster = await tx.entityCluster.create({ data: payload.create });
+          await tx.entityClusterWallet.createMany({
+            data: rows.map((m) => ({ clusterId: createdCluster.id, ...m }))
+          });
+          walletsClustered += rows.length;
+          const stampResult = await tx.walletTokenTrade.updateMany({
+            where: { walletId: { in: rows.map((m) => m.walletId) } },
+            data: { entityClusterId: createdCluster.id }
+          });
+          tradesStamped += stampResult.count;
+        }
+      },
+      { timeout: 60_000 }
+    );
+  };
+  try {
+    await writeOnce();
+  } catch (error) {
+    if (!isForeignKeyViolation(error)) throw error;
+    log?.error('entityClustering: wallet vanished inside the atomic rewrite — retrying once', {});
+    await writeOnce();
   }
 
   const result: EntityClusteringResult = {

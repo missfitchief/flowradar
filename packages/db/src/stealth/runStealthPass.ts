@@ -169,13 +169,16 @@ export async function fetchStealthInputs(
 
       // External-confluence health notes (shadow evidence): recent (7d)
       // NON-ok snapshots — absence/unavailable is never treated as safe.
-      // Capped per token AFTER fetch; the fetch itself is time-bounded.
-      const confluence = await tx.tokenConfluenceSnapshot.findMany({
-        where: { tokenId: { in: tokenIds }, status: { not: 'ok' }, observedAt: { gte: new Date(now.getTime() - 7 * DAY_MS) } },
-        orderBy: { observedAt: 'desc' },
-        take: 3 * tokenIds.length,
-        select: { tokenId: true, snapshotType: true, status: true }
-      });
+      // Per-token cap ENFORCED IN SQL (ROW_NUMBER partition) so one noisy
+      // token can never starve the others out of a global take (Codex #3).
+      const confluence = await tx.$queryRaw<{ tokenId: string; snapshotType: string; status: string }[]>`
+        SELECT "tokenId", "snapshotType", "status" FROM (
+          SELECT "tokenId", "snapshotType", "status",
+                 ROW_NUMBER() OVER (PARTITION BY "tokenId" ORDER BY "observedAt" DESC) AS rn
+          FROM token_confluence_snapshots
+          WHERE "tokenId" = ANY(${tokenIds}) AND "status" <> 'ok'
+            AND "observedAt" >= ${new Date(now.getTime() - 7 * DAY_MS)}
+        ) ranked WHERE rn <= 3`;
       return { tokenIds, chainOf, trades, statusOf, clusterOf, firstBuyTs, hotWallets, confluence };
     }, { isolationLevel: 'RepeatableRead' });
   if (tokenIds.length === 0) return [];
@@ -317,44 +320,58 @@ export async function runStealthPass(prisma: PrismaClient, opts: RunStealthPassO
       result.tokensEvaluated += 1;
       result.byState[r.state] = (result.byState[r.state] ?? 0) + 1;
 
-      // previousState = latest snapshot from an EARLIER bucket.
-      const prev = await prisma.stealthSnapshot.findFirst({
-        where: { tokenId, bucketTs: { lt: bucketTs } },
-        orderBy: { bucketTs: 'desc' },
-        select: { state: true }
-      });
-
-      // JSONB cannot hold Infinity/NaN — jsonSafe maps non-finite -> null
-      // (honest unknown) so the write never silently coerces or rejects.
-      const fields = {
-        state: r.state,
-        previousState: prev?.state ?? null,
-        stateChanged: prev !== null && prev.state !== r.state,
-        stealthScore: Number.isFinite(r.stealthScore) ? r.stealthScore : 0,
-        metrics: jsonSafe(r.metrics) as unknown as Prisma.InputJsonValue,
-        evidence: jsonSafe(evidence) as unknown as Prisma.InputJsonValue,
-        explanation: buildExplanation(r, evidence),
-        invalidationReasons: buildInvalidationReasons(r) as unknown as Prisma.InputJsonValue,
-        computedAt: now
+      // Per-token SERIALIZABLE write: previousState lookup + upsert +
+      // successor repair execute as one unit, so interleaved concurrent
+      // passes can't leave a stale transition chain (Codex round 3 #2). A
+      // serialization conflict (P2034) retries once.
+      const writeSnapshot = async (): Promise<void> => {
+        await prisma.$transaction(async (tx) => {
+          // previousState = latest snapshot from an EARLIER bucket.
+          const prev = await tx.stealthSnapshot.findFirst({
+            where: { tokenId, bucketTs: { lt: bucketTs } },
+            orderBy: { bucketTs: 'desc' },
+            select: { state: true }
+          });
+          // JSONB cannot hold Infinity/NaN — jsonSafe maps non-finite -> null
+          // (honest unknown) so the write never silently coerces or rejects.
+          const fields = {
+            state: r.state,
+            previousState: prev?.state ?? null,
+            stateChanged: prev !== null && prev.state !== r.state,
+            stealthScore: Number.isFinite(r.stealthScore) ? r.stealthScore : 0,
+            metrics: jsonSafe(r.metrics) as unknown as Prisma.InputJsonValue,
+            evidence: jsonSafe(evidence) as unknown as Prisma.InputJsonValue,
+            explanation: buildExplanation(r, evidence),
+            invalidationReasons: buildInvalidationReasons(r) as unknown as Prisma.InputJsonValue,
+            computedAt: now
+          };
+          await tx.stealthSnapshot.upsert({
+            where: { tokenId_bucketTs: { tokenId, bucketTs } },
+            create: { tokenId, chain, bucketTs, ...fields },
+            update: fields
+          });
+          // Out-of-order repair (Codex #4): if a LATER bucket already exists,
+          // its previousState may predate this row — repair the immediate
+          // successor's transition chain inside the same serialized unit.
+          const nextRow = await tx.stealthSnapshot.findFirst({
+            where: { tokenId, bucketTs: { gt: bucketTs } },
+            orderBy: { bucketTs: 'asc' },
+            select: { id: true, previousState: true, state: true }
+          });
+          if (nextRow && nextRow.previousState !== r.state) {
+            await tx.stealthSnapshot.update({
+              where: { id: nextRow.id },
+              data: { previousState: r.state, stateChanged: nextRow.state !== r.state }
+            });
+          }
+        }, { isolationLevel: 'Serializable' });
       };
-      await prisma.stealthSnapshot.upsert({
-        where: { tokenId_bucketTs: { tokenId, bucketTs } },
-        create: { tokenId, chain, bucketTs, ...fields },
-        update: fields
-      });
-      // Out-of-order repair (Codex P2 #4): if a LATER bucket already exists
-      // (written by a concurrent/replayed pass), its previousState may predate
-      // this row — repair the immediate successor's transition chain.
-      const nextRow = await prisma.stealthSnapshot.findFirst({
-        where: { tokenId, bucketTs: { gt: bucketTs } },
-        orderBy: { bucketTs: 'asc' },
-        select: { id: true, previousState: true, state: true }
-      });
-      if (nextRow && nextRow.previousState !== r.state) {
-        await prisma.stealthSnapshot.update({
-          where: { id: nextRow.id },
-          data: { previousState: r.state, stateChanged: nextRow.state !== r.state }
-        });
+      try {
+        await writeSnapshot();
+      } catch (err) {
+        const code = (err as { code?: string })?.code;
+        if (code === 'P2034') await writeSnapshot(); // one retry on serialization conflict
+        else throw err;
       }
       result.snapshotsWritten += 1;
     } catch (err) {
