@@ -26,3 +26,5 @@ export * from './bsc/stubs';
 export * from './candidates';
 export * from './social';
 export * from './confluence';
+export * from './gmgn/allowlist';
+export * from './gmgn/gmgnProvider';

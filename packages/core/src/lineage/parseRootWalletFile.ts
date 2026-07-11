@@ -21,6 +21,14 @@
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const BASE58_MAP = new Map<string, bigint>([...BASE58_ALPHABET].map((c, i) => [c, BigInt(i)]));
 
+/** True iff `s` is a base58 string decoding to EXACTLY 32 bytes — a real
+ *  Solana pubkey check (not just an alphabet/length regex). Shared so ingest
+ *  paths validate addresses the same way root import does. */
+export function isValidSolanaAddress(s: string): boolean {
+  if (typeof s !== 'string' || s.length < 32 || s.length > 44) return false;
+  return base58ByteLength(s) === 32;
+}
+
 /** Byte length of a base58 string's decoded value, or null on invalid chars. */
 function base58ByteLength(s: string): number | null {
   let acc = 0n;

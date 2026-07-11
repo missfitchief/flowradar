@@ -37,5 +37,8 @@ export * from './graph/runSearch';
 export * from './graph/csv';
 export * from '@prisma/client';
 export * from './stealth/runStealthPass';
+export * from './gmgn/ingest';
+export * from './gmgn/candidateBuffer';
+export * from './behavior/reconstruct';
 export * from './risk/tokenRiskCache';
 export * from './risk/runTokenRiskRefresh';
