@@ -30,6 +30,7 @@ beforeAll(async () => { dbReachable = await probePort('localhost', 5439); });
 
 const A1 = addr(1), A2 = addr(2), A3 = addr(3);
 async function cleanup() {
+  await prisma.observationProviderSnapshot.deleteMany({ where: { wallet: { address: { in: [A1, A2, A3] } } } });
   await prisma.walletStats.deleteMany({ where: { wallet: { address: { in: [A1, A2, A3] } } } });
   await prisma.wallet.deleteMany({ where: { address: { in: [A1, A2, A3] } } });
 }
@@ -126,38 +127,46 @@ describe('parseObservationUniverse (pure)', () => {
 });
 
 describe.skipIf(!(await probePort('localhost', 5439)))('importObservationUniverse', () => {
-  it('creates wallets observation_only with provider_claimed stats; never signal_eligible', async () => {
+  it('creates wallets observation_only with provider_claimed SHADOW snapshot; never signal_eligible', async () => {
     const csv = ['wallet_address,source,pnl_30d,win_rate,trade_count_30d,avg_trade_size_usd', `${A1},solana_tracker,50000,0.6,40,500`].join('\n');
     const res = await importObservationUniverse(prisma, csv, { now: NOW });
     expect(res.walletsCreated).toBe(1);
-    expect(res.statsRowsCreated).toBe(1);
+    expect(res.snapshotsWritten).toBe(1);
     const w = await prisma.wallet.findUnique({ where: { address_chain: { address: A1, chain: 'SOLANA' } }, include: { stats: true } });
     expect(w!.status).toBe('observation_only');
     expect(w!.isWatched).toBe(false);
-    expect(w!.stats[0]!.source).toBe('provider'); // provider_claimed
+    // CRITICAL: NO WalletStats row — that is the FlowScore-read table (Codex).
+    expect(w!.stats).toHaveLength(0);
+    const snap = await prisma.observationProviderSnapshot.findUnique({
+      where: { walletId_source_window: { walletId: w!.id, source: 'solana_tracker', window: '30d' } }
+    });
+    expect(snap!.providerClaimed).toBe(true);
+    expect(Number(snap!.pnlUsd)).toBe(50000);
   });
 
-  it('does NOT fabricate a realized/unrealized split or a computed score (Codex final review)', async () => {
-    const csv = ['wallet_address,pnl_30d,win_rate,trade_count_30d,avg_trade_size_usd', `${A1},50000,0.6,40,500`].join('\n');
+  it('provider snapshot stores only supplied fields (no fabricated split/score) and touches NO WalletStats (Codex final review)', async () => {
+    const csv = ['wallet_address,source,pnl_30d,win_rate,trade_count_30d,avg_trade_size_usd', `${A1},prov,50000,0.6,40,500`].join('\n');
     await importObservationUniverse(prisma, csv, { now: NOW });
     const w = await prisma.wallet.findUnique({ where: { address_chain: { address: A1, chain: 'SOLANA' } }, include: { stats: true } });
-    const s = w!.stats[0]!;
-    expect(Number(s.pnlUsd)).toBe(50000); // provider total lives in pnlUsd
-    expect(Number(s.realizedPnlUsd)).toBe(0); // split NOT provided -> not asserted
-    expect(Number(s.unrealizedPnlUsd)).toBe(0);
-    expect(s.walletScore).toBe(0); // NOT computed
-    expect(s.pnlConfidence).toBe(0); // zero local confidence
-    expect((s.scoreComponents as { scoreComputed?: boolean }).scoreComputed).toBe(false);
-    expect((s.scoreComponents as { providerClaimed?: boolean }).providerClaimed).toBe(true);
+    expect(w!.stats).toHaveLength(0); // FlowScore-read table untouched -> cannot lower any FlowScore
+    const snap = await prisma.observationProviderSnapshot.findFirst({ where: { walletId: w!.id } });
+    expect(Number(snap!.pnlUsd)).toBe(50000); // provider total only
+    expect(snap!.winRate).toBe(0.6);
+    expect(snap!.tradeCount).toBe(40);
+    expect(Number(snap!.avgTradeSizeUsd)).toBe(500);
+    expect(snap!.providerClaimed).toBe(true);
+    // realizedPnl/unrealizedPnl/walletScore simply do not exist on the shadow
+    // model — no fabricated split or computed-score zeros anywhere.
   });
 
-  it('address-only rows create observation wallets with NO fabricated stats', async () => {
+  it('address-only rows create observation wallets with NO snapshot and NO WalletStats', async () => {
     const csv = ['wallet_address', A2].join('\n');
     const res = await importObservationUniverse(prisma, csv, { now: NOW });
     expect(res.walletsCreated).toBe(1);
-    expect(res.statsRowsCreated).toBe(0);
+    expect(res.snapshotsWritten).toBe(0);
     const w = await prisma.wallet.findUnique({ where: { address_chain: { address: A2, chain: 'SOLANA' } }, include: { stats: true } });
-    expect(w!.stats).toHaveLength(0); // NOT fabricated
+    expect(w!.stats).toHaveLength(0);
+    expect(await prisma.observationProviderSnapshot.count({ where: { walletId: w!.id } })).toBe(0);
   });
 
   it('PRESERVES an existing classified status (public_kol) and never demotes/promotes', async () => {
@@ -169,13 +178,14 @@ describe.skipIf(!(await probePort('localhost', 5439)))('importObservationUnivers
     expect(w!.status).toBe('public_kol'); // preserved, not re-statused
   });
 
-  it('is idempotent — a second import creates no duplicate wallet/stats', async () => {
-    const csv = ['wallet_address,pnl_30d,win_rate,trade_count_30d,avg_trade_size_usd', `${A1},50000,0.6,40,500`].join('\n');
+  it('is idempotent — a second import creates no duplicate wallet/snapshot', async () => {
+    const csv = ['wallet_address,source,pnl_30d,win_rate,trade_count_30d,avg_trade_size_usd', `${A1},prov,50000,0.6,40,500`].join('\n');
     await importObservationUniverse(prisma, csv, { now: NOW });
     const res2 = await importObservationUniverse(prisma, csv, { now: NOW });
     expect(res2.walletsCreated).toBe(0);
-    expect(res2.statsRowsCreated).toBe(0);
-    expect(await prisma.walletStats.count({ where: { wallet: { address: A1 } } })).toBe(1);
+    expect(res2.snapshotsWritten).toBe(1); // upsert (idempotent) — no DUPLICATE row
+    expect(await prisma.observationProviderSnapshot.count({ where: { wallet: { address: A1 } } })).toBe(1);
+    expect(await prisma.walletStats.count({ where: { wallet: { address: A1 } } })).toBe(0);
   });
 
   it('an imported observation wallet contributes ZERO smart votes (status gate holds)', async () => {

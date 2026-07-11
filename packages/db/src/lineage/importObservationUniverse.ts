@@ -3,11 +3,13 @@
 // A SEPARATE path from importWalletsCsv (which grants signal_eligible for
 // operator-vouched wallets). This one imports a wallet UNIVERSE as pure
 // OBSERVATION: every wallet is observation_only, any provider stats are stored
-// with trust=provider_claimed (source='provider' — NOT locally verified), and
-// NOTHING here ever grants signal eligibility or contributes a smart vote.
-// Existing classifications (public_kol/public_promoter/copytrader/
-// bot_or_service/excluded) and monitoring/lineage state are PRESERVED. Idempotent,
-// deduped. Address-only rows are fine — no stats are fabricated (hard rule 9).
+// in the SHADOW model ObservationProviderSnapshot (provider_claimed, NOT
+// locally verified) — NEVER WalletStats, which the FlowScore path reads. So
+// NOTHING here ever grants signal eligibility, contributes a smart vote, or can
+// perturb a FlowScore. Existing classifications (public_kol/public_promoter/
+// copytrader/bot_or_service/excluded) and monitoring/lineage state are
+// PRESERVED. Idempotent, deduped. Address-only rows are fine — no stats
+// fabricated (hard rule 9); provider fields not supplied stay NULL, never 0.
 //
 // CSV columns (header row required): wallet_address[,source][,pnl_30d]
 // [,win_rate][,trade_count_30d][,avg_trade_size_usd][,tags]. Only
@@ -168,7 +170,8 @@ export interface ObservationImportResult {
   validRows: number;
   walletsCreated: number;
   walletsExisting: number;
-  statsRowsCreated: number;
+  /** Provider-claimed snapshots upserted into ObservationProviderSnapshot (NOT WalletStats). */
+  snapshotsWritten: number;
   classificationsPreserved: number;
   evmParked: number;
   malformed: number;
@@ -187,7 +190,7 @@ export async function importObservationUniverse(
     validRows: parsed.rows.length,
     walletsCreated: 0,
     walletsExisting: 0,
-    statsRowsCreated: 0,
+    snapshotsWritten: 0,
     classificationsPreserved: 0,
     evmParked: parsed.evmParked.length,
     malformed: parsed.malformed.length,
@@ -237,58 +240,39 @@ export async function importObservationUniverse(
       result.walletsCreated += 1;
     }
 
-    // Store provider stats as provider_claimed (source='provider') ONLY when the
-    // row supplied a complete set — never fabricated. Skip if a provider/30d row
-    // already exists (idempotent re-import; don't clobber).
-    //
-    // WalletStats is APPEND-HISTORY (every writer `create`s; "latest" = newest
-    // computedAt), so no unique (walletId,source,window) constraint exists or
-    // should — history would break. This count→create is idempotent against
-    // ANOTHER observation import (both hold the global lock). Candidate promotion
-    // can also write a provider/30d row (candidateValidation, source can be
-    // 'provider') WITHOUT this lock, so a rare concurrent overlap may append a
-    // SECOND provider/30d row — which is normal append-history, not corruption:
-    // latest-by-computedAt still resolves deterministically, and these stats are
-    // inert on observation_only wallets (zero signal weight). Not worth a
-    // history-breaking constraint or cross-module locking. (Codex final review.)
+    // Store provider-claimed stats in the SHADOW model ObservationProviderSnapshot
+    // — NEVER WalletStats. WalletStats is read by the FlowScore path
+    // (fetchAggregateInputs picks the latest row by computedAt regardless of
+    // source/status, and computeFlowScore averages walletScore across ALL buyers)
+    // — so an uncomputed provider row there would DRAG DOWN the FlowScore of any
+    // token these wallets trade, violating hard-rule-1. The shadow model has no
+    // scoring reader, and fields the provider did not supply stay NULL (honest
+    // unknown, never a fabricated 0/computed-score). Upsert on (walletId, source,
+    // window) → idempotent re-import + race-free (no duplicate rows). (Codex
+    // final review, 2 rounds.)
     if (row.providerStats) {
-      const hasStats = await prisma.walletStats.count({ where: { walletId, source: 'provider', window: '30d' } });
-      if (hasStats === 0) {
-        await prisma.walletStats.create({
-          data: {
-            walletId,
-            window: '30d',
-            // The provider reports a single 30d PnL TOTAL — recorded in pnlUsd.
-            // realized/unrealized split and walletScore are NOT provided and NOT
-            // computed. These WalletStats columns are NON-NULLABLE, and making
-            // them nullable would touch the protected FlowScore read path
-            // (profitability/flowScore/aggregate) — forbidden by hard-rule-1
-            // (scoring formulas unchanged). So the unknowns are stored as 0 and
-            // EXPLICITLY marked not-asserted via source=provider (provider_claimed)
-            // + pnlConfidence=0 + the scoreComponents flags below. This is inert:
-            // observation_only wallets carry zero signal weight, and provider
-            // stats never grant a smart vote (status-gated). (Codex final review —
-            // accepted representation given the non-null schema + hard-rule-1.)
-            pnlUsd: row.providerStats.pnl30d,
-            realizedPnlUsd: 0,
-            unrealizedPnlUsd: 0,
-            winRate: row.providerStats.winRate,
-            tradeCount: row.providerStats.tradeCount,
-            avgTradeSizeUsd: row.providerStats.avgTradeSizeUsd,
-            walletScore: 0,
-            scoreComponents: {
-              providerClaimed: true,
-              breakdownProvided: false,
-              scoreComputed: false,
-              note: 'observation-universe provider stats: 30d PnL total only in pnlUsd; realized/unrealized split and walletScore NOT provided and NOT computed (0 = unknown, not asserted).'
-            },
-            pnlConfidence: 0,
-            source: 'provider', // provider_claimed trust — NOT locally verified
-            computedAt: now
-          }
-        });
-        result.statsRowsCreated += 1;
-      }
+      await prisma.observationProviderSnapshot.upsert({
+        where: { walletId_source_window: { walletId, source: row.source, window: '30d' } },
+        create: {
+          walletId,
+          source: row.source, // provider/source label — provider_claimed, unverified
+          window: '30d',
+          pnlUsd: row.providerStats.pnl30d,
+          winRate: row.providerStats.winRate,
+          tradeCount: row.providerStats.tradeCount,
+          avgTradeSizeUsd: row.providerStats.avgTradeSizeUsd,
+          providerClaimed: true,
+          observedAt: now
+        },
+        update: {
+          pnlUsd: row.providerStats.pnl30d,
+          winRate: row.providerStats.winRate,
+          tradeCount: row.providerStats.tradeCount,
+          avgTradeSizeUsd: row.providerStats.avgTradeSizeUsd,
+          observedAt: now
+        }
+      });
+      result.snapshotsWritten += 1;
     }
   }
   });

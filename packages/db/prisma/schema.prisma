@@ -269,6 +269,7 @@ model Wallet {
   monitoringSubscriptions MonitoringSubscription[]
   relationshipsAsSender   WalletRelationship[] @relation("RelationshipSender")
   relationshipsAsReceiver WalletRelationship[] @relation("RelationshipReceiver")
+  observationSnapshots    ObservationProviderSnapshot[]
 
   @@unique([address, chain])
   @@index([status])
@@ -1359,7 +1360,14 @@ model WalletRelationship {
   firstSeenAt         DateTime
   lastSeenAt          DateTime
   interactionCount    Int                    @default(1)
+  /// Sum of KNOWN transfer value across interactions. Unavailable/unknown-value
+  /// legs contribute nothing here (never fabricated as $0); their count lives in
+  /// unknownValueTxCount so this figure's incompleteness is explicit.
   valueTransferredUsd Decimal                @db.Decimal(20, 4)
+  /// How many counted interactions had UNAVAILABLE (unpriced) value — so
+  /// valueTransferredUsd is honestly "sum of known value", not a claimed total.
+  /// Revaluation lowers this as edges get priced.
+  unknownValueTxCount Int                    @default(0)
   /// Evidence trail: tx signatures, edge ids, classification inputs.
   evidence            Json
 
@@ -1373,6 +1381,41 @@ model WalletRelationship {
   @@index([walletBId])
   @@index([lineageRootId, kind])
   @@map("wallet_relationships")
+}
+
+/// ObservationProviderSnapshot — SHADOW-ONLY store for provider-CLAIMED wallet
+/// stats gathered by the observation-universe importer (Wave D). Deliberately
+/// SEPARATE from WalletStats: WalletStats is read by the FlowScore path
+/// (fetchAggregateInputs -> computeFlowScore averages walletScore across ALL
+/// buyers), so writing an uncomputed provider row there would corrupt FlowScore
+/// (hard-rule-1). Nothing reads this model for scoring/eligibility — it is pure
+/// provider-claimed context on observation_only wallets. Fields the provider
+/// did NOT supply are NULLABLE (honest unknown, never a fabricated 0). Upserted
+/// on (walletId, source, window) so re-import is idempotent and concurrent
+/// writes cannot duplicate.
+model ObservationProviderSnapshot {
+  id              String   @id @default(cuid())
+  walletId        String
+  /// Provider/source label the claim came from (e.g. 'solana_tracker'). NOT locally verified.
+  source          String
+  /// Rolling window label, e.g. '30d'.
+  window          String
+  /// Provider-claimed 30d PnL TOTAL. Null when not supplied — never 0-as-unknown.
+  pnlUsd          Decimal? @db.Decimal(20, 4)
+  winRate         Float?
+  tradeCount      Int?
+  avgTradeSizeUsd Decimal? @db.Decimal(20, 4)
+  /// Always true — these numbers are provider-CLAIMED, never locally verified.
+  providerClaimed Boolean  @default(true)
+  observedAt      DateTime
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  wallet          Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([walletId, source, window])
+  @@index([walletId])
+  @@map("observation_provider_snapshot")
 }
 
 /// LineageExpansionNode.priority — expansion queue order (spec order).

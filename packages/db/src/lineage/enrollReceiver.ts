@@ -509,18 +509,22 @@ async function upsertRelationship(
   //   - unavailable (status set, valuedUsd null) → contributes 0 to the
   //     KNOWN-value sum (unknown, never legacy/fabricated) but still counts as
   //     an interaction; revaluation reopens the node and re-sums once priced.
-  const byTx = new Map<string, number>();
+  // usd = null means the leg's value is UNKNOWN (unavailable) — recorded as
+  // null in evidence and counted in unknownValueTxCount, NEVER summed as $0.
+  const byTx = new Map<string, number | null>();
   for (const e of edges) {
     if (byTx.has(e.txHash)) continue;
     if (e.valuationStatus === 'not_applicable') continue;
-    let usd: number;
+    let usd: number | null;
     if (e.valuationStatus === null) usd = Number(e.amountUsd);
     else if (e.valuedUsd != null) usd = Number(e.valuedUsd);
-    else usd = 0;
+    else usd = null; // unavailable → UNKNOWN, never 0
     byTx.set(e.txHash, usd);
   }
   const interactionCount = byTx.size;
-  const valueTransferredUsd = [...byTx.values()].reduce((s, v) => s + v, 0);
+  const knownValues = [...byTx.values()].filter((v): v is number => v !== null);
+  const valueTransferredUsd = knownValues.reduce((s, v) => s + v, 0); // sum of KNOWN value only
+  const unknownValueTxCount = interactionCount - knownValues.length; // unpriced legs, honestly counted
   const evidenceSample = [...byTx.entries()].slice(-EVIDENCE_SAMPLE_CAP).map(([txHash, usd]) => ({ txHash, usd }));
   const confidence = relationshipConfidence(args.kind, { activated: args.activated, interactionCount });
 
@@ -554,6 +558,7 @@ async function upsertRelationship(
       lastSeenAt: args.now,
       interactionCount,
       valueTransferredUsd,
+      unknownValueTxCount,
       evidence: evidenceSample as Prisma.InputJsonValue
     },
     update: {
@@ -561,6 +566,7 @@ async function upsertRelationship(
       lastSeenAt: existing && existing.lastSeenAt > args.now ? existing.lastSeenAt : args.now,
       interactionCount,
       valueTransferredUsd,
+      unknownValueTxCount,
       confidence,
       evidence: evidenceSample as Prisma.InputJsonValue
     }
