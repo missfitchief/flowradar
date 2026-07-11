@@ -25,8 +25,16 @@
 // now owned by the pure aggregate function itself instead of being
 // duplicated here.
 
-import { aggregateWindow, computeFlowScore } from '@flowradar/core';
-import type { Chain, RiskReport, Settings } from '@flowradar/core';
+import {
+  aggregateWindow,
+  computeFlowScore,
+  shouldPersistFlowSnapshot,
+  emptySnapshotPersistenceMetrics,
+  quantizeToColumnScale,
+  stableStringify,
+  DEFAULT_SNAPSHOT_PERSISTENCE
+} from '@flowradar/core';
+import type { Chain, RiskReport, Settings, SnapshotPersistenceMetrics, FlowSnapshotComparable } from '@flowradar/core';
 import type { PrismaClient } from '@prisma/client';
 import { fetchAggregateInputs } from './fetchAggregateInputs';
 
@@ -50,6 +58,10 @@ export interface ScoringPassResult {
   scored: number;
   skippedNoWindow: number;
   errors: number;
+  /** Task 0 (storage bound): persistence accounting — attempted = inserted +
+   *  suppressedUnchanged, so nothing is ever silently dropped. `scored` keeps
+   *  its meaning of "tokens successfully scored" whether or not a row landed. */
+  snapshotPersistence: SnapshotPersistenceMetrics;
 }
 
 /**
@@ -87,6 +99,7 @@ export async function runFlowScoringPass(
   let scored = 0;
   let skippedNoWindow = 0;
   let errors = 0;
+  const persistence = emptySnapshotPersistenceMetrics();
 
   for (const token of tokensWithTrades) {
     try {
@@ -125,31 +138,129 @@ export async function runFlowScoringPass(
         ...(agg24h.accumulation ? { metrics: agg24h.accumulation } : {})
       };
 
-      await prisma.tokenFlowSnapshot.create({
-        data: {
-          tokenId: token.id,
-          ts: now,
-          windowMinutes: agg24h.windowMinutes,
-          flowScore: result.score,
-          smartWalletCount: agg24h.smartWalletCount,
-          humanLikeCount: agg24h.humanLikeCount,
-          possibleBotCount: agg24h.possibleBotCount,
-          uniqueEntityCount: agg24h.uniqueEntityCount,
-          clusterAdjustedWalletCount: agg24h.uniqueEntityCount,
-          entityConcentrationRisk: 0,
-          trackedBuyVolumeUsd: agg24h.trackedBuyVolumeUsd,
-          trackedSellVolumeUsd: agg24h.trackedSellVolumeUsd,
-          netFlowUsd: agg24h.netFlowUsd,
-          buySellRatio: agg24h.buySellRatio,
-          avgEntryMcap: agg24h.avgEntryMcap ?? 0,
-          currentMcap: agg24h.currentMcap ?? 0,
-          mcapExpansionFromAvgEntry: agg24h.mcapExpansionFromAvgEntry ?? 0,
-          holdersGrowth: 0,
-          liquidityChange: agg24h.liquidityChangePct ?? 0,
-          signalStatus: 'watching',
-          componentBreakdown
+      // Task 0 (storage bound): compare against the token's LATEST persisted
+      // row and suppress ONLY byte-identical repeats within the routine
+      // cadence (98.8% of writes at measurement time). Exact-match — any real
+      // change, including a signalDetection in-place status revision on the
+      // latest row, persists exactly as before.
+      // USD/mcap fields persist as Decimal(20,4): quantize BOTH sides to the
+      // column scale so a float's 4dp round-trip compares equal (raw floats
+      // would defeat suppression every cycle — Codex review). The
+      // componentBreakdown JSON participates via a stable fingerprint because
+      // the Signal Feed reads it off the latest row.
+      const nextRow: FlowSnapshotComparable = {
+        ts: now,
+        windowMinutes: agg24h.windowMinutes,
+        flowScore: result.score,
+        smartWalletCount: agg24h.smartWalletCount,
+        humanLikeCount: agg24h.humanLikeCount,
+        possibleBotCount: agg24h.possibleBotCount,
+        uniqueEntityCount: agg24h.uniqueEntityCount,
+        trackedBuyVolumeUsd: quantizeToColumnScale(agg24h.trackedBuyVolumeUsd),
+        trackedSellVolumeUsd: quantizeToColumnScale(agg24h.trackedSellVolumeUsd),
+        netFlowUsd: quantizeToColumnScale(agg24h.netFlowUsd),
+        buySellRatio: agg24h.buySellRatio,
+        avgEntryMcap: quantizeToColumnScale(agg24h.avgEntryMcap ?? 0),
+        currentMcap: quantizeToColumnScale(agg24h.currentMcap ?? 0),
+        mcapExpansionFromAvgEntry: agg24h.mcapExpansionFromAvgEntry ?? 0,
+        liquidityChange: agg24h.liquidityChangePct ?? 0,
+        signalStatus: 'watching',
+        componentsFingerprint: stableStringify(componentBreakdown)
+      };
+      const latest = await prisma.tokenFlowSnapshot.findFirst({
+        where: { tokenId: token.id, windowMinutes: agg24h.windowMinutes },
+        orderBy: [{ ts: 'desc' }, { id: 'desc' }], // id tiebreak: deterministic under ms ties
+        select: {
+          ts: true,
+          windowMinutes: true,
+          flowScore: true,
+          smartWalletCount: true,
+          humanLikeCount: true,
+          possibleBotCount: true,
+          uniqueEntityCount: true,
+          trackedBuyVolumeUsd: true,
+          trackedSellVolumeUsd: true,
+          netFlowUsd: true,
+          buySellRatio: true,
+          avgEntryMcap: true,
+          currentMcap: true,
+          mcapExpansionFromAvgEntry: true,
+          liquidityChange: true,
+          signalStatus: true,
+          componentBreakdown: true
         }
       });
+      const prevRow: FlowSnapshotComparable | null = latest
+        ? {
+            ts: latest.ts,
+            windowMinutes: latest.windowMinutes,
+            flowScore: latest.flowScore,
+            smartWalletCount: latest.smartWalletCount,
+            humanLikeCount: latest.humanLikeCount,
+            possibleBotCount: latest.possibleBotCount,
+            uniqueEntityCount: latest.uniqueEntityCount,
+            trackedBuyVolumeUsd: quantizeToColumnScale(Number(latest.trackedBuyVolumeUsd)),
+            trackedSellVolumeUsd: quantizeToColumnScale(Number(latest.trackedSellVolumeUsd)),
+            netFlowUsd: quantizeToColumnScale(Number(latest.netFlowUsd)),
+            buySellRatio: latest.buySellRatio,
+            avgEntryMcap: quantizeToColumnScale(Number(latest.avgEntryMcap)),
+            currentMcap: quantizeToColumnScale(Number(latest.currentMcap)),
+            mcapExpansionFromAvgEntry: latest.mcapExpansionFromAvgEntry,
+            liquidityChange: latest.liquidityChange,
+            signalStatus: latest.signalStatus,
+            componentsFingerprint: stableStringify(latest.componentBreakdown)
+          }
+        : null;
+
+      // signalStatus lifecycle is OWNED by signal detection (which now records
+      // real transitions as new rows — see signals.ts). Scoring CARRIES the
+      // latest status forward instead of resetting to 'watching': otherwise a
+      // hot token would oscillate watching->hot every cycle, fabricating
+      // transitions and doubling rows (Codex re-review REJECT). New tokens
+      // start 'watching' exactly as before.
+      const carriedStatus = prevRow?.signalStatus ?? 'watching';
+      nextRow.signalStatus = carriedStatus;
+
+      persistence.attempted += 1;
+      const decision = shouldPersistFlowSnapshot(prevRow, nextRow, DEFAULT_SNAPSHOT_PERSISTENCE);
+      if (decision.persist) {
+        try {
+          await prisma.tokenFlowSnapshot.create({
+            data: {
+              tokenId: token.id,
+              ts: now,
+              windowMinutes: agg24h.windowMinutes,
+              flowScore: result.score,
+              smartWalletCount: agg24h.smartWalletCount,
+              humanLikeCount: agg24h.humanLikeCount,
+              possibleBotCount: agg24h.possibleBotCount,
+              uniqueEntityCount: agg24h.uniqueEntityCount,
+              clusterAdjustedWalletCount: agg24h.uniqueEntityCount,
+              entityConcentrationRisk: 0,
+              trackedBuyVolumeUsd: agg24h.trackedBuyVolumeUsd,
+              trackedSellVolumeUsd: agg24h.trackedSellVolumeUsd,
+              netFlowUsd: agg24h.netFlowUsd,
+              buySellRatio: agg24h.buySellRatio,
+              avgEntryMcap: agg24h.avgEntryMcap ?? 0,
+              currentMcap: agg24h.currentMcap ?? 0,
+              mcapExpansionFromAvgEntry: agg24h.mcapExpansionFromAvgEntry ?? 0,
+              holdersGrowth: 0,
+              liquidityChange: agg24h.liquidityChangePct ?? 0,
+              signalStatus: carriedStatus as 'watching' | 'hot' | 'profit_rotation' | 'exit_warning' | 'dead',
+              componentBreakdown
+            }
+          });
+        } catch (err) {
+          persistence.insertFailed += 1; // honest accounting even on DB failure
+          throw err;
+        }
+        persistence.inserted += 1;
+        if (decision.reason === 'first') persistence.firstSnapshots += 1;
+        else if (decision.reason === 'changed') persistence.changedPersisted += 1;
+        else persistence.routineHeartbeats += 1;
+      } else {
+        persistence.suppressedUnchanged += 1;
+      }
       scored += 1;
     } catch (err) {
       errors += 1;
@@ -164,7 +275,8 @@ export async function runFlowScoringPass(
     tokensConsidered: tokensWithTrades.length,
     scored,
     skippedNoWindow,
-    errors
+    errors,
+    snapshotPersistence: persistence
   };
   log?.info('flowScoring cycle complete', { ...summary });
   return summary;
