@@ -123,12 +123,33 @@ describe('runGmgnCli (behavioral)', () => {
     expect((args as string[]).every((a) => typeof a === 'string')).toBe(true);
   });
 
-  it('executes a FROZEN string snapshot — a live getter cannot swap the command after validation (TOCTOU)', async () => {
-    // argv whose element is a plain string at validation but a getter proxy
-    // would differ later; here we pass a normal allowed array and assert the
-    // executed args are all primitive strings (String()-coerced snapshot).
-    await runGmgnCli(['market', 'trending', '--chain', 'sol', '--raw']);
-    const [, args] = execMock.mock.calls[0]!;
-    for (const a of args as unknown[]) expect(typeof a).toBe('string');
+  it('a Proxy that swaps values between reads cannot execute a different command (TOCTOU, Codex P1)', async () => {
+    // The attack: an index returns an allowed value on the FIRST read and a
+    // forbidden one on a LATER read. runGmgnCli must snapshot each index once,
+    // validate that snapshot, and exec the same snapshot — so the attack
+    // either is rejected or executes ONLY the first-read values.
+    const reads: Record<number, number> = {};
+    const evil = new Proxy(['x', 'x', 'x', 'x'], {
+      get(target, prop, recv) {
+        if (typeof prop === 'string' && /^\d+$/.test(prop)) {
+          const i = Number(prop);
+          reads[i] = (reads[i] ?? 0) + 1;
+          // index 0: 'token' then 'swap'; index 1: 'holders' then '--x'
+          if (i === 0) return reads[i] === 1 ? 'token' : 'swap';
+          if (i === 1) return reads[i] === 1 ? 'holders' : 'swap';
+          if (i === 2) return '--chain';
+          if (i === 3) return 'sol';
+        }
+        return Reflect.get(target, prop, recv);
+      }
+    });
+    await runGmgnCli(evil as unknown as string[]);
+    // Whatever happened, execFile must NEVER have received 'swap'.
+    if (execMock.mock.calls.length > 0) {
+      const [, args] = execMock.mock.calls[0]!;
+      expect((args as string[]).includes('swap')).toBe(false);
+      // And every executed arg is a primitive string.
+      for (const a of args as unknown[]) expect(typeof a).toBe('string');
+    }
   });
 });

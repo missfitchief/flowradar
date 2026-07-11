@@ -147,12 +147,19 @@ describe('repo-wide GMGN capability guard (grep guard)', () => {
   it('the excluded allowlist.ts has EXACTLY one child-process call, via execFile only', () => {
     const src = readFileSync(join(REPO_ROOT, 'packages/providers/src/gmgn/allowlist.ts'), 'utf8');
     const execFileCalls = (src.match(/\bexecFile\s*\(/g) ?? []).length;
-    const otherSpawns = (src.match(/\b(exec|spawn|spawnSync|execSync|fork)\s*\(/g) ?? []).length;
+    // ALL other child_process spawn forms (incl. *Sync variants) are
+    // prohibited (Codex Task-1 #2 — execFileSync was missing).
+    const otherSpawns = (src.match(/\b(exec|execSync|execFileSync|spawn|spawnSync|fork)\s*\(/g) ?? []).length;
     expect(execFileCalls).toBe(1);
     expect(otherSpawns).toBe(0);
-    // And the single call must be guarded: assertGmgnCommandAllowed appears
-    // before execFile in the file.
-    expect(src.indexOf('assertGmgnCommandAllowed(argv)')).toBeGreaterThan(-1);
-    expect(src.indexOf('assertGmgnCommandAllowed(argv)')).toBeLessThan(src.indexOf('execFile('));
+    // The child_process import must expose ONLY execFile — an alias like
+    // `import { exec as run }` or `const run = execFile` would defeat the
+    // regexes above, so pin the import shape and forbid re-binding.
+    expect(src).toMatch(/import\s*\{\s*execFile\s*\}\s*from\s*'node:child_process'/);
+    expect(src).not.toMatch(/child_process['"]\s*\)?;?[\s\S]*\bexec\b\s+as\b/);
+    expect(src).not.toMatch(/=\s*execFile\b(?!\s*\()/); // `const x = execFile` (alias), not a call
+    // The single call must be guarded: the validation precedes execFile.
+    expect(src.indexOf('assertGmgnCommandAllowed(snapshot)')).toBeGreaterThan(-1);
+    expect(src.indexOf('assertGmgnCommandAllowed(snapshot)')).toBeLessThan(src.indexOf('execFile('));
   });
 });

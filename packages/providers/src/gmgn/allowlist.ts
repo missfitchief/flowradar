@@ -98,11 +98,15 @@ function resolveCliPath(explicit?: string): string {
 /** Runs an ALLOWED read-only gmgn-cli command and returns parsed JSON (the
  *  callers always pass --raw). Rejects forbidden commands BEFORE spawning. */
 export async function runGmgnCli(argv: readonly unknown[], opts: GmgnCliOptions = {}): Promise<unknown> {
-  // Validate, then FREEZE a defensive string-copy snapshot and execute THAT —
-  // never the caller's array (a live getter/Proxy could return a different
-  // value at spawn time than at validation time; Codex P1 TOCTOU).
-  assertGmgnCommandAllowed(argv);
-  const safeArgv: string[] = (argv as string[]).map((a) => String(a));
+  // SNAPSHOT FIRST, then validate + execute the SAME snapshot (Codex P1): a
+  // Proxy/getter array could return an allowed value when validated and a
+  // different one when read again for exec. We copy each element exactly once
+  // (structuredClone of a length-fixed shallow array), reject non-string
+  // elements, validate the snapshot, and execute that immutable snapshot.
+  if (!Array.isArray(argv)) throw new GmgnForbiddenCommandError(argv);
+  const snapshot: unknown[] = Array.prototype.slice.call(argv); // single read per index
+  assertGmgnCommandAllowed(snapshot); // rejects any non-string element too
+  const safeArgv = snapshot as string[]; // proven all-string by the assert
   const cli = resolveCliPath(opts.cliPath);
   return new Promise((resolve, reject) => {
     execFile(
