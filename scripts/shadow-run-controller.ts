@@ -181,18 +181,22 @@ async function start(): Promise<void> {
   const claimActive = (runId: string): void => {
     const attempt = (): void => writeFileSync(ACTIVE_FILE, runId, { flag: 'wx' });
     try { attempt(); return; } catch { /* exists — evaluate below */ }
+    // FAIL CLOSED (Codex rev-3 #2): eviction requires BOTH tracked pids
+    // verifiably dead, REGARDLESS of status (a live stop-failed worker is
+    // still a live worker). Unreadable/corrupt state is NEVER treated as
+    // stale — the operator must resolve it.
     const existing = activeRunId();
     if (existing) {
+      let st: RunState;
       try {
-        const st = loadState(existing);
-        const controllerLive = st.controllerPid !== null && pidAlive(st.controllerPid);
-        const workerLive = st.workerPid !== null && pidAlive(st.workerPid);
-        if (st.status === 'running' && (controllerLive || workerLive)) {
-          throw new Error(`run ${existing} is ACTIVE (controller ${controllerLive ? 'alive' : 'dead'}, worker ${workerLive ? 'alive' : 'dead'}) — use status/stop; never two runs`);
-        }
-      } catch (e) {
-        if (e instanceof Error && e.message.includes('never two runs')) throw e;
-        // unreadable/corrupt state for a claimed id: treat as stale
+        st = loadState(existing);
+      } catch {
+        throw new Error(`ACTIVE points at run ${existing} whose state.json is unreadable — refusing to evict; inspect runs/${existing}/ manually`);
+      }
+      const controllerLive = st.controllerPid !== null && pidAlive(st.controllerPid);
+      const workerLive = st.workerPid !== null && pidAlive(st.workerPid);
+      if (controllerLive || workerLive) {
+        throw new Error(`run ${existing} has live processes (controller ${controllerLive ? 'ALIVE' : 'dead'}, worker ${workerLive ? 'ALIVE' : 'dead'}, status ${st.status}) — use status/stop; never two runs`);
       }
     }
     rmSync(ACTIVE_FILE, { force: true });
@@ -339,9 +343,17 @@ async function stop(): Promise<void> {
     for (let i = 0; i < 12; i++) { // up to ~2 min (sentinel poll is 30s)
       await new Promise((r) => setTimeout(r, 10_000));
       const cur = loadState(id);
-      if (cur.status !== 'running') {
+      if (cur.status === 'stopped' || cur.status === 'completed') {
         console.log(JSON.stringify({ stopped: id, via: 'controller', finalStatus: cur.status }));
         await prisma.$disconnect();
+        return;
+      }
+      if (cur.status === 'stop-failed') {
+        // Acknowledged, but the kill was UNVERIFIED — that is a failure, not
+        // success (Codex rev-3 #1). Surface the manual remedy.
+        console.log(JSON.stringify({ stopFailed: id, workerPid: cur.workerPid, remedy: `taskkill /PID ${cur.workerPid} /T /F, then re-run stop` }));
+        await prisma.$disconnect();
+        process.exitCode = 1;
         return;
       }
     }
@@ -350,15 +362,16 @@ async function stop(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  // No controller: kill the worker directly, VERIFIED.
+  // No controller: kill the worker directly, VERIFIED. ACTIVE is cleared
+  // ONLY on a verified kill — an unverified one must stay visible.
   const killed = s.workerPid === null ? true : await killWorkerVerified(s.workerPid);
   s.status = killed ? 'stopped' : 'stop-failed';
   if (!killed) s.notes.push(`WORKER KILL UNVERIFIED (pid ${s.workerPid})`);
   s.stoppedAt = new Date().toISOString();
   saveState(s);
   await checkpoint(s, 'final-manual-stop');
-  writeFileSync(ACTIVE_FILE, '');
-  console.log(JSON.stringify({ stopped: id, via: 'direct-kill', verified: killed }));
+  if (killed) writeFileSync(ACTIVE_FILE, '');
+  console.log(JSON.stringify({ stopped: killed ? id : null, via: 'direct-kill', verified: killed, ...(killed ? {} : { remedy: `taskkill /PID ${s.workerPid} /T /F, then re-run stop` }) }));
   await prisma.$disconnect();
   if (!killed) process.exitCode = 1;
 }
@@ -406,19 +419,35 @@ async function report(): Promise<void> {
       const pts = await prisma.tokenMarketSnapshot.findMany({
         where: { tokenId: sig.tokenId, ts: { gt: t0, lte: end }, marketCapUsd: { gt: 0 }, ...notSynthetic },
         orderBy: { ts: 'asc' },
-        select: { marketCapUsd: true }
+        select: { marketCapUsd: true, ts: true }
       });
       if (pts.length === 0) { row[label] = 'no in-window snapshots — not reported'; continue; }
       let peak = baseMcap;
       let maxUpside = 0;
       let maxDrawdown = 0;
+      // Internal-gap accounting (Codex rev-3 #3): a window can be "covered"
+      // at its endpoint yet sparse inside — the max inter-snapshot gap
+      // (including signal→first and last→end) is reported, and results with
+      // gaps > 30min are LABELED sparse rather than presented as complete.
+      let prevTs = t0.getTime();
+      let maxGapMs = 0;
       for (const p of pts) {
         const v = Number(p.marketCapUsd);
         if (v > peak) peak = v;
         maxUpside = Math.max(maxUpside, (v / baseMcap - 1) * 100);
         maxDrawdown = Math.max(maxDrawdown, (1 - v / peak) * 100); // peak-to-later-trough
+        maxGapMs = Math.max(maxGapMs, p.ts.getTime() - prevTs);
+        prevTs = p.ts.getTime();
       }
-      row[label] = { maxUpsidePct: Number(maxUpside.toFixed(1)), maxDrawdownFromPeakPct: Number(maxDrawdown.toFixed(1)), snapshots: pts.length };
+      maxGapMs = Math.max(maxGapMs, end.getTime() - prevTs);
+      const maxGapMin = Math.round(maxGapMs / 60_000);
+      row[label] = {
+        maxUpsidePct: Number(maxUpside.toFixed(1)),
+        maxDrawdownFromPeakPct: Number(maxDrawdown.toFixed(1)),
+        snapshots: pts.length,
+        maxGapMin,
+        ...(maxGapMin > 30 ? { sparse: `max inter-snapshot gap ${maxGapMin}min — extremes between snapshots are unobserved` } : {})
+      };
     }
     out.push(row);
   }
