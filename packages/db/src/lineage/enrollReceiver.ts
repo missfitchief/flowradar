@@ -499,16 +499,24 @@ async function upsertRelationship(
     },
     select: { txHash: true, amountUsd: true, valuedUsd: true, valuationStatus: true }
   });
-  // Sum the HONEST valuation (Wave A) when present, not legacy amountUsd — a
-  // native-SOL edge Helius priced at $0 in amountUsd but revaluation valued in
-  // valuedUsd must contribute its real value to relationship strength (Codex
-  // final review). An UNAVAILABLE edge (valuationStatus set, valuedUsd null)
-  // contributes its legacy amountUsd (0 for native SOL) — unknown, never
-  // fabricated; revaluation reopens and re-sums once a price exists.
+  // Relationship value/interactions from the HONEST valuation (Wave A), by tx
+  // (Codex final review, 2 rounds):
+  //   - not_applicable (service/internal-swap leg) → EXCLUDED from BOTH the
+  //     value sum and interactionCount — a service leg is not a funding tie.
+  //   - valuationStatus === null (pre-Wave-A legacy edge, never valued) → use
+  //     legacy amountUsd (preserves original behavior for un-valued edges).
+  //   - valued (valuedUsd present) → use valuedUsd (native SOL no longer $0).
+  //   - unavailable (status set, valuedUsd null) → contributes 0 to the
+  //     KNOWN-value sum (unknown, never legacy/fabricated) but still counts as
+  //     an interaction; revaluation reopens the node and re-sums once priced.
   const byTx = new Map<string, number>();
   for (const e of edges) {
     if (byTx.has(e.txHash)) continue;
-    const usd = e.valuationStatus != null && e.valuedUsd != null ? Number(e.valuedUsd) : Number(e.amountUsd);
+    if (e.valuationStatus === 'not_applicable') continue;
+    let usd: number;
+    if (e.valuationStatus === null) usd = Number(e.amountUsd);
+    else if (e.valuedUsd != null) usd = Number(e.valuedUsd);
+    else usd = 0;
     byTx.set(e.txHash, usd);
   }
   const interactionCount = byTx.size;

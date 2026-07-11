@@ -239,9 +239,18 @@ export async function importObservationUniverse(
 
     // Store provider stats as provider_claimed (source='provider') ONLY when the
     // row supplied a complete set — never fabricated. Skip if a provider/30d row
-    // already exists (idempotent; don't clobber). Only THIS importer writes
-    // source='provider' window='30d' rows and it runs under the global lock, so
-    // the count→create is race-free against other provider-stats writers.
+    // already exists (idempotent re-import; don't clobber).
+    //
+    // WalletStats is APPEND-HISTORY (every writer `create`s; "latest" = newest
+    // computedAt), so no unique (walletId,source,window) constraint exists or
+    // should — history would break. This count→create is idempotent against
+    // ANOTHER observation import (both hold the global lock). Candidate promotion
+    // can also write a provider/30d row (candidateValidation, source can be
+    // 'provider') WITHOUT this lock, so a rare concurrent overlap may append a
+    // SECOND provider/30d row — which is normal append-history, not corruption:
+    // latest-by-computedAt still resolves deterministically, and these stats are
+    // inert on observation_only wallets (zero signal weight). Not worth a
+    // history-breaking constraint or cross-module locking. (Codex final review.)
     if (row.providerStats) {
       const hasStats = await prisma.walletStats.count({ where: { walletId, source: 'provider', window: '30d' } });
       if (hasStats === 0) {
@@ -250,12 +259,16 @@ export async function importObservationUniverse(
             walletId,
             window: '30d',
             // The provider reports a single 30d PnL TOTAL — recorded in pnlUsd.
-            // We do NOT know the realized/unrealized split and do NOT compute a
-            // walletScore, so those are 0 = UNKNOWN/not-asserted (never a
-            // fabricated breakdown or a "computed score of 0"). source=provider
-            // (provider_claimed) + pnlConfidence=0 + the scoreComponents note
-            // are the untrust markers. On observation_only wallets these numbers
-            // carry zero signal weight regardless. (Codex final review.)
+            // realized/unrealized split and walletScore are NOT provided and NOT
+            // computed. These WalletStats columns are NON-NULLABLE, and making
+            // them nullable would touch the protected FlowScore read path
+            // (profitability/flowScore/aggregate) — forbidden by hard-rule-1
+            // (scoring formulas unchanged). So the unknowns are stored as 0 and
+            // EXPLICITLY marked not-asserted via source=provider (provider_claimed)
+            // + pnlConfidence=0 + the scoreComponents flags below. This is inert:
+            // observation_only wallets carry zero signal weight, and provider
+            // stats never grant a smart vote (status-gated). (Codex final review —
+            // accepted representation given the non-null schema + hard-rule-1.)
             pnlUsd: row.providerStats.pnl30d,
             realizedPnlUsd: 0,
             unrealizedPnlUsd: 0,
