@@ -66,7 +66,17 @@ const stopSentinel = (runId: string) => path.join(RUNS_DIR, runId, 'STOP');
 function statePath(runId: string): string { return path.join(RUNS_DIR, runId, 'state.json'); }
 function loadState(runId: string): RunState { return JSON.parse(readFileSync(statePath(runId), 'utf-8')) as RunState; }
 function saveState(s: RunState): void { writeFileSync(statePath(s.runId), JSON.stringify(s, null, 2)); }
-function activeRunId(): string | null { return existsSync(ACTIVE_FILE) ? readFileSync(ACTIVE_FILE, 'utf-8').trim() || null : null; }
+/** ACTIVE stores an OWNERSHIP TOKEN `runId|claimerPid` (Codex rev-5: runId
+ *  alone let two --resume claimers of the same run both validate). */
+function parseActive(): { runId: string; ownerPid: number | null } | null {
+  if (!existsSync(ACTIVE_FILE)) return null;
+  const raw = readFileSync(ACTIVE_FILE, 'utf-8').trim();
+  if (!raw) return null;
+  const [runId, pidStr] = raw.split('|');
+  const pid = Number(pidStr);
+  return { runId: runId!, ownerPid: Number.isFinite(pid) ? pid : null };
+}
+function activeRunId(): string | null { return parseActive()?.runId ?? null; }
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -179,43 +189,44 @@ async function start(): Promise<void> {
   // live controller AND no live worker) is removed and re-claimed once; a
   // live claim always throws. Applies to fresh starts AND --resume.
   const claimActive = (runId: string): void => {
-    const attempt = (): void => writeFileSync(ACTIVE_FILE, runId, { flag: 'wx' });
+    // The claim is an OWNERSHIP TOKEN runId|pid — two claimers of the SAME
+    // runId are still distinct owners (Codex rev-5 #1).
+    const attempt = (): void => writeFileSync(ACTIVE_FILE, `${runId}|${process.pid}`, { flag: 'wx' });
     try { attempt(); return; } catch { /* exists — evaluate below */ }
-    // FAIL CLOSED (Codex rev-3 #2): eviction requires BOTH tracked pids
-    // verifiably dead, REGARDLESS of status (a live stop-failed worker is
-    // still a live worker). Unreadable/corrupt state is NEVER treated as
-    // stale — the operator must resolve it.
-    const existing = activeRunId();
-    if (existing) {
-      let st: RunState;
-      try {
-        st = loadState(existing);
-      } catch {
-        throw new Error(`ACTIVE points at run ${existing} whose state.json is unreadable — refusing to evict; inspect runs/${existing}/ manually`);
-      }
-      const controllerLive = st.controllerPid !== null && pidAlive(st.controllerPid);
-      const workerLive = st.workerPid !== null && pidAlive(st.workerPid);
-      if (controllerLive || workerLive) {
-        throw new Error(`run ${existing} has live processes (controller ${controllerLive ? 'ALIVE' : 'dead'}, worker ${workerLive ? 'ALIVE' : 'dead'}, status ${st.status}) — use status/stop; never two runs`);
-      }
-    }
-    // Eviction is serialized by an exclusive EVICT lock (Codex rev-4: the
-    // bare remove/recreate had an ABA race — two starters could validate the
-    // same stale claim and the loser's rmSync could delete the winner's NEW
-    // claim). Only the lock holder may evict+reclaim.
+    // Eviction is serialized by an exclusive EVICT lock. A STALE EVICT lock
+    // (dead holder) FAILS CLOSED with manual cleanup — automated stale-lock
+    // recovery just recreates the ABA race one level down (Codex rev-5 #2).
     const evictLock = path.join(RUNS_DIR, 'EVICT.lock');
     try {
       writeFileSync(evictLock, String(process.pid), { flag: 'wx' });
     } catch {
       const holder = Number(readFileSync(evictLock, 'utf-8').trim());
       if (Number.isFinite(holder) && pidAlive(holder)) throw new Error('another start is mid-eviction — retry in a moment');
-      rmSync(evictLock, { force: true }); // crashed holder
-      writeFileSync(evictLock, String(process.pid), { flag: 'wx' }); // EEXIST here = genuine race — throw
+      throw new Error(`stale EVICT lock (dead holder ${holder}) — inspect, then delete runs/EVICT.lock manually and retry`);
     }
     try {
-      // Re-validate UNDER the lock: the claim may have changed since we read it.
-      const current = activeRunId();
-      if (current && current !== existing) throw new Error(`ACTIVE changed to ${current} during eviction — retry`);
+      // ALL validation happens UNDER the lock, against the CURRENT claim:
+      // FAIL CLOSED — eviction requires the claim OWNER dead AND both of the
+      // claimed run's tracked pids verifiably dead, regardless of status
+      // (a live stop-failed worker is still a live worker). Unreadable state
+      // is never treated as stale.
+      const cur = parseActive();
+      if (cur) {
+        if (cur.ownerPid !== null && pidAlive(cur.ownerPid)) {
+          throw new Error(`ACTIVE is owned by live claimer pid ${cur.ownerPid} (run ${cur.runId}) — never two runs`);
+        }
+        let st: RunState;
+        try {
+          st = loadState(cur.runId);
+        } catch {
+          throw new Error(`ACTIVE points at run ${cur.runId} whose state.json is unreadable — refusing to evict; inspect runs/${cur.runId}/ manually`);
+        }
+        const controllerLive = st.controllerPid !== null && pidAlive(st.controllerPid);
+        const workerLive = st.workerPid !== null && pidAlive(st.workerPid);
+        if (controllerLive || workerLive) {
+          throw new Error(`run ${cur.runId} has live processes (controller ${controllerLive ? 'ALIVE' : 'dead'}, worker ${workerLive ? 'ALIVE' : 'dead'}, status ${st.status}) — use status/stop; never two runs`);
+        }
+      }
       rmSync(ACTIVE_FILE, { force: true });
       attempt();
     } finally {
