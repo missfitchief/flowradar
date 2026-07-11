@@ -42,6 +42,8 @@ export * from './backtest/replayRequest';
 export * from './feed/explain';
 export * from './candidates/validate';
 export * from './candidates/sourceCategory';
+export * from './behavior/reconstruct';
+export * from './behavior/holdClassifier';
 export * from './social/index';
 export * from './confluence/index';
 export * from './stealth/index';

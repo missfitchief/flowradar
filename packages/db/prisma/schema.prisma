@@ -1626,3 +1626,28 @@ model LineageExpansionNode {
   @@index([status, priority])
   @@map("lineage_expansion_nodes")
 }
+
+/// Reconstructed wallet behavior (GMGN behavior plan Task 4 / directive Task 3).
+/// One row per (chain, wallet): the FULL field-level-provenance BehaviorProfile
+/// (profileJson) + the Task-4 hold/dump classification (classifierJson).
+/// SHADOW-ONLY analytics: never read by FlowScore, signals, wallet scoring,
+/// or eligibility — the classifier result itself carries grantsEligibility:false.
+model WalletBehaviorProfile {
+  id             String   @id @default(cuid())
+  chain          ChainId
+  walletAddress  String
+  engineVersion  Int
+  /// 'local_and_provider' | 'local_only' | 'provider_only' | 'insufficient'
+  dataQuality    String
+  computedAt     DateTime
+  /// @flowradar/core BehaviorProfile, verbatim (per-field provenance inside).
+  profileJson    Json
+  /// @flowradar/core HoldClassifierResult, verbatim (labels + metrics + caveats).
+  classifierJson Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([chain, walletAddress])
+  @@index([dataQuality])
+  @@map("wallet_behavior_profiles")
+}
