@@ -178,6 +178,19 @@ describe('createHeliusRiskProvider', () => {
 // F9: mega-holder / stablecoin mint risk-unavailable handling
 // ---------------------------------------------------------------------------
 
+describe('resolveRiskRps', () => {
+  it('defaults to 9 and clamps the env override to [1, 9]', async () => {
+    const { resolveRiskRps } = await import('../src/solana/risk');
+    expect(resolveRiskRps({})).toBe(9);
+    expect(resolveRiskRps({ HELIUS_RISK_RPS: '4' })).toBe(4);
+    expect(resolveRiskRps({ HELIUS_RISK_RPS: '99' })).toBe(9); // never above default
+    expect(resolveRiskRps({ HELIUS_RISK_RPS: '0' })).toBe(9); // nonsense -> default
+    expect(resolveRiskRps({ HELIUS_RISK_RPS: '-3' })).toBe(9);
+    expect(resolveRiskRps({ HELIUS_RISK_RPS: 'fast' })).toBe(9);
+    expect(resolveRiskRps({ HELIUS_RISK_RPS: '2.9' })).toBe(2); // floored
+  });
+});
+
 describe('parseRetryAfterSeconds', () => {
   const NOW = Date.parse('2026-07-11T12:00:00Z');
   it('parses delta-seconds', () => {

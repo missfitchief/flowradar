@@ -181,11 +181,15 @@ export function resetProviderCache(): void {
  * already the shared MockProvider singleton via getSharedMockProvider).
  */
 function getSolanaHeliusOrMockFallback<C extends ProviderCapability>(capability: C): ProviderCapabilityMap[C] | null {
-  // HELIUS_RPS throttles the wallet-activity Enhanced-Tx adapter only. The risk
-  // RPC provider (createHeliusRiskProvider, below) receives this same env object
-  // but ignores HELIUS_RPS and keeps its own default rate — extending the knob
-  // to risk is out of scope for the 2026-07-07 walletActivity rate-limit fix.
-  const env = { HELIUS_API_KEY: process.env.HELIUS_API_KEY, HELIUS_RPS: process.env.HELIUS_RPS };
+  // HELIUS_RPS throttles the wallet-activity Enhanced-Tx adapter only.
+  // HELIUS_RISK_RPS (2026-07-11 rollout: this key sustains well under the risk
+  // provider's 9rps default — sustained 429s) throttles the risk-RPC adapter;
+  // see solana/risk.ts resolveRiskRps (clamped 1..9, default 9).
+  const env = {
+    HELIUS_API_KEY: process.env.HELIUS_API_KEY,
+    HELIUS_RPS: process.env.HELIUS_RPS,
+    HELIUS_RISK_RPS: process.env.HELIUS_RISK_RPS
+  };
 
   if (capability === 'walletActivity') {
     const cacheKey: LiveCacheKey = 'solana:walletActivity';

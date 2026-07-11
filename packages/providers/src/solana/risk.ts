@@ -42,10 +42,22 @@ import type { RateLimiter } from '../rateLimiter';
 
 export interface HeliusRiskEnv {
   HELIUS_API_KEY?: string;
+  /** Risk-RPC requests/second (default 9, clamped 1..9). The 2026-07-11
+   *  rollout showed this key sustains well under 9 rps on the risk methods
+   *  (sustained 429s at the hardcoded rate) — operators tune this to the
+   *  plan's real budget (e.g. 4) instead of relying on backoff to absorb it. */
+  HELIUS_RISK_RPS?: string;
 }
 
 const HELIUS_RPC_BASE = 'https://mainnet.helius-rpc.com';
 const HELIUS_RPS = 9;
+
+/** Resolves the risk-RPC rate: env override clamped to [1, 9], else 9. */
+export function resolveRiskRps(env: HeliusRiskEnv): number {
+  const n = Number(env.HELIUS_RISK_RPS);
+  if (!Number.isFinite(n) || n <= 0) return HELIUS_RPS;
+  return Math.max(1, Math.min(HELIUS_RPS, Math.floor(n)));
+}
 
 const TOP1_DANGER_THRESHOLD = 0.3; // >=30% top-1 holder -> danger
 const TOP5_WARN_THRESHOLD = 0.6; // >=60% top-5 holders -> warn
@@ -320,7 +332,7 @@ export function createHeliusRiskProvider(env: HeliusRiskEnv): RiskProvider | nul
   const apiKey = env.HELIUS_API_KEY;
   if (!apiKey) return null;
 
-  const limiter = createRateLimiter({ rps: HELIUS_RPS });
+  const limiter = createRateLimiter({ rps: resolveRiskRps(env) });
 
   return {
     providerName: 'Helius',
