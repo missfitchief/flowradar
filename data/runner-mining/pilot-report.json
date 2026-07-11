@@ -1,5 +1,5 @@
 {
-  "ts": "2026-07-11T20:36:09.757Z",
+  "ts": "2026-07-11T20:41:49.674Z",
   "universe": {
     "scanned": 10489,
     "created": 10489,
@@ -34,7 +34,7 @@
     "mintsProcessed": 400,
     "entriesPersisted": 0,
     "byBand": {},
-    "unknownMcapSkipped": 538
+    "unknownMcapSkipped": 1899
   },
   "idempotency": {
     "lifecyclesBeforeRerun": 10489,
