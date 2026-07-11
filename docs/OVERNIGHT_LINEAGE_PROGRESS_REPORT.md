@@ -1,7 +1,7 @@
 # Overnight Lineage Progress Report (second window, 2026-07-11)
 
 **Branch:** `feat/pre-public-accumulation` · **Draft PR:** [#3](https://github.com/missfitchief/flowradar/pull/3) (checkpoint, **NOT merged**)
-**Starting commit (this window):** `ddb8ae9` · **Ending commit:** `3a18916` + this report
+**Starting commit (this window):** `ddb8ae9` · **Ending commit:** `67bd7d9` + this report commit
 **Prior window:** `3f56c07 → ddb8ae9` (Waves A–F, see `docs/OVERNIGHT_CAPITAL_LINEAGE_REPORT.md`)
 **Writer:** Claude (sole) · **Reviewer:** Codex `gpt-5.6-sol` xhigh, read-only adversarial
 
@@ -95,11 +95,11 @@ DB **twice**: Task A gate (**1,290 passed / 1 skipped, EXIT=0**) and the final g
 (**1,320 passed / 1 skipped, EXIT=0**), with the live census **byte-identical** before/after
 both runs (12-table `scripts/db-census.ts` output diffed; evidence in the gitignored
 overnight ledger + this session's transcripts — the census script itself is committed and
-re-runnable). A post-fix verify re-ran after the walletActivity budget change (result in the
-ledger). New tests this window: **14** isolation/client-guard, **2** GMGN repo-wide guard,
-**30** runner-mining, **2** walletActivity budget; **2** pre-existing lock tests deflaked
-(gate-based); Task F was validated by live staged runs + replay (script-level invariant
-checks), not new test files.
+re-runnable). After the walletActivity budget fix, the full verify re-ran clean: **1,322 passed /
+1 skipped, EXIT=0**. New tests this window: **14** isolation/client-guard, **2** GMGN
+repo-wide guard, **30** runner-mining, **2** walletActivity budget; **2** pre-existing lock
+tests deflaked (gate-based); Task F was validated by live staged runs + replay
+(script-level invariant checks), not new test files.
 
 ## Codex verdicts (this window)
 Task A: APPROVE (round 4) · Task F: APPROVE (round 3) · Runner-mining: APPROVE (round 4)
