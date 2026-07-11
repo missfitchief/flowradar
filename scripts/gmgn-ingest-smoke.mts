@@ -15,7 +15,7 @@ async function main() {
   const kol = await fetchKolTrades({ limit: 8 });
 
   const smObs = sm.map((r) => normalizeSmartmoneyRow(r, { sourceCommand: 'track smartmoney', retrievedAt: now }));
-  const kolObs = kol.map((r) => normalizeSmartmoneyRow(r, { sourceCommand: 'track kol', retrievedAt: now }));
+  const kolObs = kol.map((r) => normalizeSmartmoneyRow(r, { sourceCommand: 'track kol', retrievedAt: now, isKolFeed: true }));
   const all = [...smObs, ...kolObs];
 
   const res1 = await ingestGmgnObservations(prisma, all);

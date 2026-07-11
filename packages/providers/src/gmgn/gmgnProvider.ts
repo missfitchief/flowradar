@@ -11,12 +11,26 @@ export interface GmgnFetchOptions {
   cliPath?: string;
 }
 
+const onlyObjects = (arr: unknown[]): Record<string, unknown>[] =>
+  arr.filter((r): r is Record<string, unknown> => r !== null && typeof r === 'object' && !Array.isArray(r));
+
+/** Extracts a row array from a raw response, tolerating array / {list} /
+ *  {data} / {data:{list}} shapes and dropping any non-object elements
+ *  (Codex Task-2 P2 — a null/primitive in the array must not reach a
+ *  normalizer). Unknown shape → empty feed (bounded, never throws). */
 function asRows(data: unknown, ...paths: string[]): Record<string, unknown>[] {
-  if (Array.isArray(data)) return data as Record<string, unknown>[];
+  if (Array.isArray(data)) return onlyObjects(data);
   if (data && typeof data === 'object') {
+    const obj = data as Record<string, unknown>;
     for (const p of paths) {
-      const v = (data as Record<string, unknown>)[p];
-      if (Array.isArray(v)) return v as Record<string, unknown>[];
+      if (Array.isArray(obj[p])) return onlyObjects(obj[p] as unknown[]);
+    }
+    // Nested one level (e.g. { data: { list: [...] } }).
+    if (obj.data && typeof obj.data === 'object') {
+      const inner = obj.data as Record<string, unknown>;
+      for (const p of paths) {
+        if (Array.isArray(inner[p])) return onlyObjects(inner[p] as unknown[]);
+      }
     }
   }
   return [];

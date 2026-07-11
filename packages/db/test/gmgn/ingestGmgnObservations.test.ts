@@ -54,10 +54,39 @@ describe('gmgn normalizers (pure)', () => {
     expect(o.rawClassification).toEqual({ tag: 'smart_degen' });
   });
 
-  it('flags a KOL-tagged maker', () => {
-    const row = { maker: A1, base_address: T1, side: 'sell', timestamp: 1_752_000_000, maker_info: { is_kol: true, name: 'SomeKOL' } };
-    const o = normalizeSmartmoneyRow(row, { sourceCommand: `${PFX}:track kol`, retrievedAt: NOW });
-    expect(o.isKolTagged).toBe(true);
+  it('flags a KOL-tagged maker and the dedicated KOL feed', () => {
+    const tagged = { maker: A1, base_address: T1, side: 'sell', timestamp: 1_752_000_000, maker_info: { is_kol: true, name: 'SomeKOL' } };
+    expect(normalizeSmartmoneyRow(tagged, { sourceCommand: `${PFX}:track smartmoney`, retrievedAt: NOW }).isKolTagged).toBe(true);
+    // KOL FEED marks every row KOL by definition (isKolFeed), even untagged.
+    const plain = { maker: A1, base_address: T1, side: 'buy', timestamp: 1_752_000_000 };
+    expect(normalizeSmartmoneyRow(plain, { sourceCommand: `${PFX}:track kol`, retrievedAt: NOW, isKolFeed: true }).isKolTagged).toBe(true);
+    // A smartmoney wallet whose name merely CONTAINS 'kol' is NOT kol-tagged
+    // (exact-token match, Codex P2).
+    const falsey = { maker: A1, base_address: T1, side: 'buy', timestamp: 1_752_000_000, maker_info: { name: 'kolibri_trader', tag: 'smart_degen' } };
+    expect(normalizeSmartmoneyRow(falsey, { sourceCommand: `${PFX}:track smartmoney`, retrievedAt: NOW }).isKolTagged).toBe(false);
+    // Promoter detection from an exact tag token.
+    const promo = { maker: A1, base_address: T1, side: 'buy', timestamp: 1_752_000_000, maker_info: { tags: ['promoter'] } };
+    expect(normalizeSmartmoneyRow(promo, { sourceCommand: `${PFX}:track smartmoney`, retrievedAt: NOW }).isPromoterTagged).toBe(true);
+  });
+
+  it('same-second distinct trades (different txHash) do NOT collapse in the dedupe key', () => {
+    const ctx = { sourceCommand: `${PFX}:track smartmoney`, retrievedAt: NOW };
+    const a = normalizeSmartmoneyRow({ maker: A1, base_address: T1, side: 'buy', timestamp: 1_752_000_000, transaction_hash: 'sigA' }, ctx);
+    const b = normalizeSmartmoneyRow({ maker: A1, base_address: T1, side: 'buy', timestamp: 1_752_000_000, transaction_hash: 'sigB' }, ctx);
+    expect(a.dedupeKey).not.toBe(b.dedupeKey);
+    expect(a.txHash).toBe('sigA');
+  });
+
+  it('transferIn vs transferOut with no txHash stay distinct via activityType', () => {
+    const ctx = { sourceCommand: `${PFX}:portfolio activity`, retrievedAt: NOW };
+    const tin = normalizePortfolioActivityRow({ wallet: A2, token: T1, event_type: 'transferIn', timestamp: 1_752_000_000 }, ctx);
+    const tout = normalizePortfolioActivityRow({ wallet: A2, token: T1, event_type: 'transferOut', timestamp: 1_752_000_000 }, ctx);
+    expect(tin.dedupeKey).not.toBe(tout.dedupeKey);
+  });
+
+  it('whitespace-only amount normalizes to null, never "0"', () => {
+    const o = normalizeSmartmoneyRow({ maker: A1, base_address: T1, side: 'buy', timestamp: 1, amount_usd: '   ' }, { sourceCommand: `${PFX}:track smartmoney`, retrievedAt: NOW });
+    expect(o.amountUsd).toBeNull();
   });
 
   it('normalizes portfolio activity with transfer types and unknown side', () => {
@@ -143,5 +172,14 @@ d('ingestGmgnObservations (DB)', () => {
   it('never writes signal_eligible for a brand-new GMGN wallet under any flag combo', async () => {
     await ingestGmgnObservations(prisma, [obs({ isKolTagged: true, isPromoterTagged: true, providerPnlUsd: '999999', providerWinRate: 0.99 })]);
     expect(await prisma.wallet.count({ where: { address: A1, status: 'signal_eligible' } })).toBe(0);
+  });
+
+  it('invalid (non-32-byte base58) addresses are skipped, not materialized', async () => {
+    const res = await ingestGmgnObservations(prisma, [
+      obs({ walletAddress: '1111111111111111111111111111111111111111111' }), // 43 ones -> decodes to 0 bytes span, not 32
+      obs({ walletAddress: 'not-base58-$$$' })
+    ]);
+    expect(res.invalidSkipped).toBe(2);
+    expect(res.walletsMaterialized).toBe(0);
   });
 });

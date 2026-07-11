@@ -1486,6 +1486,9 @@ model GmgnObservation {
   sourceCommand       String
   walletAddress       String
   tokenAddress        String?
+  /// Transaction signature for this activity (receipts, Task 14). Part of the
+  /// dedupe identity so same-second distinct trades never collapse.
+  txHash              String?
   /// GMGN activity/event type verbatim ('buy'|'sell'|'transferIn'|'transferOut'|null).
   activityType        String?
   /// Normalized side when derivable ('buy'|'sell'|'transfer'|null-unknown).
