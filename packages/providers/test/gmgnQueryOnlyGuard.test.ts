@@ -104,7 +104,13 @@ const API_PATH_LITERAL = /['"`][^'"`\n]*\/(swap|multi-swap|order|orders|cooking)
 
 // Files that are themselves GUARDS and legitimately NAME forbidden tokens in
 // their own forbidden-lists. Nothing else may be added here without review.
-const GUARD_ALLOWLIST = new Set(['scripts/confluence-gate.mjs'.replace(/\//g, sep)]);
+const GUARD_ALLOWLIST = new Set([
+  'scripts/confluence-gate.mjs'.replace(/\//g, sep),
+  // The runtime allowlist itself NAMES forbidden families in its rejection
+  // logic/comments — it is a guard, like confluence-gate.mjs. Its own tests
+  // (gmgnAllowlist.test.ts) prove those families are REJECTED, not invoked.
+  'packages/providers/src/gmgn/allowlist.ts'.replace(/\//g, sep)
+]);
 
 describe('repo-wide GMGN capability guard (grep guard)', () => {
   const gmgnFiles = SURFACE_GLOBS.flatMap((g) => globSync(g, { cwd: REPO_ROOT }))
