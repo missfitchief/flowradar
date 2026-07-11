@@ -199,8 +199,28 @@ async function start(): Promise<void> {
         throw new Error(`run ${existing} has live processes (controller ${controllerLive ? 'ALIVE' : 'dead'}, worker ${workerLive ? 'ALIVE' : 'dead'}, status ${st.status}) — use status/stop; never two runs`);
       }
     }
-    rmSync(ACTIVE_FILE, { force: true });
-    attempt(); // a second EEXIST here means a genuine concurrent start — throw
+    // Eviction is serialized by an exclusive EVICT lock (Codex rev-4: the
+    // bare remove/recreate had an ABA race — two starters could validate the
+    // same stale claim and the loser's rmSync could delete the winner's NEW
+    // claim). Only the lock holder may evict+reclaim.
+    const evictLock = path.join(RUNS_DIR, 'EVICT.lock');
+    try {
+      writeFileSync(evictLock, String(process.pid), { flag: 'wx' });
+    } catch {
+      const holder = Number(readFileSync(evictLock, 'utf-8').trim());
+      if (Number.isFinite(holder) && pidAlive(holder)) throw new Error('another start is mid-eviction — retry in a moment');
+      rmSync(evictLock, { force: true }); // crashed holder
+      writeFileSync(evictLock, String(process.pid), { flag: 'wx' }); // EEXIST here = genuine race — throw
+    }
+    try {
+      // Re-validate UNDER the lock: the claim may have changed since we read it.
+      const current = activeRunId();
+      if (current && current !== existing) throw new Error(`ACTIVE changed to ${current} during eviction — retry`);
+      rmSync(ACTIVE_FILE, { force: true });
+      attempt();
+    } finally {
+      rmSync(evictLock, { force: true });
+    }
   };
 
   let s: RunState;
