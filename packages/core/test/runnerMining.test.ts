@@ -265,6 +265,32 @@ describe('outcome hardening (Codex round)', () => {
     expect(o.labels).not.toContain('runner_5x');
   });
 
+  it('a contradictory baseline tie cannot mint ABSOLUTE milestone/figure labels (Codex round 4)', () => {
+    // Simultaneous 10k/2m baseline observations: absolute labels evaluate on
+    // per-ts MINIMA, so neither reached_1m_mcap nor seven_figure_runner may
+    // appear, in either input order.
+    const x = [pt(0, 10_000), pt(0, 2_000_000), pt(10, 50_000), pt(20, 40_000)];
+    const y = [pt(0, 2_000_000), pt(0, 10_000), pt(10, 50_000), pt(20, 40_000)];
+    for (const s of [x, y]) {
+      const o = computeTokenOutcome(s, DEFAULT_RUNNER_MINING_CONFIG, { anchoredAtLaunch: true });
+      expect(o.labels).not.toContain('reached_1m_mcap');
+      expect(o.labels).not.toContain('seven_figure_runner');
+      expect(o.labels).not.toContain('runner_2x'); // multiples vs baseline max (2m)
+      expect(o.confidence).not.toBe('high');
+    }
+  });
+
+  it('NaN price/liquidity in tied points is normalized to null — order-insensitive output (Codex round 4)', () => {
+    const buyTs = new Date(T0 + 12 * MIN);
+    const pNaN: TokenSeriesPoint = { ts: new Date(T0 + 10 * MIN), priceUsd: Number.NaN, marketCapUsd: 30_000, liquidityUsd: Number.NaN };
+    const pOk: TokenSeriesPoint = { ts: new Date(T0 + 10 * MIN), priceUsd: 2e-5, marketCapUsd: 30_000, liquidityUsd: 4_000 };
+    const a = computeEntryContext(buyTs, [pt(0, 10_000), pNaN, pOk], DEFAULT_RUNNER_MINING_CONFIG);
+    const b = computeEntryContext(buyTs, [pt(0, 10_000), pOk, pNaN], DEFAULT_RUNNER_MINING_CONFIG);
+    expect(a).toEqual(b);
+    expect(Number.isNaN(a.entryPriceUsd as number)).toBe(false); // NaN never surfaces
+    expect(a.entryPriceUsd).toBe(2e-5); // finite value wins the tuple order (nulls last)
+  });
+
   it('same-timestamp LIQUIDITY ties are order-insensitive and collapse to the LOWEST', () => {
     const end = 240;
     const a: TokenSeriesPoint[] = [

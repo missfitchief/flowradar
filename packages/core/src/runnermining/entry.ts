@@ -89,6 +89,11 @@ export function computeEntryContext(
   //   never credit tradeability ambiguity doesn't support).
   // ANY differing field at the same ts marks the data ambiguous (confidence
   // penalty), not just differing mcap.
+  // Non-finite auxiliary values (NaN/Infinity price or liquidity) are
+  // NORMALIZED TO NULL before comparison AND output — NaN in a comparator is
+  // order-dependent poison, and a NaN must never surface as a reported value
+  // (Codex round 4).
+  const fin = (v: number | null): number | null => (v !== null && Number.isFinite(v) ? v : null);
   const cmpDesc = (a: number | null, b: number | null): number => {
     if (a === b) return 0;
     if (a === null) return 1; // nulls last
@@ -101,44 +106,42 @@ export function computeEntryContext(
     if (b === null) return -1;
     return a - b;
   };
-  let best: TokenSeriesPoint | null = null;
+  let best: { ts: number; mcap: number; price: number | null; liq: number | null } | null = null;
   let tieAmbiguity = false;
   for (const p of prior) {
     if (p.marketCapUsd === null || !Number.isFinite(p.marketCapUsd) || p.marketCapUsd <= 0) continue;
-    if (best === null || p.ts.getTime() > best.ts.getTime()) {
-      best = p;
+    const cand = { ts: p.ts.getTime(), mcap: p.marketCapUsd, price: fin(p.priceUsd), liq: fin(p.liquidityUsd) };
+    if (best === null || cand.ts > best.ts) {
+      best = cand;
       tieAmbiguity = false;
       continue;
     }
-    if (p.ts.getTime() !== best.ts.getTime()) continue;
-    // Same-ts tie: ambiguous when ANY reported field differs.
-    if (p.marketCapUsd !== best.marketCapUsd || p.priceUsd !== best.priceUsd || p.liquidityUsd !== best.liquidityUsd) {
+    if (cand.ts !== best.ts) continue;
+    // Same-ts tie: ambiguous when ANY (normalized) reported field differs.
+    if (cand.mcap !== best.mcap || cand.price !== best.price || cand.liq !== best.liq) {
       tieAmbiguity = true;
     }
-    const order =
-      cmpDesc(p.marketCapUsd, best.marketCapUsd) ||
-      cmpDesc(p.priceUsd, best.priceUsd) ||
-      cmpAsc(p.liquidityUsd, best.liquidityUsd);
-    if (order < 0) best = p; // p wins the deterministic tuple order
+    const order = cmpDesc(cand.mcap, best.mcap) || cmpDesc(cand.price, best.price) || cmpAsc(cand.liq, best.liq);
+    if (order < 0) best = cand; // cand wins the deterministic tuple order
   }
   if (best === null) return unavailable;
 
   // Compare UNROUNDED milliseconds against the window (rounding first would
   // let a just-over-window snapshot squeak in when maxAge is tiny).
-  const ageMs = buyMs - best.ts.getTime();
+  const ageMs = buyMs - best.ts;
   if (ageMs > cfg.maxEntrySnapshotAgeSec * 1000) return unavailable; // stale ⇒ unknown, never "close enough"
   const ageSec = ageMs / 1000;
 
-  const mcap = best.marketCapUsd!;
+  const mcap = best.mcap;
   const ageFraction = cfg.maxEntrySnapshotAgeSec > 0 ? ageSec / cfg.maxEntrySnapshotAgeSec : 0;
   let valuationConfidence = 1 - 0.75 * Math.min(1, Math.max(0, ageFraction));
   if (tieAmbiguity) valuationConfidence /= 2; // ambiguous same-ts data
 
   return {
-    entryPriceUsd: best.priceUsd,
+    entryPriceUsd: best.price, // normalized: non-finite became null, never surfaces
     entryMarketCapUsd: mcap,
-    entryLiquidityUsd: best.liquidityUsd,
-    priceTimestamp: new Date(best.ts.getTime()),
+    entryLiquidityUsd: best.liq,
+    priceTimestamp: new Date(best.ts),
     valuationStatus: 'nearest_prior_snapshot',
     valuationAgeSeconds: ageSec,
     valuationConfidence,

@@ -62,16 +62,23 @@ export interface TokenOutcome {
   dataQuality: string[];
 }
 
-// Same-timestamp duplicates are COLLAPSED to one point per ts (Codex round 3:
-// keeping both in either order fabricates a trajectory — e.g. simultaneous
-// 10k/100k observations sorted ascending invent a 10x "at minute zero").
-// POSITIONAL conservative collapse: the BASELINE ts group takes the HIGHEST
-// value (ambiguity may never deflate the baseline), every LATER ts group
-// takes the LOWEST (ambiguity may never inflate multiples/milestones/ATH).
-// Net guarantee: tie ambiguity can only ever UNDERSTATE credited outcomes,
-// never create them. Contradictions are reported so confidence gets capped.
+// Same-timestamp duplicates are COLLAPSED to one point per ts (Codex rounds
+// 3-4: keeping both in either order fabricates a trajectory, and a
+// baseline-high collapse alone can still mint ABSOLUTE milestone labels from
+// a contradictory 10k/2m baseline). DUAL-VIEW conservative collapse:
+//   - `pts` = per-ts MINIMA for EVERY group (the absolute view): ATH,
+//     milestones, figure bands, drawdown, and crossings are evaluated here,
+//     so ambiguity can never inflate any absolute outcome.
+//   - `baselineMaxMcap` = the HIGHEST value in the earliest group: runner
+//     MULTIPLES divide by this, so ambiguity can never inflate a multiple
+//     either (understated numerator / overstated denominator).
+// Net guarantee: tie ambiguity can only ever UNDERSTATE credited outcomes —
+// relative AND absolute. Contradictions are reported; confidence gets capped.
+// Documented residual: an ambiguity-suppressed peak can also hide a
+// drawdown/rug — the dataQuality note + confidence cap carry that caveat.
 function validMcapPoints(series: TokenSeriesPoint[]): {
   pts: { ts: number; mcap: number }[];
+  baselineMaxMcap: number | null;
   contradictoryTies: boolean;
 } {
   const groups = new Map<number, { min: number; max: number; mixed: boolean }>();
@@ -87,14 +94,11 @@ function validMcapPoints(series: TokenSeriesPoint[]): {
     }
   }
   const sortedTs = [...groups.keys()].sort((a, b) => a - b);
-  const baselineTs = sortedTs[0];
   let contradictoryTies = false;
-  const pts = sortedTs.map((ts) => {
-    const g = groups.get(ts)!;
-    if (g.mixed) contradictoryTies = true;
-    return { ts, mcap: ts === baselineTs ? g.max : g.min };
-  });
-  return { pts, contradictoryTies };
+  for (const ts of sortedTs) if (groups.get(ts)!.mixed) contradictoryTies = true;
+  const pts = sortedTs.map((ts) => ({ ts, mcap: groups.get(ts)!.min }));
+  const baselineMaxMcap = sortedTs.length > 0 ? groups.get(sortedTs[0]!)!.max : null;
+  return { pts, baselineMaxMcap, contradictoryTies };
 }
 
 export function computeTokenOutcome(
@@ -103,7 +107,7 @@ export function computeTokenOutcome(
   opts: TokenOutcomeOptions = {}
 ): TokenOutcome {
   validateRunnerMiningConfig(cfg);
-  const { pts, contradictoryTies } = validMcapPoints(series);
+  const { pts, baselineMaxMcap, contradictoryTies } = validMcapPoints(series);
   const anchored = opts.anchoredAtLaunch === true;
   const dataQuality: string[] = [];
 
@@ -123,7 +127,11 @@ export function computeTokenOutcome(
   };
   if (pts.length < cfg.minSeriesPoints) return empty;
 
+  // Absolute view (per-ts minima) drives ATH/milestones/drawdown/crossings;
+  // MULTIPLES divide by the baseline group's MAX. Either way, tie ambiguity
+  // can only understate a credited outcome (see validMcapPoints).
   const baseline = pts[0]!;
+  const multipleBase = baselineMaxMcap ?? baseline.mcap;
   let ath = baseline;
   let peakSoFar = baseline.mcap;
   let maxDrawdownPct = 0;
@@ -135,17 +143,17 @@ export function computeTokenOutcome(
     const drawdown = peakSoFar > 0 ? ((peakSoFar - p.mcap) / peakSoFar) * 100 : 0;
     if (drawdown > maxDrawdownPct) maxDrawdownPct = drawdown;
     const minutes = Math.round((p.ts - baseline.ts) / 60_000);
-    if (firstCross.x2 === null && p.mcap >= baseline.mcap * cfg.runnerMultiples.x2) firstCross.x2 = minutes;
-    if (firstCross.x5 === null && p.mcap >= baseline.mcap * cfg.runnerMultiples.x5) firstCross.x5 = minutes;
-    if (firstCross.x10 === null && p.mcap >= baseline.mcap * cfg.runnerMultiples.x10) firstCross.x10 = minutes;
+    if (firstCross.x2 === null && p.mcap >= multipleBase * cfg.runnerMultiples.x2) firstCross.x2 = minutes;
+    if (firstCross.x5 === null && p.mcap >= multipleBase * cfg.runnerMultiples.x5) firstCross.x5 = minutes;
+    if (firstCross.x10 === null && p.mcap >= multipleBase * cfg.runnerMultiples.x10) firstCross.x10 = minutes;
     if (firstCross.mcap1m === null && p.mcap >= cfg.mcapMilestones.m1) firstCross.mcap1m = minutes;
     if (firstCross.mcap10m === null && p.mcap >= cfg.mcapMilestones.m10) firstCross.mcap10m = minutes;
   }
   if (contradictoryTies) {
-    dataQuality.push('contradictory same-timestamp mcap observations — positional conservative collapse (baseline: highest; later: lowest), so tie ambiguity can only understate outcomes; confidence capped');
+    dataQuality.push('contradictory same-timestamp mcap observations — dual-view conservative collapse (absolute labels from per-ts minima; multiples vs baseline-group max), so tie ambiguity can only understate outcomes, and a suppressed peak may also hide a drawdown; confidence capped');
   }
 
-  const maxMultiple = baseline.mcap > 0 ? ath.mcap / baseline.mcap : null;
+  const maxMultiple = multipleBase > 0 ? ath.mcap / multipleBase : null;
   const labels: RunnerOutcomeLabel[] = [];
 
   if (maxMultiple !== null) {
@@ -223,7 +231,9 @@ export function computeTokenOutcome(
 
   return {
     labels,
-    baselineMcapUsd: baseline.mcap,
+    // Reported baseline = the multiple denominator (baseline-group max), so
+    // maxMultipleFromBaseline is exactly ath/baseline as reported.
+    baselineMcapUsd: multipleBase,
     baselineTs: new Date(baseline.ts),
     observationStartTs: new Date(baseline.ts),
     athMcapUsd: ath.mcap,
