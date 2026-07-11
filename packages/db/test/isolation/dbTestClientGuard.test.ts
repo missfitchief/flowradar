@@ -25,19 +25,26 @@ const TEST_GLOBS = [
 ];
 
 // Assembled from fragments so THIS file never contains the forbidden token.
-const BARE_CLIENT = new RegExp('new\\s+Prisma' + 'Client\\(\\s*\\)');
+const CLIENT_CTOR = new RegExp('new\\s+Prisma' + 'Client\\s*\\(');
+// How many lines after the constructor may carry the `datasources` override
+// (multiline construction). Wider than any real construction in this repo.
+const CTOR_WINDOW = 6;
 
 describe('DB test-client guard (static)', () => {
-  it('no test file constructs a zero-argument Prisma client (use the singleton or an explicit URL)', () => {
+  it('every Prisma client constructed in a test file passes an explicit datasources url (no schema-env resolution)', () => {
     const files = TEST_GLOBS.flatMap((g) => globSync(g, { cwd: REPO_ROOT })).map((f) => path.join(REPO_ROOT, f));
     expect(files.length).toBeGreaterThan(0);
     const offenders: { file: string; line: number }[] = [];
     for (const file of files) {
       const lines = readFileSync(file, 'utf-8').split('\n');
       lines.forEach((line, i) => {
-        // Bare = no constructor argument at all. A construction WITH an
-        // explicit datasources url is allowed (visible choice).
-        if (BARE_CLIENT.test(line)) {
+        if (!CLIENT_CTOR.test(line)) return;
+        // A construction is allowed ONLY when `datasources` appears within
+        // its window — zero-arg, `{}`, logging-only, and multiline variants
+        // without an explicit url all fall back to schema env(DATABASE_URL)
+        // (root .env = LIVE url) and are forbidden (Codex Task-A review).
+        const window = lines.slice(i, i + 1 + CTOR_WINDOW).join('\n');
+        if (!/datasources/.test(window)) {
           offenders.push({ file: path.relative(REPO_ROOT, file), line: i + 1 });
         }
       });

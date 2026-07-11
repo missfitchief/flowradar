@@ -62,6 +62,24 @@ describe('resolveDatabaseUrlForEnv (pure fail-closed rules)', () => {
     expect(() => resolveDatabaseUrlForEnv({ VITEST: 'true', TEST_DATABASE_URL: 'not a url' })).toThrow(TestDbIsolationError);
   });
 
+  it('FAILS CLOSED: a _test database on a NON-LOCAL host throws (could be production)', () => {
+    expect(() =>
+      resolveDatabaseUrlForEnv({ VITEST: 'true', TEST_DATABASE_URL: 'postgresql://u:p@db.prod.example.com:5432/foo_test' })
+    ).toThrow(/not local/);
+  });
+
+  it('FAILS CLOSED: collision detection is CANONICAL — query params/credentials cannot defeat it', () => {
+    // Same host+port+db as the live URL, disguised with a query param and
+    // different credentials: raw strings differ, identity is the same.
+    expect(() =>
+      resolveDatabaseUrlForEnv({
+        VITEST: 'true',
+        DATABASE_URL: 'postgresql://flowradar:flowradar@localhost:5439/foo_test',
+        TEST_DATABASE_URL: 'postgresql://other:creds@LOCALHOST:5439/foo_test?connection_limit=1'
+      })
+    ).toThrow(TestDbIsolationError);
+  });
+
   it('outside vitest, behavior is unchanged: DATABASE_URL else the live LITE default', () => {
     expect(resolveDatabaseUrlForEnv({})).toBe(LIVE_LITE_DATABASE_URL);
     expect(resolveDatabaseUrlForEnv({ DATABASE_URL: 'postgresql://u:p@h:5/x' })).toBe('postgresql://u:p@h:5/x');

@@ -42,17 +42,19 @@ export class TestDbIsolationError extends Error {
   }
 }
 
-/** The database name (last path segment) of a postgres URL; throws on garbage. */
-function databaseNameOf(url: string): string {
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+/** Canonical identity of a postgres URL: lowercased host, defaulted port, db name. */
+function canonicalIdentity(url: string, what: string): { host: string; port: string; db: string } {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    throw new TestDbIsolationError(`TEST_DATABASE_URL is not a parsable URL`);
+    throw new TestDbIsolationError(`${what} is not a parsable URL`);
   }
-  const name = parsed.pathname.replace(/^\//, '');
-  if (!name) throw new TestDbIsolationError('test database URL has no database name');
-  return name;
+  const db = parsed.pathname.replace(/^\//, '');
+  if (!db) throw new TestDbIsolationError(`${what} has no database name`);
+  return { host: parsed.hostname.toLowerCase(), port: parsed.port || '5432', db };
 }
 
 /**
@@ -68,16 +70,30 @@ export function resolveDatabaseUrlForEnv(env: NodeJS.ProcessEnv): string {
 
   // Test process: NEVER consult DATABASE_URL for the target.
   const testUrl = env.TEST_DATABASE_URL ?? TEST_LITE_DATABASE_URL;
-  const testDb = databaseNameOf(testUrl);
-  if (!testDb.endsWith('_test')) {
+  const test = canonicalIdentity(testUrl, 'TEST_DATABASE_URL');
+  if (!test.db.endsWith('_test')) {
     throw new TestDbIsolationError(
-      `test database name "${testDb}" must end with "_test" (explicit test identity; live db names never qualify)`
+      `test database name "${test.db}" must end with "_test" (explicit test identity; live db names never qualify)`
     );
   }
-  // Same-identity collision: if the ambient live URL and the test URL point
-  // at the same database, live work and tests would share a DB — refuse.
-  if (testUrl === liveUrl) {
-    throw new TestDbIsolationError('TEST_DATABASE_URL equals the live DATABASE_URL (same database) — set distinct identities');
+  // Test databases are LOCAL by policy: a "_test"-suffixed database on a
+  // remote host could be someone's production cluster — refuse (Codex Task-A
+  // review). This also guarantees the globalSetup provisioner and the workers
+  // are talking to the same local cluster.
+  if (!LOCAL_HOSTS.has(test.host)) {
+    throw new TestDbIsolationError(`test database host "${test.host}" is not local — tests only ever run against localhost`);
+  }
+  // Same-identity collision: compare CANONICAL identities (host lowercased,
+  // port defaulted, db name), not raw strings — query params, credential
+  // differences, or an explicit default port must not defeat the check.
+  let live: { host: string; port: string; db: string } | null = null;
+  try {
+    live = canonicalIdentity(liveUrl, 'DATABASE_URL');
+  } catch {
+    live = null; // unparsable live URL cannot collide; test target is already validated
+  }
+  if (live && live.host === test.host && live.port === test.port && live.db === test.db) {
+    throw new TestDbIsolationError('TEST_DATABASE_URL points at the same database as the live DATABASE_URL — set distinct identities');
   }
   return testUrl;
 }

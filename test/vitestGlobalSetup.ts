@@ -16,10 +16,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/client';
-import { TEST_LITE_DATABASE_URL } from '../packages/db/src/testDb';
-
-const CLUSTER_HOST = 'localhost';
-const CLUSTER_PORT = 5439;
+import { resolveDatabaseUrlForEnv } from '../packages/db/src/testDb';
 
 function probePort(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
   return new Promise((resolve) => {
@@ -33,25 +30,41 @@ function probePort(host: string, port: number, timeoutMs = 1500): Promise<boolea
 }
 
 export default async function globalSetup(): Promise<void> {
-  if (!(await probePort(CLUSTER_HOST, CLUSTER_PORT))) {
-    console.warn('[testdb] LITE cluster not reachable on :5439 — DB suites will self-skip.');
+  // Provision THE SAME url the workers will resolve (Codex Task-A review: a
+  // validated TEST_DATABASE_URL override must be provisioned here too, not
+  // just the hardcoded default). Forcing VITEST on makes the resolver take
+  // its fail-closed test branch regardless of this process's own env.
+  const resolvedTestUrl = resolveDatabaseUrlForEnv({ ...process.env, VITEST: '1' });
+  const testUrl = new URL(resolvedTestUrl);
+  const testDbName = testUrl.pathname.replace(/^\//, '');
+  const clusterHost = testUrl.hostname;
+  const clusterPort = Number(testUrl.port || '5432');
+
+  if (!(await probePort(clusterHost, clusterPort))) {
+    console.warn(`[testdb] test cluster not reachable on :${clusterPort} — DB suites will self-skip.`);
     return;
   }
 
-  const testUrl = new URL(TEST_LITE_DATABASE_URL);
-  const testDbName = testUrl.pathname.replace(/^\//, '');
   // Maintenance connection: same cluster/credentials, `postgres` database —
   // exists on every cluster and is NOT the live application database.
-  const maintenanceUrl = new URL(TEST_LITE_DATABASE_URL);
+  const maintenanceUrl = new URL(resolvedTestUrl);
   maintenanceUrl.pathname = '/postgres';
 
   const admin = new PrismaClient({ datasources: { db: { url: maintenanceUrl.toString() } } });
   try {
     const rows = await admin.$queryRaw<{ n: number }[]>`SELECT 1 AS n FROM pg_database WHERE datname = ${testDbName}`;
     if (rows.length === 0) {
-      // Database identifier comes from OUR constant, not user input.
-      await admin.$executeRawUnsafe(`CREATE DATABASE "${testDbName}"`);
-      console.log(`[testdb] created test database "${testDbName}"`);
+      try {
+        // Database identifier comes from the VALIDATED resolver output.
+        await admin.$executeRawUnsafe(`CREATE DATABASE "${testDbName}"`);
+        console.log(`[testdb] created test database "${testDbName}"`);
+      } catch (err) {
+        // 42P04 duplicate_database: two vitest runs raced the check-then-create
+        // — the database exists, which is exactly what we wanted. Anything
+        // else is a real failure.
+        const code = (err as { meta?: { code?: string }; code?: string })?.meta?.code ?? (err as { code?: string })?.code;
+        if (code !== '42P04' && !String(err).includes('42P04') && !String(err).includes('already exists')) throw err;
+      }
     }
   } finally {
     await admin.$disconnect();
@@ -64,7 +77,7 @@ export default async function globalSetup(): Promise<void> {
   execSync('npx prisma migrate deploy', {
     cwd: dbPackageDir,
     stdio: 'pipe', // do not echo the URL-bearing env into test output
-    env: { ...process.env, DATABASE_URL: TEST_LITE_DATABASE_URL }
+    env: { ...process.env, DATABASE_URL: resolvedTestUrl }
   });
   console.log(`[testdb] migrations deployed to "${testDbName}"`);
 }

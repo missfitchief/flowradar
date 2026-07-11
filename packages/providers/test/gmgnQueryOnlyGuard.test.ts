@@ -5,7 +5,7 @@
 // test fails loudly. Reads the actual file off disk (not the compiled module).
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -59,7 +59,21 @@ describe('GMGN confluence adapter — query-only enforcement (grep guard)', () =
 import { globSync } from 'node:fs';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
-const SURFACE_GLOBS = ['packages/*/src/**/*.ts', 'apps/*/src/**/*.ts'];
+// Full executable surface: package/app sources (ts+tsx), Next app+components,
+// repo scripts (ts/js/mjs), worker jobs. Test dirs are excluded (this guard
+// and the CLI-probe docs legitimately NAME the forbidden families).
+const SURFACE_GLOBS = [
+  'packages/*/src/**/*.ts',
+  'packages/*/src/**/*.tsx',
+  'apps/*/src/**/*.ts',
+  'apps/web/app/**/*.ts',
+  'apps/web/app/**/*.tsx',
+  'apps/web/components/**/*.ts',
+  'apps/web/components/**/*.tsx',
+  'scripts/**/*.ts',
+  'scripts/**/*.js',
+  'scripts/**/*.mjs'
+];
 const CAPABILITY_TOKENS = [
   'multi-swap',
   'multiswap',
@@ -67,14 +81,30 @@ const CAPABILITY_TOKENS = [
   'gmgn_' + 'private_key',
   'sign' + 'transaction',
   'sign_' + 'transaction',
+  'send' + 'transaction',
+  'send_' + 'transaction',
   'wallet' + 'management',
   'wallet_' + 'management'
 ];
-// Forbidden gmgn-cli subcommand invocations (string form a shell-out would use).
-const CLI_INVOCATIONS = ['gmgn-cli swap', 'gmgn-cli multi-swap', 'gmgn-cli order', 'gmgn-cli cooking'];
+// Forbidden gmgn-cli subcommand invocations: shell-string form AND the
+// spawn/execFile argv form (`'gmgn-cli', ['swap', ...]`). Bare 'swap'/'order'
+// tokens repo-wide would false-positive on orderBy/"swap the parser" prose —
+// those stay enforced by the stricter single-file guard above; known residual
+// limit: a grep guard cannot catch runtime string construction.
+const FORBIDDEN_SUBCOMMANDS = ['swap', 'multi-swap', 'order', 'cooking', 'key', 'wallet', 'config'];
+const CLI_SHELL_INVOCATIONS = FORBIDDEN_SUBCOMMANDS.map((c) => `gmgn-cli ${c}`);
+const CLI_ARGV_INVOCATION = new RegExp(
+  `gmgn-cli['"\`]?\\s*,\\s*\\[\\s*['"\`](${FORBIDDEN_SUBCOMMANDS.join('|')})`,
+  'i'
+);
+
+// Files that are themselves GUARDS and legitimately NAME forbidden tokens in
+// their own forbidden-lists. Nothing else may be added here without review.
+const GUARD_ALLOWLIST = new Set(['scripts/confluence-gate.mjs'.replace(/\//g, sep)]);
 
 describe('repo-wide GMGN capability guard (grep guard)', () => {
   const gmgnFiles = SURFACE_GLOBS.flatMap((g) => globSync(g, { cwd: REPO_ROOT }))
+    .filter((f) => !GUARD_ALLOWLIST.has(f))
     .map((f) => join(REPO_ROOT, f))
     .filter((f) => readFileSync(f, 'utf8').toLowerCase().includes('gmgn'));
 
@@ -82,13 +112,14 @@ describe('repo-wide GMGN capability guard (grep guard)', () => {
     expect(gmgnFiles.length).toBeGreaterThan(0);
   });
 
-  it('no gmgn-mentioning source file references a forbidden capability or CLI subcommand', () => {
+  it('no gmgn-mentioning source file references a forbidden capability or CLI invocation', () => {
     const offenders: { file: string; token: string }[] = [];
     for (const file of gmgnFiles) {
       const content = readFileSync(file, 'utf8').toLowerCase();
-      for (const token of [...CAPABILITY_TOKENS, ...CLI_INVOCATIONS]) {
+      for (const token of [...CAPABILITY_TOKENS, ...CLI_SHELL_INVOCATIONS]) {
         if (content.includes(token)) offenders.push({ file, token });
       }
+      if (CLI_ARGV_INVOCATION.test(content)) offenders.push({ file, token: 'argv-form gmgn-cli invocation' });
     }
     expect(offenders).toEqual([]);
   });

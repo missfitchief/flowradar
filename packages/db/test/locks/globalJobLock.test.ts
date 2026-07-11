@@ -63,11 +63,17 @@ describe.skipIf(!(await probePort('localhost', 5439)))('withGlobalJobLock', () =
   it('FAILS HONESTLY: acquisition times out with GlobalJobLockBusyError and mutates nothing', async () => {
     let holderDone: (() => void) | undefined;
     const holderGate = new Promise<void>((resolve) => (holderDone = resolve));
+    // Deterministic: wait for the holder to PROVABLY hold the lock (gate
+    // resolved inside its critical section), not a fixed sleep that can lose
+    // races under full-suite load (Codex Task-A review).
+    let holderAcquired!: () => void;
+    const holderAcquiredGate = new Promise<void>((resolve) => (holderAcquired = resolve));
 
     const holder = withGlobalJobLock('long-holder', async () => {
+      holderAcquired();
       await holderGate;
     });
-    await sleep(100); // let the holder acquire
+    await holderAcquiredGate; // holder provably holds the lock now
 
     await expect(
       withGlobalJobLock('impatient', async () => 'should never run', { waitMs: 400, pollMs: 50 })
