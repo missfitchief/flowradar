@@ -55,6 +55,7 @@ export async function reconstructWalletBehavior(
   });
 
   let localTrades: LocalTradeInput[] = [];
+  let localTradesTruncated = false;
   if (wallet) {
     const trades = await prisma.walletTokenTrade.findMany({
       where: { walletId: wallet.id },
@@ -62,6 +63,10 @@ export async function reconstructWalletBehavior(
       take: maxTrades,
       select: { action: true, amountUsd: true, ts: true, marketCapAtTrade: true, token: { select: { address: true } } }
     });
+    // Newest-first truncation is a KNOWN bias (an old buy can fall out while
+    // its recent sell stays — Codex Important-4): flagged on the profile so
+    // consumers see it, and never presented as a complete view.
+    localTradesTruncated = trades.length >= maxTrades;
     localTrades = trades.map((t) => ({
       tokenAddress: t.token.address,
       action: t.action as 'BUY' | 'SELL',
@@ -71,22 +76,32 @@ export async function reconstructWalletBehavior(
     }));
   }
 
+  // Chain-scoped edges (Codex Important-6: a BSC edge sharing the textual
+  // address must never enter a SOLANA profile), valued via the HONEST
+  // valuation column — valuedUsd nullable; unknown stays null, never 0.
   const edges = await prisma.moneyFlowEdge.findMany({
-    where: { OR: [{ sourceAddress: target.address }, { destinationAddress: target.address }] },
+    where: {
+      OR: [
+        { sourceAddress: target.address, sourceChain: target.chain },
+        { destinationAddress: target.address, destinationChain: target.chain }
+      ]
+    },
     orderBy: { amountUsd: 'desc' },
     take: maxEdges,
-    select: { sourceAddress: true, destinationAddress: true, amountUsd: true, ts: true }
+    select: { sourceAddress: true, destinationAddress: true, valuedUsd: true, ts: true }
   });
   const fundingEdges: FundingEdgeInput[] = edges.map((e) => ({
     direction: e.destinationAddress === target.address ? ('in' as const) : ('out' as const),
-    usd: e.amountUsd === null ? null : Number(e.amountUsd),
+    usd: e.valuedUsd === null ? null : Number(e.valuedUsd),
     counterpartyAddress: e.destinationAddress === target.address ? e.sourceAddress : e.destinationAddress,
     ts: e.ts
   }));
 
-  // PROVIDER claims — GMGN activity + claimed stats (never verified).
+  // PROVIDER claims — GMGN activity + claimed stats (never verified). Bounded.
   const observations = await prisma.gmgnObservation.findMany({
     where: { walletAddress: target.address, chain: target.chain },
+    orderBy: { retrievedAt: 'desc' },
+    take: 10_000,
     select: { side: true, amountUsd: true, activityTs: true, tokenAddress: true, sourceCommand: true }
   });
   const providerActivity: ProviderActivityInput[] = observations.map((o) => ({
@@ -119,6 +134,7 @@ export async function reconstructWalletBehavior(
     providerActivity,
     providerStats,
     fundingEdges,
+    localViewTruncated: localTradesTruncated,
     now
   };
   const profile = reconstructBehaviorProfile(inputs);
@@ -158,20 +174,15 @@ export async function runBehaviorReconstruction(
   opts: { limit?: number; now?: Date } = {}
 ): Promise<BehaviorPassReport> {
   const limit = opts.limit ?? 200;
-  const rows = await prisma.candidateWallet.findMany({
-    orderBy: { lastSeenAt: 'desc' },
-    select: { walletAddress: true, chain: true },
-    take: limit * 3 // distinct-collapse headroom: several provenance rows per wallet
+  // DISTINCT selection at the query layer (Codex Important-5: a wallet with
+  // many provenance rows must not eat the whole take window).
+  const grouped = await prisma.candidateWallet.groupBy({
+    by: ['walletAddress', 'chain'],
+    _max: { lastSeenAt: true },
+    orderBy: { _max: { lastSeenAt: 'desc' } },
+    take: limit
   });
-  const seen = new Set<string>();
-  const targets: { chain: 'SOLANA' | 'BSC'; address: string }[] = [];
-  for (const r of rows) {
-    const key = `${r.chain}|${r.walletAddress}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    targets.push({ chain: r.chain as 'SOLANA' | 'BSC', address: r.walletAddress });
-    if (targets.length >= limit) break;
-  }
+  const targets = grouped.map((g) => ({ chain: g.chain as 'SOLANA' | 'BSC', address: g.walletAddress }));
 
   const report: BehaviorPassReport = {
     candidatesConsidered: targets.length,

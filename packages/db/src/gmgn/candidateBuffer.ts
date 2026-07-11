@@ -51,7 +51,12 @@ export interface CandidateBufferReport {
   provenanceUpdated: number;
   /** New candidates NOT admitted because the buffer is at maxBufferSize — reported, never silent. */
   droppedOverCap: number;
+  /** Distinct candidates ALREADY over the cap before this pass (external writers) — reported, not evicted. */
+  preexistingOverCap: number;
+  /** Input-scan bounds hit, if any — reported, never silent. */
+  observationScan: { scanned: number; truncated: boolean; reportRowsTruncated: boolean };
   byCategory: Record<string, number>;
+  /** DISTINCT public-figure wallets (not provenance rows). */
   publicFigures: number;
   /** Candidates that also exist in the current observation universe (wallets table). */
   inObservationUniverse: number;
@@ -78,9 +83,16 @@ function tagsOf(raw: unknown): string[] {
   return out.map((t) => String(t).toLowerCase().trim());
 }
 
+/** Max GmgnObservation rows scanned per pass — bounded, with the truncation
+ *  REPORTED (Codex Important-2: no unbounded loads, no silent caps). */
+const MAX_OBSERVATION_SCAN = 100_000;
+
 /** Derives provenance rows from GmgnObservation: one per (wallet, chain, command),
- *  carrying the LATEST claimed stats and OR-ed public-figure flags. */
-async function gmgnSourceRows(prisma: PrismaClient): Promise<SourceRow[]> {
+ *  carrying the LATEST claimed stats. Public-figure flags are aggregated at the
+ *  WALLET level (Codex Important-3): a wallet KOL-tagged in ANY feed is
+ *  public_kol on EVERY of its provenance rows — a public figure can never keep
+ *  a parallel trader-category identity. */
+async function gmgnSourceRows(prisma: PrismaClient): Promise<{ rows: SourceRow[]; scanned: number; truncated: boolean }> {
   const observations = await prisma.gmgnObservation.findMany({
     select: {
       walletAddress: true,
@@ -95,8 +107,21 @@ async function gmgnSourceRows(prisma: PrismaClient): Promise<SourceRow[]> {
       activityTs: true,
       retrievedAt: true
     },
-    orderBy: { retrievedAt: 'asc' }
+    orderBy: { retrievedAt: 'asc' },
+    take: MAX_OBSERVATION_SCAN
   });
+
+  // Wallet-level public/bot flags: OR-ed across EVERY observation of the
+  // wallet, independent of which command it arrived under.
+  const walletFlags = new Map<string, { kol: boolean; promoter: boolean; tags: Set<string> }>();
+  for (const o of observations) {
+    const wk = `${o.chain}|${o.walletAddress}`;
+    const f = walletFlags.get(wk) ?? { kol: false, promoter: false, tags: new Set<string>() };
+    f.kol = f.kol || o.isKolTagged;
+    f.promoter = f.promoter || o.isPromoterTagged;
+    for (const t of tagsOf(o.rawClassification)) f.tags.add(t);
+    walletFlags.set(wk, f);
+  }
 
   const byKey = new Map<string, SourceRow & { kol: boolean; promoter: boolean; tags: Set<string> }>();
   for (const o of observations) {
@@ -134,15 +159,18 @@ async function gmgnSourceRows(prisma: PrismaClient): Promise<SourceRow[]> {
     if (o.providerTradeCount != null) row.claimedTradeCount = o.providerTradeCount;
   }
 
-  return [...byKey.values()].map((r) => {
+  const rows = [...byKey.values()].map((r) => {
+    // WALLET-level flags override per-row flags (Codex Important-3).
+    const wf = walletFlags.get(`${r.chain}|${r.walletAddress}`) ?? { kol: r.kol, promoter: r.promoter, tags: r.tags };
     const category = categorizeCandidateSource({
       source: r.source,
-      isKolTagged: r.kol,
-      isPromoterTagged: r.promoter,
-      rawTags: [...r.tags]
+      isKolTagged: wf.kol,
+      isPromoterTagged: wf.promoter,
+      rawTags: [...wf.tags]
     });
-    return { ...r, category, metadata: { category, kolTagged: r.kol, promoterTagged: r.promoter } };
+    return { ...r, category, metadata: { category, kolTagged: wf.kol, promoterTagged: wf.promoter } };
   });
+  return { rows, scanned: observations.length, truncated: observations.length >= MAX_OBSERVATION_SCAN };
 }
 
 /** Active fresh_receiver_hot lineage receivers as provenance rows. */
@@ -178,7 +206,8 @@ export async function buildCandidateBuffer(
   const now = opts.now ?? new Date();
   const maxBufferSize = opts.maxBufferSize ?? 5000;
 
-  const incoming = [...(await gmgnSourceRows(prisma)), ...(await lineageReceiverRows(prisma, now))];
+  const gmgn = await gmgnSourceRows(prisma);
+  const incoming = [...gmgn.rows, ...(await lineageReceiverRows(prisma, now))];
 
   // Current buffer population (distinct wallet+chain across ALL sources,
   // including externally-synced birdeye/solana-tracker rows).
@@ -199,9 +228,13 @@ export async function buildCandidateBuffer(
     newPairs.set(pair, list);
   }
   const capacity = Math.max(0, maxBufferSize - existingPairs.size);
+  // Admission strength = DISTINCT CANONICAL CATEGORIES (Codex Important-1b:
+  // exact-command variants of one family must not masquerade as independent
+  // cross-source confirmation), then recency, then address (stable).
   const rankedNewPairs = [...newPairs.entries()].sort((a, b) => {
-    const srcDiff = b[1].length - a[1].length;
-    if (srcDiff !== 0) return srcDiff;
+    const catA = new Set(a[1].map((r) => r.category)).size;
+    const catB = new Set(b[1].map((r) => r.category)).size;
+    if (catB !== catA) return catB - catA;
     const lastA = Math.max(...a[1].map((r) => r.lastSeenAt.getTime()));
     const lastB = Math.max(...b[1].map((r) => r.lastSeenAt.getTime()));
     if (lastB !== lastA) return lastB - lastA;
@@ -248,23 +281,29 @@ export async function buildCandidateBuffer(
     }
   }
 
-  // Report over the WHOLE buffer (all sources, external ones included).
+  // Report over the WHOLE buffer (all sources, external ones included) —
+  // bounded: the buffer cap bounds distinct wallets, and rows per wallet are
+  // bounded by the source taxonomy; the take is a hard backstop, reported if hit.
+  const REPORT_ROW_CAP = 250_000;
   const allRows = await prisma.candidateWallet.findMany({
-    select: { walletAddress: true, chain: true, source: true, metadataJson: true }
+    select: { walletAddress: true, chain: true, source: true, metadataJson: true },
+    take: REPORT_ROW_CAP
   });
   const byCategory: Record<string, number> = {};
-  let publicFigures = 0;
+  const publicWallets = new Set<string>();
   const distinct = new Set<string>();
   for (const r of allRows) {
-    distinct.add(`${r.chain}|${r.walletAddress}`);
+    const pair = `${r.chain}|${r.walletAddress}`;
+    distinct.add(pair);
     const meta = (r.metadataJson ?? {}) as Record<string, unknown>;
     const category =
       typeof meta.category === 'string'
         ? (meta.category as CandidateSourceCategory)
         : categorizeCandidateSource({ source: r.source });
     byCategory[category] = (byCategory[category] ?? 0) + 1;
-    if (isPublicFigureCategory(category)) publicFigures += 1;
+    if (isPublicFigureCategory(category)) publicWallets.add(pair); // DISTINCT wallets (Codex Minor-3)
   }
+  const publicFigures = publicWallets.size;
 
   // Observation-universe overlap (existing wallets rows) — reported, not stored
   // as a source (the universe is not a provenance stream).
@@ -287,6 +326,10 @@ export async function buildCandidateBuffer(
     provenanceCreated,
     provenanceUpdated,
     droppedOverCap,
+    // Pre-existing overflow (external writers) is REPORTED, not silently kept
+    // (Codex Important-1: this single-writer pass does not evict, it surfaces).
+    preexistingOverCap: Math.max(0, existingPairs.size - maxBufferSize),
+    observationScan: { scanned: gmgn.scanned, truncated: gmgn.truncated, reportRowsTruncated: allRows.length >= REPORT_ROW_CAP },
     byCategory,
     publicFigures,
     inObservationUniverse

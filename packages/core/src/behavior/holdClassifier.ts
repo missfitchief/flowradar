@@ -86,9 +86,6 @@ const MIN_SAMPLE = 3;
 const STUCK_AGE_SEC = 7 * 86400;
 const FULL_EXIT_RATIO = 0.95;
 
-function pct(part: number, whole: number): number | null {
-  return whole > 0 ? part / whole : null;
-}
 function median(xs: number[]): number | null {
   if (xs.length === 0) return null;
   const s = [...xs].sort((a, b) => a - b);
@@ -106,14 +103,35 @@ function pctHeldAfter(positions: TokenPositionSummary[], horizonSec: number, now
   for (const p of positions) {
     if (p.buyUsd <= 0 || p.firstBuyTs === null) continue;
     const firstBuyMs = Date.parse(p.firstBuyTs);
-    const fullyExited = (p.exitRatio ?? 0) >= FULL_EXIT_RATIO;
-    const exitedWithinH = fullyExited && p.holdDurationSec !== null && p.holdDurationSec <= horizonSec;
+    // Full-exit timing uses the THRESHOLD-CROSSING sell (fullExitSec), not the
+    // last dust sell (Codex Important-9): 95% out at 30m + 5% at 2h exited
+    // within 1h, whatever the final trickle says.
+    const exitedWithinH = p.fullExitSec !== null && p.fullExitSec <= horizonSec;
     const oldEnough = nowMs - firstBuyMs >= horizonSec * 1000;
     if (!oldEnough && !exitedWithinH) continue; // outcome at H not yet knowable
     observable += 1;
     if (!exitedWithinH) held += 1;
   }
   return observable > 0 ? held / observable : null;
+}
+
+/** First-sell-within-X share over positions whose X-outcome is OBSERVABLE:
+ *  a first sell exists (whenever it happened), or the position is at least X
+ *  old with no sell (didn't sell within X). Aged unsold positions therefore
+ *  COUNT AGAINST fast-flipping (Codex Important-7) instead of vanishing from
+ *  the denominator. */
+function pctFirstSellWithin(positions: TokenPositionSummary[], horizonSec: number, nowMs: number): number | null {
+  let observable = 0;
+  let within = 0;
+  for (const p of positions) {
+    if (p.buyUsd <= 0 || p.firstBuyTs === null) continue;
+    const hasFirstSell = p.timeToFirstSellSec !== null;
+    const oldEnough = nowMs - Date.parse(p.firstBuyTs) >= horizonSec * 1000;
+    if (!hasFirstSell && !oldEnough) continue; // too young to judge
+    observable += 1;
+    if (hasFirstSell && (p.timeToFirstSellSec as number) <= horizonSec) within += 1;
+  }
+  return observable > 0 ? within / observable : null;
 }
 
 export function computeHoldMetrics(profile: BehaviorProfile, extras: HoldClassifierExtras = {}): HoldMetrics {
@@ -123,9 +141,8 @@ export function computeHoldMetrics(profile: BehaviorProfile, extras: HoldClassif
   const bought = positions.filter((p) => p.buyUsd > 0);
   const withFirstSell = bought.filter((p) => p.timeToFirstSellSec !== null);
   const fullExitDurations = bought
-    .filter((p) => (p.exitRatio ?? 0) >= FULL_EXIT_RATIO && p.holdDurationSec !== null)
-    .map((p) => p.holdDurationSec as number);
-  const within = (sec: number) => withFirstSell.filter((p) => (p.timeToFirstSellSec as number) <= sec).length;
+    .filter((p) => p.fullExitSec !== null)
+    .map((p) => p.fullExitSec as number);
 
   const outcomes = extras.tokenOutcomes;
   let rugExposurePct: number | null = null;
@@ -136,10 +153,10 @@ export function computeHoldMetrics(profile: BehaviorProfile, extras: HoldClassif
 
   return {
     sampleSize: bought.length,
-    pctFirstSellWithin1m: pct(within(60), withFirstSell.length),
-    pctFirstSellWithin5m: pct(within(300), withFirstSell.length),
-    pctFirstSellWithin30m: pct(within(1800), withFirstSell.length),
-    pctFirstSellWithin2h: pct(within(7200), withFirstSell.length),
+    pctFirstSellWithin1m: pctFirstSellWithin(positions, 60, nowMs),
+    pctFirstSellWithin5m: pctFirstSellWithin(positions, 300, nowMs),
+    pctFirstSellWithin30m: pctFirstSellWithin(positions, 1800, nowMs),
+    pctFirstSellWithin2h: pctFirstSellWithin(positions, 7200, nowMs),
     medianTimeToFirstSellSec: median(withFirstSell.map((p) => p.timeToFirstSellSec as number)),
     medianTimeToFullExitSec: median(fullExitDurations),
     pctHeldAfter1h: pctHeldAfter(positions, 3600, nowMs),
@@ -173,14 +190,20 @@ export function classifyHoldBehavior(profile: BehaviorProfile, extras: HoldClass
   const example = (filter: (p: TokenPositionSummary) => boolean): string[] =>
     positions.filter(filter).slice(0, 5).map((p) => p.tokenAddress);
 
-  // Dirty data first: irreconcilable provider/local conflict poisons classification.
+  const caveatsBase = profile.localViewTruncated
+    ? [...BASE_CAVEATS, 'the local trade history WAS truncated for this wallet — position shapes may be artifacts of the cut']
+    : BASE_CAVEATS;
+
+  // Dirty data first: irreconcilable provider/local conflict POISONS the
+  // classification — confidence 95 so it always sorts as the primary label
+  // (Codex Important-10: it must not be outranked by a pattern label).
   if (profile.conflicts.length >= 2) {
     labels.push({
       label: 'rejected_dirty_data',
-      confidence: 70,
+      confidence: 95,
       componentMetrics: { sampleSize: metrics.sampleSize },
       exampleTokens: [],
-      caveats: [...BASE_CAVEATS, `unresolved provider/local conflicts: ${profile.conflicts.map((c) => c.field).join(', ')}`]
+      caveats: [...caveatsBase, `unresolved provider/local conflicts: ${profile.conflicts.map((c) => c.field).join(', ')}`]
     });
   }
 
@@ -190,7 +213,7 @@ export function classifyHoldBehavior(profile: BehaviorProfile, extras: HoldClass
       confidence: 90,
       componentMetrics: { sampleSize: metrics.sampleSize, tokenDiversity: metrics.tokenDiversity },
       exampleTokens: [],
-      caveats: BASE_CAVEATS
+      caveats: caveatsBase
     });
     return { classifierVersion: HOLD_CLASSIFIER_VERSION, dataQuality: profile.dataQuality, metrics, labels, grantsEligibility: false };
   }
@@ -202,7 +225,7 @@ export function classifyHoldBehavior(profile: BehaviorProfile, extras: HoldClass
       confidence: 80,
       componentMetrics: { receivedNotBoughtCount: metrics.receivedNotBoughtCount, sampleSize: metrics.sampleSize },
       exampleTokens: example((p) => p.receivedNotBought),
-      caveats: [...BASE_CAVEATS, 'sells without a local buy — tokens arrived by transfer/airdrop; sell behavior says nothing about buying skill']
+      caveats: [...caveatsBase, 'sells without a local buy — tokens arrived by transfer/airdrop; sell behavior says nothing about buying skill']
     });
   }
 
@@ -213,7 +236,7 @@ export function classifyHoldBehavior(profile: BehaviorProfile, extras: HoldClass
       confidence: 40, // low-sample labels are always low confidence
       componentMetrics: { sampleSize: metrics.sampleSize, pctFirstSellWithin30m: metrics.pctFirstSellWithin30m },
       exampleTokens: example((p) => p.buyUsd > 0),
-      caveats: [...BASE_CAVEATS, `only ${metrics.sampleSize} bought position(s) — below the ${MIN_SAMPLE}-token confidence floor`]
+      caveats: [...caveatsBase, `only ${metrics.sampleSize} bought position(s) — below the ${MIN_SAMPLE}-token confidence floor`]
     });
     return { classifierVersion: HOLD_CLASSIFIER_VERSION, dataQuality: profile.dataQuality, metrics, labels, grantsEligibility: false };
   }
@@ -231,7 +254,7 @@ export function classifyHoldBehavior(profile: BehaviorProfile, extras: HoldClass
         sampleSize: metrics.sampleSize
       },
       exampleTokens: example((p) => (p.timeToFirstSellSec ?? Infinity) <= 1800),
-      caveats: BASE_CAVEATS
+      caveats: caveatsBase
     });
   }
 
@@ -247,7 +270,7 @@ export function classifyHoldBehavior(profile: BehaviorProfile, extras: HoldClass
         sampleSize: metrics.sampleSize
       },
       exampleTokens: example((p) => p.stillHolding),
-      caveats: [...BASE_CAVEATS, 'holding is not automatically good — residual value and liquidity are unknown at this layer']
+      caveats: [...caveatsBase, 'holding is not automatically good — residual value and liquidity are unknown at this layer']
     });
   }
 
@@ -270,7 +293,7 @@ export function classifyHoldBehavior(profile: BehaviorProfile, extras: HoldClass
         tokenDiversity: metrics.tokenDiversity
       },
       exampleTokens: example((p) => (p.exitRatio ?? 0) > 0 && (p.exitRatio ?? 0) < FULL_EXIT_RATIO),
-      caveats: BASE_CAVEATS
+      caveats: caveatsBase
     });
   }
 
@@ -285,7 +308,7 @@ export function classifyHoldBehavior(profile: BehaviorProfile, extras: HoldClass
       confidence: 60,
       componentMetrics: { stillHoldingAgedCount: metrics.stillHoldingAgedCount, sampleSize: metrics.sampleSize },
       exampleTokens: example((p) => p.sellCount === 0 && p.buyUsd > 0),
-      caveats: [...BASE_CAVEATS, 'zero exits on aged positions — cannot distinguish conviction from inability to exit without liquidity data']
+      caveats: [...caveatsBase, 'zero exits on aged positions — cannot distinguish conviction from inability to exit without liquidity data']
     });
   }
 
@@ -300,7 +323,7 @@ export function classifyHoldBehavior(profile: BehaviorProfile, extras: HoldClass
         confidence: 65,
         componentMetrics: { sampleSize: metrics.sampleSize, rugExposurePct: metrics.rugExposurePct },
         exampleTokens: deadHeld.slice(0, 5).map((p) => p.tokenAddress),
-        caveats: [...BASE_CAVEATS, 'token outcomes from runner-mining series — residue valued at outcome label, not live price']
+        caveats: [...caveatsBase, 'token outcomes from runner-mining series — residue valued at outcome label, not live price']
       });
     }
   }
@@ -311,7 +334,7 @@ export function classifyHoldBehavior(profile: BehaviorProfile, extras: HoldClass
       confidence: 30,
       componentMetrics: { sampleSize: metrics.sampleSize, medianTimeToFirstSellSec: metrics.medianTimeToFirstSellSec },
       exampleTokens: example((p) => p.buyUsd > 0),
-      caveats: [...BASE_CAVEATS, 'no strong pattern matched — behavior is mixed or the window is too short; retained for observation only']
+      caveats: [...caveatsBase, 'no strong pattern matched — behavior is mixed or the window is too short; retained for observation only']
     });
   }
 

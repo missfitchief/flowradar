@@ -79,6 +79,8 @@ export interface BehaviorReceipt {
 export interface ReceiptsEngineResult {
   engineVersion: number;
   receipts: BehaviorReceipt[];
+  /** Input rows dropped by the hard engine bounds — reported, never silent. */
+  inputTruncation: { tradesTruncated: number; transfersTruncated: number };
   grantsEligibility: false;
 }
 
@@ -94,8 +96,16 @@ const BASE_CAVEATS = [
   'coordination receipts describe on-chain timing/funding patterns, not proven intent'
 ];
 
+/** Hard input bound: beyond this the engine truncates (newest-first by ts)
+ *  and REPORTS it — quadratic scans over unbounded histories are a DoS. */
+const MAX_ENGINE_TRADES = 50_000;
+const MAX_ENGINE_TRANSFERS = 50_000;
+
 function link(prefix: string, tx: string): string {
-  return `${prefix}${tx}`;
+  // Path-encode the hash and refuse non-https prefixes (a UI rendering these
+  // must never receive a javascript:/data: URL or an unescaped path segment).
+  const safePrefix = prefix.startsWith('https://') ? prefix : 'https://solscan.io/tx/';
+  return `${safePrefix}${encodeURIComponent(tx)}`;
 }
 
 function groupBy<T, K>(items: T[], key: (t: T) => K): Map<K, T[]> {
@@ -120,7 +130,9 @@ function deriveLaunchClusters(input: ReceiptsEngineInput, prefix: string): Behav
   for (const [token, trades] of byToken) {
     const buys = trades.filter((t) => t.action === 'BUY').sort((a, b) => (a.blockOrSlot < b.blockOrSlot ? -1 : 1));
     if (buys.length === 0) continue;
-    const launchSlot = buys[0].blockOrSlot;
+    // Launch anchor = first observed trade of ANY side (Codex Important-17):
+    // an earlier observed SELL proves the token predates the buy cluster.
+    const launchSlot = trades.reduce((min, t) => (t.blockOrSlot < min ? t.blockOrSlot : min), buys[0].blockOrSlot);
     const firstBuyByWallet = new Map<string, ReceiptTradeInput>();
     for (const b of buys) if (!firstBuyByWallet.has(b.walletAddress)) firstBuyByWallet.set(b.walletAddress, b);
     const inWindow = [...firstBuyByWallet.values()].filter((b) => b.blockOrSlot - launchSlot <= LAUNCH_WINDOW_SLOTS);
@@ -172,14 +184,20 @@ function deriveBurstExits(input: ReceiptsEngineInput, prefix: string): BehaviorR
     const buys = trades.filter((t) => t.action === 'BUY');
     const sells = trades.filter((t) => t.action === 'SELL').sort((a, b) => a.ts.getTime() - b.ts.getTime());
     const buyUsd = buys.reduce((s, t) => s + t.amountUsd, 0);
-    if (buyUsd <= 0 || sells.length === 0) continue;
+    if (buyUsd <= 0) continue;
+    // Only sells AFTER the first observed buy count toward "exiting the
+    // position" (Codex Important-13: pre-buy sells belong to an unobserved
+    // earlier position and must not inflate the burst).
+    const firstBuyTs = Math.min(...buys.map((b) => b.ts.getTime()));
+    const postBuySells = sells.filter((s) => s.ts.getTime() >= firstBuyTs);
+    if (postBuySells.length === 0) continue;
     // widest sell burst window <= BURST_EXIT_SEC
-    for (let i = 0; i < sells.length; i++) {
+    for (let i = 0; i < postBuySells.length; i++) {
       let burstUsd = 0;
       const burstTxs: string[] = [];
-      for (let j = i; j < sells.length && (sells[j].ts.getTime() - sells[i].ts.getTime()) / 1000 <= BURST_EXIT_SEC; j++) {
-        burstUsd += sells[j].amountUsd;
-        burstTxs.push(sells[j].txHash);
+      for (let j = i; j < postBuySells.length && (postBuySells[j].ts.getTime() - postBuySells[i].ts.getTime()) / 1000 <= BURST_EXIT_SEC; j++) {
+        burstUsd += postBuySells[j].amountUsd;
+        burstTxs.push(postBuySells[j].txHash);
       }
       if (burstUsd >= buyUsd * BURST_EXIT_RATIO) {
         receipts.push({
@@ -190,7 +208,10 @@ function deriveBurstExits(input: ReceiptsEngineInput, prefix: string): BehaviorR
           evidenceTxs: burstTxs,
           exampleTokens: [token],
           independentTokenRepetition: 1,
-          caveats: BASE_CAVEATS,
+          caveats: [
+            ...BASE_CAVEATS,
+            'exit share is a USD proxy (proceeds vs cost) — under strong price appreciation a partial token exit can read as a full USD exit; token-quantity accounting requires amount series'
+          ],
           dataQuality: 'partial',
           classificationVersion: RECEIPTS_ENGINE_VERSION,
           explorerLinks: burstTxs.slice(0, 10).map((tx) => link(prefix, tx))
@@ -215,10 +236,17 @@ function deriveDistribution(input: ReceiptsEngineInput, prefix: string): Behavio
   const sellersByToken = groupBy(input.trades.filter((t) => t.action === 'SELL'), (t) => t.walletAddress);
 
   for (const tr of input.transfers) {
+    if (tr.sourceAddress === tr.destinationAddress) continue; // self-transfer is never distribution
     const sellerSells = sellersByToken.get(tr.sourceAddress) ?? [];
     if (sellerSells.length === 0) continue;
     const receiverBuys = buysByWallet.get(tr.destinationAddress) ?? [];
     for (const sell of sellerSells) {
+      // Sequencing (Codex Important-12): the SELL must precede the transfer
+      // (within 24h), and the receiver's buy must follow the transfer within
+      // 1h — sell -> transfer -> buy, never a months-old sell.
+      const sellBeforeTransfer =
+        sell.ts.getTime() <= tr.ts.getTime() && tr.ts.getTime() - sell.ts.getTime() <= 24 * 3600_000;
+      if (!sellBeforeTransfer) continue;
       const laterBuy = receiverBuys.find(
         (b) => b.tokenAddress === sell.tokenAddress &&
           b.ts.getTime() >= tr.ts.getTime() &&
@@ -260,7 +288,12 @@ function deriveSideWalletLinks(input: ReceiptsEngineInput, prefix: string): Beha
     firstBuys.set(t.walletAddress, m);
   }
 
-  const fundingPairs = groupBy(input.transfers, (tr) => `${tr.sourceAddress}|${tr.destinationAddress}`);
+  // Pair identity is UNDIRECTED (Codex Important-14: A->B and B->A are one
+  // relationship) and self-transfers never form a link.
+  const fundingPairs = groupBy(
+    input.transfers.filter((tr) => tr.sourceAddress !== tr.destinationAddress),
+    (tr) => [tr.sourceAddress, tr.destinationAddress].sort().join('|')
+  );
   for (const [pairKey, transfers] of fundingPairs) {
     const [a, b] = pairKey.split('|');
     const aBuys = firstBuys.get(a);
@@ -275,10 +308,22 @@ function deriveSideWalletLinks(input: ReceiptsEngineInput, prefix: string): Beha
         if (gapSec <= CREW_ENTRY_WINDOW_SEC) coEntries.push({ token, txA: buyA.txHash, txB: buyB.txHash, gapSec: Math.round(gapSec) });
       }
     }
+    // Only transfers with KNOWN, non-dust value count as funding evidence for
+    // the tiers (Codex Important-14); unknown-value transfers are reported
+    // separately, never silently valued at 0.
+    const valuedTransfers = transfers.filter((t) => t.usd !== null && t.usd >= 10);
+    const unknownValueTransfers = transfers.length - transfers.filter((t) => t.usd !== null).length;
+    const hasFunding = valuedTransfers.length > 0;
     const tier: ReceiptClassification | null =
-      coEntries.length >= 3 ? 'strong_onchain_link' : coEntries.length >= 2 ? 'probable_side_wallet' : coEntries.length >= 1 || transfers.length >= 2 ? 'possible_side_wallet' : null;
+      hasFunding && coEntries.length >= 3
+        ? 'strong_onchain_link'
+        : hasFunding && coEntries.length >= 2
+          ? 'probable_side_wallet'
+          : (hasFunding && coEntries.length >= 1) || valuedTransfers.length >= 2
+            ? 'possible_side_wallet'
+            : null;
     if (!tier) continue;
-    const evidence = [...transfers.slice(0, 3).map((t) => t.txHash), ...coEntries.flatMap((c) => [c.txA, c.txB])];
+    const evidence = [...valuedTransfers.slice(0, 3).map((t) => t.txHash), ...coEntries.flatMap((c) => [c.txA, c.txB])];
     receipts.push({
       classification: tier,
       wallets: [a, b],
@@ -287,7 +332,8 @@ function deriveSideWalletLinks(input: ReceiptsEngineInput, prefix: string): Beha
         directTransfers: transfers.length,
         coEntryTokens: coEntries.length,
         coEntryWindowSec: CREW_ENTRY_WINDOW_SEC,
-        totalTransferUsd: transfers.reduce((s, t) => s + (t.usd ?? 0), 0)
+        knownTransferUsd: valuedTransfers.reduce((s, t) => s + (t.usd as number), 0),
+        unknownValueTransfers
       },
       evidenceTxs: evidence,
       exampleTokens: coEntries.slice(0, 5).map((c) => c.token),
@@ -338,7 +384,7 @@ function deriveCrews(input: ReceiptsEngineInput, prefix: string): BehaviorReceip
       evidenceTxs: evidence,
       exampleTokens: occurrences.slice(0, 5).map((o) => o.token),
       independentTokenRepetition: occurrences.length,
-      caveats: BASE_CAVEATS,
+      caveats: [...BASE_CAVEATS, 'crew identity v1 requires the EXACT same wallet set per token — supersets/noisy variants evade it; treat absence as unknown, not clearance'],
       dataQuality: 'partial',
       classificationVersion: RECEIPTS_ENGINE_VERSION,
       explorerLinks: evidence.slice(0, 10).map((tx) => link(prefix, tx))
@@ -356,16 +402,23 @@ function deriveLaunchTeamDestructive(
   prefix: string
 ): BehaviorReceipt[] {
   const receipts: BehaviorReceipt[] = [];
-  const fundedPairs = new Set(input.transfers.flatMap((t) => [`${t.sourceAddress}|${t.destinationAddress}`, `${t.destinationAddress}|${t.sourceAddress}`]));
   for (const cluster of launchClusters) {
     const token = String(cluster.componentMetrics.token);
     for (const burst of burstExits) {
       const wallet = burst.wallets[0];
       if (!cluster.wallets.includes(wallet)) continue;
       if (String(burst.componentMetrics.token) !== token) continue;
-      const fundedByClusterMate = cluster.wallets.some((w) => w !== wallet && fundedPairs.has(`${w}|${wallet}`));
-      if (!fundedByClusterMate) continue;
-      const evidence = [...burst.evidenceTxs, ...cluster.evidenceTxs.slice(0, 5)];
+      // The claimed funding link's transfer tx MUST be in the evidence
+      // (Codex Important-17): find the actual transfer(s), not just the flag.
+      const fundingTxs = input.transfers
+        .filter(
+          (t) =>
+            (t.destinationAddress === wallet && cluster.wallets.includes(t.sourceAddress) && t.sourceAddress !== wallet) ||
+            (t.sourceAddress === wallet && cluster.wallets.includes(t.destinationAddress) && t.destinationAddress !== wallet)
+        )
+        .map((t) => t.txHash);
+      if (fundingTxs.length === 0) continue;
+      const evidence = [...fundingTxs.slice(0, 3), ...burst.evidenceTxs, ...cluster.evidenceTxs.slice(0, 5)];
       receipts.push({
         classification: 'launch_team_linked_destructive_exit',
         wallets: [wallet],
@@ -406,7 +459,7 @@ function deriveSoloPatterns(input: ReceiptsEngineInput, linked: Set<string>, pre
         evidenceTxs: evidence,
         exampleTokens: lowMcapTokens.slice(0, 5),
         independentTokenRepetition: lowMcapTokens.length,
-        caveats: [...BASE_CAVEATS, 'entry quality says nothing about exits — read together with the hold/dump classifier'],
+        caveats: [...BASE_CAVEATS, 'entry quality says nothing about exits — read together with the hold/dump classifier', 'independence = no coordination links FOUND in partial local data — absence of evidence, not proof of independence'],
         dataQuality: 'partial',
         classificationVersion: RECEIPTS_ENGINE_VERSION,
         explorerLinks: evidence.slice(0, 10).map((tx) => link(prefix, tx))
@@ -499,7 +552,20 @@ function deriveSoloPatterns(input: ReceiptsEngineInput, linked: Set<string>, pre
   return receipts;
 }
 
-export function deriveBehaviorReceipts(input: ReceiptsEngineInput): ReceiptsEngineResult {
+export function deriveBehaviorReceipts(rawInput: ReceiptsEngineInput): ReceiptsEngineResult {
+  // Hard input bounds (Codex Important-15): newest-first truncation, REPORTED
+  // via truncation counters — quadratic scans over unbounded input are a DoS.
+  const tradesTruncated = Math.max(0, rawInput.trades.length - MAX_ENGINE_TRADES);
+  const transfersTruncated = Math.max(0, rawInput.transfers.length - MAX_ENGINE_TRANSFERS);
+  const input: ReceiptsEngineInput =
+    tradesTruncated > 0 || transfersTruncated > 0
+      ? {
+          ...rawInput,
+          trades: [...rawInput.trades].sort((a, b) => b.ts.getTime() - a.ts.getTime()).slice(0, MAX_ENGINE_TRADES),
+          transfers: [...rawInput.transfers].sort((a, b) => b.ts.getTime() - a.ts.getTime()).slice(0, MAX_ENGINE_TRANSFERS)
+        }
+      : rawInput;
+
   const prefix = input.explorerTxPrefix ?? 'https://solscan.io/tx/';
   const launchClusters = deriveLaunchClusters(input, prefix);
   const burstExits = deriveBurstExits(input, prefix);
@@ -517,6 +583,7 @@ export function deriveBehaviorReceipts(input: ReceiptsEngineInput): ReceiptsEngi
   return {
     engineVersion: RECEIPTS_ENGINE_VERSION,
     receipts: [...launchClusters, ...burstExits, ...distribution, ...sideLinks, ...crews, ...launchTeam, ...solo],
+    inputTruncation: { tradesTruncated, transfersTruncated },
     grantsEligibility: false
   };
 }

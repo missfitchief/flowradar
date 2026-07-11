@@ -60,6 +60,10 @@ export interface BehaviorInputs {
   providerActivity: ProviderActivityInput[];
   providerStats: ProviderStatsInput[];
   fundingEdges: FundingEdgeInput[];
+  /** True when the caller truncated the local trade history (newest-first
+   *  fetch bound). An old buy may be missing while its recent sell remains,
+   *  so local confidences are REDUCED and the flag is carried on the profile. */
+  localViewTruncated?: boolean;
   now: Date;
 }
 
@@ -85,6 +89,10 @@ export interface TokenPositionSummary {
   stillHolding: boolean;
   /** Sold without any local buy — received/transferred in, not bought. */
   receivedNotBought: boolean;
+  /** Seconds from first buy to the sell that CROSSED the full-exit threshold
+   *  (cumulative sellUsd >= 95% of buyUsd) — the honest full-exit time, which
+   *  can be much earlier than the last dust sell. Null while not fully exited. */
+  fullExitSec: number | null;
 }
 
 export interface BehaviorConflict {
@@ -102,6 +110,9 @@ export interface BehaviorProfile {
   address: string;
   computedAt: string;
   dataQuality: BehaviorDataQuality;
+  /** The local trade history was truncated by the fetch bound — position
+   *  shapes (exits, received-not-bought) may be artifacts of the cut. */
+  localViewTruncated: boolean;
   local: {
     tradeCount: ProvenancedField<number>;
     buyCount: ProvenancedField<number>;
@@ -175,6 +186,19 @@ function buildTokenPositions(trades: LocalTradeInput[]): TokenPositionSummary[] 
     const firstBuy = buys[0] ?? null;
     const firstSellAfterBuy = firstBuy ? sells.find((s) => s.ts.getTime() >= firstBuy.ts.getTime()) ?? null : null;
     const lastSell = sells.length > 0 ? sells[sells.length - 1] : null;
+    // The sell that CROSSED the 95% threshold (cumulative), for honest
+    // full-exit timing — the last dust sell can be hours later.
+    let fullExitSec: number | null = null;
+    if (firstBuy && buyUsd > 0) {
+      let cum = 0;
+      for (const s of sells) {
+        cum += s.amountUsd;
+        if (cum >= buyUsd * FULL_EXIT_RATIO && s.ts.getTime() >= firstBuy.ts.getTime()) {
+          fullExitSec = Math.round((s.ts.getTime() - firstBuy.ts.getTime()) / 1000);
+          break;
+        }
+      }
+    }
     out.push({
       tokenAddress,
       buyCount: buys.length,
@@ -195,7 +219,8 @@ function buildTokenPositions(trades: LocalTradeInput[]): TokenPositionSummary[] 
       entryMcap: firstBuy?.marketCapAtTrade ?? null,
       repeatedEntry: buys.length > 1,
       stillHolding: buys.length > 0 && sellUsd < buyUsd * FULL_EXIT_RATIO,
-      receivedNotBought: buys.length === 0 && sells.length > 0
+      receivedNotBought: buys.length === 0 && sells.length > 0,
+      fullExitSec
     });
   }
   return out.sort((a, b) => (a.firstBuyTs ?? '') < (b.firstBuyTs ?? '') ? -1 : 1);
@@ -234,13 +259,19 @@ export function reconstructBehaviorProfile(inputs: BehaviorInputs): BehaviorProf
   const fullExits = boughtPositions.filter((p) => (p.exitRatio ?? 0) >= FULL_EXIT_RATIO).length;
   const partialExits = boughtPositions.filter((p) => (p.exitRatio ?? 0) > 0 && (p.exitRatio ?? 0) < FULL_EXIT_RATIO).length;
 
+  // Truncated local views get REDUCED confidence (Codex Important-4): the
+  // counts are floor-true (at least this many) but shapes may be artifacts.
+  const truncated = inputs.localViewTruncated === true;
+  const localConf = truncated ? 60 : 90;
+  const computedConf = truncated ? 50 : 80;
+
   const localBlock: BehaviorProfile['local'] = localTrades.length > 0
     ? {
-        tradeCount: local(localTrades.length),
-        buyCount: local(buys),
-        sellCount: local(sells),
-        tokenDiversity: computed(positions.length),
-        activeDays: computed(dayKeys.size),
+        tradeCount: local(localTrades.length, localConf),
+        buyCount: local(buys, localConf),
+        sellCount: local(sells, localConf),
+        tokenDiversity: computed(positions.length, computedConf),
+        activeDays: computed(dayKeys.size, computedConf),
         firstTradeTs: sortedTs[0]?.ts.toISOString() ?? null,
         lastTradeTs: sortedTs[sortedTs.length - 1]?.ts.toISOString() ?? null,
         realizedProxyUsd: computed(sellUsdTotal - buyUsdTotal, 55), // rough proxy — open inventory unpriced
@@ -306,12 +337,16 @@ export function reconstructBehaviorProfile(inputs: BehaviorInputs): BehaviorProf
   }
   if (stats.pnlUsd != null && localTrades.length >= 10) {
     const proxy = sellUsdTotal - buyUsdTotal;
-    if (Math.sign(stats.pnlUsd) !== 0 && Math.sign(proxy) !== 0 && Math.sign(stats.pnlUsd) !== Math.sign(proxy) && Math.abs(proxy) > 1000) {
+    // Symmetric disagreement check (Codex Important-10): a zero on either side
+    // no longer suppresses it, and large magnitude gaps count even same-sign.
+    const signDisagrees = Math.sign(stats.pnlUsd) !== Math.sign(proxy) && Math.max(Math.abs(stats.pnlUsd), Math.abs(proxy)) > 1000;
+    const magnitudeGap = Math.abs(stats.pnlUsd - proxy) > 10 * Math.max(1000, Math.min(Math.abs(stats.pnlUsd), Math.abs(proxy)));
+    if (signDisagrees || magnitudeGap) {
       conflicts.push({
         field: 'pnlUsd',
         providerValue: stats.pnlUsd,
         localValue: proxy,
-        note: 'provider-claimed PnL sign disagrees with the local realized proxy (which excludes open inventory) — flagged for review, NOT reconciled'
+        note: 'provider-claimed PnL disagrees with the local realized proxy (which excludes open inventory) — flagged for review, NOT reconciled'
       });
     }
   }
@@ -325,6 +360,7 @@ export function reconstructBehaviorProfile(inputs: BehaviorInputs): BehaviorProf
     address: inputs.address,
     computedAt: inputs.now.toISOString(),
     dataQuality,
+    localViewTruncated: truncated,
     local: localBlock,
     provider: providerBlock,
     funding: fundingBlock,
