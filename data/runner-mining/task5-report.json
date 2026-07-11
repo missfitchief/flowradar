@@ -1,0 +1,28 @@
+{
+  "ts": "2026-07-11T21:57:48.621Z",
+  "controlsRebuilt": {
+    "runners": 347,
+    "matchedTier1": 0,
+    "matchedTier2": 347,
+    "noValidControl": 0
+  },
+  "task5": {
+    "pairsProcessed": 50,
+    "uniqueWallets": 22,
+    "profilesPersisted": 22,
+    "errors": 0,
+    "byDataQuality": {
+      "local_and_provider": 20,
+      "local_only": 2
+    },
+    "walletsWithRunnerExposure": 21,
+    "walletsWithLosingPositions": 0,
+    "truncatedHistories": 0,
+    "idempotency": {
+      "before": 22,
+      "after": 22,
+      "identical": true
+    },
+    "caveat": "cohort = locally observed buyers of runner/control tokens; in-band early-entry status UNPROVEN (historical entry valuations unavailable locally) — recorded, not fabricated"
+  }
+}
