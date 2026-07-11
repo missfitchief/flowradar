@@ -70,6 +70,7 @@ import * as walletStatsRefresh from './jobs/walletStatsRefresh';
 import * as walletDiscovery from './jobs/walletDiscovery';
 import * as lineageExpansion from './jobs/lineageExpansion';
 import * as monitoringScheduler from './jobs/monitoringScheduler';
+import * as stealthAccumulation from './jobs/stealthAccumulation';
 import * as externalWalletSource from './jobs/externalWalletSource';
 import * as walletCandidateValidation from './jobs/walletCandidateValidation';
 import * as tokenTopTraderBackfill from './jobs/tokenTopTraderBackfill';
@@ -220,6 +221,14 @@ async function main(): Promise<void> {
       name: 'monitoringScheduler',
       run: monitoringScheduler.run,
       intervalSec: settings.intervals.walletActivitySec
+    },
+    // stealthAccumulation (P2, 2026-07-11): SHADOW-ONLY lifecycle snapshots
+    // from the pure stealth engine over recent trade cohorts. Writes only
+    // stealth_snapshots; bounded token budget; replay-idempotent per bucket.
+    {
+      name: 'stealthAccumulation',
+      run: stealthAccumulation.run,
+      intervalSec: settings.intervals.stealthAccumulationSec
     },
     // externalWalletSource (Task 34, Wave 4.5): also expressed in HOURS —
     // same *3600 conversion as backtestHours/walletStatsRefreshHours/

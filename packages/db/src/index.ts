@@ -36,3 +36,4 @@ export * from './graph/edgeFetcher';
 export * from './graph/runSearch';
 export * from './graph/csv';
 export * from '@prisma/client';
+export * from './stealth/runStealthPass';

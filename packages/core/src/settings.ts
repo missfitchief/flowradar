@@ -124,7 +124,11 @@ const IntervalsSchema = z.object({
   profitRotationSec: z.number(),
   walletStatsRefreshHours: z.number(),
   walletDiscoveryHours: z.number(),
-  backtestHours: z.number()
+  backtestHours: z.number(),
+  /** Shadow stealth-accumulation pass cadence (P2, 2026-07-11). Additive with
+   *  a default so stored settings rows without it keep parsing; a job
+   *  interval, NOT a signal threshold. */
+  stealthAccumulationSec: z.number().default(300)
 });
 
 // Task 34 (Wave 4.5, Spec §5b) — external smart-wallet source connectors.
@@ -359,7 +363,8 @@ export const DEFAULT_SETTINGS: Settings = {
     profitRotationSec: 120,
     walletStatsRefreshHours: 6,
     walletDiscoveryHours: 24,
-    backtestHours: 6
+    backtestHours: 6,
+    stealthAccumulationSec: 300
   },
   connectors: {
     // Spec §5b's 6 external candidate-wallet feeders, priority order.

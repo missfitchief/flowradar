@@ -352,9 +352,63 @@ model Token {
   /// Token orphans (never deletes) its confluence snapshots — they keep pointing at
   /// the (chain, tokenAddress) pair. NEVER feeds FlowScore / signals / wallet scoring.
   confluenceSnapshots TokenConfluenceSnapshot[]
+  stealthSnapshots    StealthSnapshot[]
 
   @@unique([chain, address])
   @@map("tokens")
+}
+
+/// StealthSnapshot.state — the shadow accumulation lifecycle (Wave F engine).
+enum StealthState {
+  WATCHING
+  STEALTH_ACCUMULATION
+  EARLY_INDEPENDENT_CONFIRMATION
+  PUBLIC_KOL_ARRIVAL
+  CROWD_EXPANSION
+  DISTRIBUTION_RISK
+  INVALIDATED
+}
+
+/// StealthSnapshot — SHADOW-ONLY persisted output of the pure stealth
+/// accumulation engine (packages/core/src/stealth). One row per
+/// (token, evaluation bucket); re-running a pass inside the same bucket
+/// UPSERTS (replay-idempotent, never duplicates). NOTHING reads this model
+/// for FlowScore, signals, thresholds, or eligibility — it is evidence +
+/// lifecycle state for operators and later forward-outcome evaluation.
+model StealthSnapshot {
+  id                  String       @id @default(cuid())
+  tokenId             String
+  chain               ChainId
+  state               StealthState
+  /// State of the previous bucket's snapshot (null for the first).
+  previousState       StealthState?
+  stateChanged        Boolean
+  /// 0-100 SHADOW score from the pure engine. NOT a FlowScore.
+  stealthScore        Float
+  /// Full StealthMetrics object (~27 structural fields), verbatim.
+  metrics             Json
+  /// Extra evidence components the engine input was built from:
+  /// per-window cohort flows, fresh-funded-receiver buyer count,
+  /// liquidity/holder/social conflict notes, windows covered.
+  evidence            Json
+  /// Plain-English one-paragraph explanation of state + why.
+  explanation         String
+  /// Plain-English invalidation/risk reasons (empty array unless the state
+  /// carries risk: DISTRIBUTION_RISK / INVALIDATED / PUBLIC_KOL_ARRIVAL).
+  invalidationReasons Json
+  /// Evaluation bucket start (computedAt floored to the pass interval) —
+  /// the replay-idempotency key component.
+  bucketTs            DateTime
+  computedAt          DateTime
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  token               Token        @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@unique([tokenId, bucketTs])
+  @@index([state, bucketTs])
+  @@index([tokenId, computedAt])
+  @@map("stealth_snapshots")
 }
 
 // ---------------------------------------------------------------------------
