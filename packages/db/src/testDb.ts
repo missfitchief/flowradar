@@ -44,17 +44,30 @@ export class TestDbIsolationError extends Error {
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
-/** Canonical identity of a postgres URL: lowercased host, defaulted port, db name. */
-function canonicalIdentity(url: string, what: string): { host: string; port: string; db: string } {
+/**
+ * Canonical identity of a postgres URL: loopback aliases unified to one token
+ * (localhost vs 127.0.0.1 reach the SAME cluster), port defaulted, db name
+ * PERCENT-DECODED (f%6Fo_test and foo_test are the same database on the
+ * server — Codex round 3). Exported for the globalSetup provisioner so the
+ * database it creates is the decoded name the server will actually use.
+ */
+export function canonicalIdentity(url: string, what: string): { host: string; port: string; db: string } {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
     throw new TestDbIsolationError(`${what} is not a parsable URL`);
   }
-  const db = parsed.pathname.replace(/^\//, '');
+  let db: string;
+  try {
+    db = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+  } catch {
+    throw new TestDbIsolationError(`${what} database name is not percent-decodable`);
+  }
   if (!db) throw new TestDbIsolationError(`${what} has no database name`);
-  return { host: parsed.hostname.toLowerCase(), port: parsed.port || '5432', db };
+  const rawHost = parsed.hostname.toLowerCase();
+  const host = LOCAL_HOSTS.has(rawHost) ? 'local-loopback' : rawHost;
+  return { host, port: parsed.port || '5432', db };
 }
 
 /**
@@ -80,7 +93,7 @@ export function resolveDatabaseUrlForEnv(env: NodeJS.ProcessEnv): string {
   // remote host could be someone's production cluster — refuse (Codex Task-A
   // review). This also guarantees the globalSetup provisioner and the workers
   // are talking to the same local cluster.
-  if (!LOCAL_HOSTS.has(test.host)) {
+  if (test.host !== 'local-loopback') {
     throw new TestDbIsolationError(`test database host "${test.host}" is not local — tests only ever run against localhost`);
   }
   // Same-identity collision: compare CANONICAL identities (host lowercased,

@@ -16,7 +16,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/client';
-import { resolveDatabaseUrlForEnv } from '../packages/db/src/testDb';
+import { canonicalIdentity, resolveDatabaseUrlForEnv } from '../packages/db/src/testDb';
 
 function probePort(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
   return new Promise((resolve) => {
@@ -36,7 +36,9 @@ export default async function globalSetup(): Promise<void> {
   // its fail-closed test branch regardless of this process's own env.
   const resolvedTestUrl = resolveDatabaseUrlForEnv({ ...process.env, VITEST: '1' });
   const testUrl = new URL(resolvedTestUrl);
-  const testDbName = testUrl.pathname.replace(/^\//, '');
+  // PERCENT-DECODED db name — the name the server actually uses (a f%6Fo_test
+  // url must create/deploy against foo_test, not the encoded spelling).
+  const testDbName = canonicalIdentity(resolvedTestUrl, 'resolved test URL').db;
   const clusterHost = testUrl.hostname;
   const clusterPort = Number(testUrl.port || '5432');
 

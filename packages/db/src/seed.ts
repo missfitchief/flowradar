@@ -438,7 +438,7 @@ const EXTERNAL_CONFLUENCE_SOURCE_SEED_ROWS = [
     provider: 'gmgn',
     apiKeyEnvName: 'GMGN_API_KEY',
     rateLimitPerMinute: 30,
-    notes: 'Query-only external intel — disabled by default; stub until confirmed query-only docs/key. NEVER references swap/order/private-key/wallet endpoints (query-only, design rule 8).'
+    notes: 'Query-only external intel — disabled by default; stub until confirmed query-only docs/key. NEVER references execution, trading, or key-management endpoints (query-only, design rule 8).'
   }
 ] as const;
 

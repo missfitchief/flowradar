@@ -92,11 +92,15 @@ const CAPABILITY_TOKENS = [
 // those stay enforced by the stricter single-file guard above; known residual
 // limit: a grep guard cannot catch runtime string construction.
 const FORBIDDEN_SUBCOMMANDS = ['swap', 'multi-swap', 'order', 'cooking', 'key', 'wallet', 'config'];
-const CLI_SHELL_INVOCATIONS = FORBIDDEN_SUBCOMMANDS.map((c) => `gmgn-cli ${c}`);
-const CLI_ARGV_INVOCATION = new RegExp(
-  `gmgn-cli['"\`]?\\s*,\\s*\\[\\s*['"\`](${FORBIDDEN_SUBCOMMANDS.join('|')})`,
+// ANY line mentioning gmgn-cli (incl. gmgn-cli.cmd / .exe / flags before the
+// subcommand) that also carries a forbidden subcommand WORD is an offender —
+// broader than exact invocation shapes, so option reordering can't slip by.
+const CLI_LINE_COOCCURRENCE = new RegExp(
+  `gmgn-cli[^\\n]*\\b(${FORBIDDEN_SUBCOMMANDS.join('|').replace(/-/g, '\\-')})\\b`,
   'i'
 );
+// Literal GMGN API paths for execution families inside string literals.
+const API_PATH_LITERAL = /['"`][^'"`\n]*\/(swap|multi-swap|order|orders|cooking)s?\b[^'"`\n]*['"`]/i;
 
 // Files that are themselves GUARDS and legitimately NAME forbidden tokens in
 // their own forbidden-lists. Nothing else may be added here without review.
@@ -112,14 +116,17 @@ describe('repo-wide GMGN capability guard (grep guard)', () => {
     expect(gmgnFiles.length).toBeGreaterThan(0);
   });
 
-  it('no gmgn-mentioning source file references a forbidden capability or CLI invocation', () => {
+  it('no gmgn-mentioning source file references a forbidden capability, CLI invocation, or API path', () => {
     const offenders: { file: string; token: string }[] = [];
     for (const file of gmgnFiles) {
       const content = readFileSync(file, 'utf8').toLowerCase();
-      for (const token of [...CAPABILITY_TOKENS, ...CLI_SHELL_INVOCATIONS]) {
+      for (const token of CAPABILITY_TOKENS) {
         if (content.includes(token)) offenders.push({ file, token });
       }
-      if (CLI_ARGV_INVOCATION.test(content)) offenders.push({ file, token: 'argv-form gmgn-cli invocation' });
+      for (const line of content.split('\n')) {
+        if (CLI_LINE_COOCCURRENCE.test(line)) offenders.push({ file, token: `cli line: ${line.trim().slice(0, 60)}` });
+        if (API_PATH_LITERAL.test(line)) offenders.push({ file, token: `api path: ${line.trim().slice(0, 60)}` });
+      }
     }
     expect(offenders).toEqual([]);
   });
