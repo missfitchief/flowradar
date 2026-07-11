@@ -32,14 +32,23 @@ beforeAll(async () => {
 describe.skipIf(!(await probePort('localhost', 5439)))('withGlobalJobLock', () => {
   it('SERIALIZES: two concurrent holders never overlap', async () => {
     const events: string[] = [];
+    // DETERMINISTIC ordering: job-b begins acquiring only AFTER job-a has
+    // provably entered (gate resolved inside a's critical section). The old
+    // `sleep(50)` head start flaked under full-suite load — a's client
+    // construction + first query could exceed 50ms, letting b win the lock
+    // first. With the gate, b's first acquisition attempt happens while a
+    // HOLDS the lock, so the serialized order below is load-independent.
+    let aEntered!: () => void;
+    const aEnteredGate = new Promise<void>((resolve) => (aEntered = resolve));
     await Promise.all([
       withGlobalJobLock('job-a', async () => {
         events.push('a-enter');
+        aEntered();
         await sleep(300);
         events.push('a-exit');
       }),
       (async () => {
-        await sleep(50); // ensure job-a wins the lock first
+        await aEnteredGate; // b starts only while a holds the lock
         await withGlobalJobLock('job-b', async () => {
           events.push('b-enter');
           await sleep(50);
