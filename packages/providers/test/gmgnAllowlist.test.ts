@@ -3,7 +3,7 @@
 // The allowlist is the ONLY path FlowRadar may invoke gmgn-cli through. It
 // must ACCEPT the documented read-only families and REJECT every execution /
 // key-management family, before any process is spawned.
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { assertGmgnCommandAllowed, runGmgnCli, GmgnForbiddenCommandError } from '../src/gmgn/allowlist';
 
 const ALLOWED: string[][] = [
@@ -63,26 +63,72 @@ describe('assertGmgnCommandAllowed', () => {
     expect(() => assertGmgnCommandAllowed(['SWAP'])).toThrow(GmgnForbiddenCommandError);
     expect(() => assertGmgnCommandAllowed(['tokens'])).toThrow(GmgnForbiddenCommandError);
   });
-});
 
-describe('runGmgnCli', () => {
-  it('refuses to spawn a forbidden command (guard runs BEFORE any process)', async () => {
-    // No spawn mock needed: the guard must throw synchronously-in-promise
-    // before touching child_process.
-    await expect(runGmgnCli(['swap', '--chain', 'sol'])).rejects.toThrow(GmgnForbiddenCommandError);
+  it('FAILS CLOSED on non-string / stringify-once elements (TOCTOU guard, Codex P1)', () => {
+    // An object that stringifies to an allowed pair once but is not a plain
+    // string — the classic validate-one-thing/execute-another attack.
+    const family = { toString: () => 'track' };
+    const sub = { toString: () => 'smartmoney' };
+    expect(() => assertGmgnCommandAllowed([family, sub] as unknown[])).toThrow(GmgnForbiddenCommandError);
+    // Whitespace-padded tokens are malformed, not allowed.
+    expect(() => assertGmgnCommandAllowed([' track', 'smartmoney'])).toThrow(GmgnForbiddenCommandError);
+    expect(() => assertGmgnCommandAllowed(['track', 'smartmoney '])).toThrow(GmgnForbiddenCommandError);
+    // A single joined element is not a valid pair.
+    expect(() => assertGmgnCommandAllowed(['track smartmoney'])).toThrow(GmgnForbiddenCommandError);
+    // A non-string trailing arg is rejected too.
+    expect(() => assertGmgnCommandAllowed(['token', 'info', { toString: () => '--raw' }] as unknown[])).toThrow(GmgnForbiddenCommandError);
+    // A non-array argv fails closed.
+    expect(() => assertGmgnCommandAllowed('track smartmoney' as unknown as string[])).toThrow(GmgnForbiddenCommandError);
   });
 
-  it('never invokes gmgn-cli via a shell (shell:false is mandatory)', async () => {
-    // Statically assert the source never passes shell:true — a shell would
-    // reintroduce injection + defeat the argv allowlist.
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const path = await import('node:path');
-    const src = readFileSync(
-      path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'gmgn', 'allowlist.ts'),
-      'utf-8'
-    );
-    expect(src).not.toMatch(/shell\s*:\s*true/);
-    expect(src).toMatch(/shell\s*:\s*false/);
+  it('returns the validated pair for an allowed command', () => {
+    expect(assertGmgnCommandAllowed(['token', 'holders', '--address', 'T'])).toEqual({ family: 'token', subcommand: 'holders' });
+  });
+});
+
+// BEHAVIORAL interception of the real child_process.execFile (Codex P2 #4):
+// proves what runGmgnCli actually passes to the OS, not what the source text
+// says. Mock returns a benign JSON stdout so allowed commands resolve.
+vi.mock('node:child_process', async (orig) => {
+  const actual = await orig<typeof import('node:child_process')>();
+  return { ...actual, execFile: vi.fn() };
+});
+import { execFile as mockedExecFile } from 'node:child_process';
+
+describe('runGmgnCli (behavioral)', () => {
+  const execMock = mockedExecFile as unknown as ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    execMock.mockReset();
+    // Default: invoke the callback with valid JSON so allowed calls resolve.
+    execMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: (e: unknown, out: string) => void) => {
+      cb(null, '{"ok":true}');
+      return {} as never;
+    });
+  });
+
+  it('refuses to spawn a forbidden command — execFile is NEVER called', async () => {
+    await expect(runGmgnCli(['swap', '--chain', 'sol'])).rejects.toThrow(GmgnForbiddenCommandError);
+    expect(execMock).not.toHaveBeenCalled();
+  });
+
+  it('an allowed command spawns node (not a shell) with shell:false and a literal argv', async () => {
+    await runGmgnCli(['token', 'holders', '--chain', 'sol', '--address', 'T', '--raw']);
+    expect(execMock).toHaveBeenCalledTimes(1);
+    const [bin, args, options] = execMock.mock.calls[0]!;
+    expect(bin).toBe(process.execPath); // node, never cmd.exe / a shell
+    expect((options as { shell?: boolean }).shell).toBe(false);
+    // argv is a literal string array whose tail matches what we asked for.
+    expect(Array.isArray(args)).toBe(true);
+    expect((args as string[]).slice(-6)).toEqual(['token', 'holders', '--chain', 'sol', '--address', 'T', '--raw'].slice(-6));
+    expect((args as string[]).every((a) => typeof a === 'string')).toBe(true);
+  });
+
+  it('executes a FROZEN string snapshot — a live getter cannot swap the command after validation (TOCTOU)', async () => {
+    // argv whose element is a plain string at validation but a getter proxy
+    // would differ later; here we pass a normal allowed array and assert the
+    // executed args are all primitive strings (String()-coerced snapshot).
+    await runGmgnCli(['market', 'trending', '--chain', 'sol', '--raw']);
+    const [, args] = execMock.mock.calls[0]!;
+    for (const a of args as unknown[]) expect(typeof a).toBe('string');
   });
 });

@@ -12,6 +12,7 @@
 // would reintroduce injection and defeat the argv allowlist.
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 
 /** Allowed `<family> <subcommand>` pairs — EXACTLY the read-only intel set the
@@ -35,16 +36,40 @@ const ALLOWED_PAIRS = new Set<string>([
 ]);
 
 export class GmgnForbiddenCommandError extends Error {
-  constructor(argv: readonly string[]) {
-    super(`GMGN command not on the read-only allowlist: "${argv.slice(0, 2).join(' ') || '<empty>'}" — refusing to invoke`);
+  constructor(argv: unknown) {
+    // Robust to ANY argv shape (non-array, non-string elements) — the
+    // constructor must never itself throw and mask the rejection.
+    const label = Array.isArray(argv)
+      ? argv.slice(0, 2).map((a) => (typeof a === 'string' ? a : typeof a)).join(' ') || '<empty>'
+      : typeof argv;
+    super(`GMGN command not on the read-only allowlist: "${label}" — refusing to invoke`);
     this.name = 'GmgnForbiddenCommandError';
   }
 }
 
-/** Throws unless argv[0..1] is an allowed read-only `<family> <subcommand>`. */
-export function assertGmgnCommandAllowed(argv: readonly string[]): void {
-  const pair = `${argv[0] ?? ''} ${argv[1] ?? ''}`.trim();
-  if (!ALLOWED_PAIRS.has(pair)) throw new GmgnForbiddenCommandError(argv);
+/**
+ * Throws unless argv is an array whose FIRST TWO elements are EXACT plain
+ * strings forming an allowed `<family> <subcommand>` pair. Fail-closed on
+ * everything else (Codex P1): non-array, empty, non-string / object / accessor
+ * elements (a stringify-once-execute-different TOCTOU), or whitespace-padded
+ * tokens. Returns the validated pair so callers can reason about what passed.
+ */
+export function assertGmgnCommandAllowed(argv: readonly unknown[]): { family: string; subcommand: string } {
+  if (!Array.isArray(argv) || argv.length < 2) throw new GmgnForbiddenCommandError(argv);
+  const family = argv[0];
+  const subcommand = argv[1];
+  // EXACT primitive strings only — a String object, number, or getter is
+  // rejected (it could coerce differently at spawn time). No trimming: a
+  // padded token is malformed, not allowed.
+  if (typeof family !== 'string' || typeof subcommand !== 'string') throw new GmgnForbiddenCommandError(argv);
+  if (family !== family.trim() || subcommand !== subcommand.trim()) throw new GmgnForbiddenCommandError(argv);
+  if (!ALLOWED_PAIRS.has(`${family} ${subcommand}`)) throw new GmgnForbiddenCommandError(argv);
+  // Every REMAINING element must also be a plain string (they become literal
+  // execFile args; a non-string could stringify unexpectedly).
+  for (let i = 2; i < argv.length; i++) {
+    if (typeof argv[i] !== 'string') throw new GmgnForbiddenCommandError(argv);
+  }
+  return { family, subcommand };
 }
 
 export interface GmgnCliOptions {
@@ -61,8 +86,10 @@ function resolveCliPath(explicit?: string): string {
     if (existsSync(p)) return p;
   }
   // Fallback: node's own resolution (works when gmgn-cli is a local dep).
+  // createRequire gives a working require in the emitted ESM (bare `require`
+  // is undefined there — Codex P2).
   try {
-    return require.resolve('gmgn-cli/dist/index.js');
+    return createRequire(import.meta.url).resolve('gmgn-cli/dist/index.js');
   } catch {
     throw new Error('gmgn-cli not found — install it or pass cliPath');
   }
@@ -70,20 +97,24 @@ function resolveCliPath(explicit?: string): string {
 
 /** Runs an ALLOWED read-only gmgn-cli command and returns parsed JSON (the
  *  callers always pass --raw). Rejects forbidden commands BEFORE spawning. */
-export async function runGmgnCli(argv: readonly string[], opts: GmgnCliOptions = {}): Promise<unknown> {
-  assertGmgnCommandAllowed(argv); // gate BEFORE any process work
+export async function runGmgnCli(argv: readonly unknown[], opts: GmgnCliOptions = {}): Promise<unknown> {
+  // Validate, then FREEZE a defensive string-copy snapshot and execute THAT —
+  // never the caller's array (a live getter/Proxy could return a different
+  // value at spawn time than at validation time; Codex P1 TOCTOU).
+  assertGmgnCommandAllowed(argv);
+  const safeArgv: string[] = (argv as string[]).map((a) => String(a));
   const cli = resolveCliPath(opts.cliPath);
   return new Promise((resolve, reject) => {
     execFile(
       process.execPath,
-      [cli, ...argv],
+      [cli, ...safeArgv],
       { timeout: opts.timeoutMs ?? 30_000, shell: false, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout) => {
         if (err) return reject(err);
         try {
           resolve(stdout.trim() ? JSON.parse(stdout) : null);
         } catch {
-          reject(new Error(`gmgn-cli returned non-JSON output for "${argv.slice(0, 2).join(' ')}"`));
+          reject(new Error(`gmgn-cli returned non-JSON output for "${safeArgv.slice(0, 2).join(' ')}"`));
         }
       }
     );

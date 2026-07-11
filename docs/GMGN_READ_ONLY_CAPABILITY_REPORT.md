@@ -6,9 +6,11 @@ call; 13 tiny read-only probes (limit ≤ 5, paced ~0.7 rps) via `node <dist/ind
 to `spawn` a `.cmd` without a shell — the real provider will invoke the resolved JS entry directly, no
 shell, which is also the safer allowlist surface).
 
-**All 13 allowed read-only families returned data with the operator's key.** No forbidden family was
-invoked. Chains for every command: `sol / bsc / base / eth` (some also `robinhood`) — **this branch uses
-`sol` only** (hard rule 14/15).
+**13 read-only commands were PROBED LIVE and all returned data with the operator's key.** A 14th,
+`market signal`, is documented from `--help` only (read-only per the CLI; signal types 1–18, ≤50
+results/group) and is on the allowlist but was **not separately probed** — it is the one matrix row
+below without live probe evidence, marked accordingly. No forbidden family was invoked. Chains for every
+command: `sol / bsc / base / eth` (some also `robinhood`) — **this branch uses `sol` only** (rules 14/15).
 
 ## Command matrix (probed)
 
@@ -19,7 +21,7 @@ invoked. Chains for every command: `sol / bsc / base / eth` (some also `robinhoo
 | `track follow-wallet` | YES (`--wallet` filter) | YES (`side`) | `next_page_token` | 100 | per trade | — |
 | `market trenches` | token-level | n/a | none (per-category) | 80/cat | `created_timestamp` | `smart_degen_count`, `renowned_count` |
 | `market trending` | token-level | n/a | none | 100 | interval-based | filter tags |
-| `market signal` | token-level | n/a | groups | 50/group | trigger ts | signal types 1–18 |
+| `market signal` (help-only, NOT probed) | token-level | n/a | groups | 50/group | trigger ts | signal types 1–18 |
 | `token info` | token | n/a | n/a | 1 | `creation_timestamp`, `open_timestamp`, `migrated_timestamp` | `launchpad*`, `og` |
 | `token security` | token | n/a | n/a | 1 | n/a | honeypot/renounced/tax/lock flags |
 | `token pool` | token | n/a | n/a | 1 | `creation_timestamp` | `creator`, `exchange`, reserves |

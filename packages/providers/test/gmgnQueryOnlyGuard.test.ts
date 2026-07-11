@@ -136,4 +136,23 @@ describe('repo-wide GMGN capability guard (grep guard)', () => {
     }
     expect(offenders).toEqual([]);
   });
+
+  // The choke-point file is excluded from the token grep above (it legitimately
+  // names forbidden families in its rejection logic), so this dedicated guard
+  // ensures excluding it did NOT open a blind spot: allowlist.ts may spawn a
+  // child process EXACTLY ONCE (the single validated execFile in runGmgnCli),
+  // and only via execFile (never exec/spawn/shell). A second runner or a raw
+  // exec/spawn added there — the way a forbidden invocation would sneak in —
+  // fails this test (Codex Task-1 #2).
+  it('the excluded allowlist.ts has EXACTLY one child-process call, via execFile only', () => {
+    const src = readFileSync(join(REPO_ROOT, 'packages/providers/src/gmgn/allowlist.ts'), 'utf8');
+    const execFileCalls = (src.match(/\bexecFile\s*\(/g) ?? []).length;
+    const otherSpawns = (src.match(/\b(exec|spawn|spawnSync|execSync|fork)\s*\(/g) ?? []).length;
+    expect(execFileCalls).toBe(1);
+    expect(otherSpawns).toBe(0);
+    // And the single call must be guarded: assertGmgnCommandAllowed appears
+    // before execFile in the file.
+    expect(src.indexOf('assertGmgnCommandAllowed(argv)')).toBeGreaterThan(-1);
+    expect(src.indexOf('assertGmgnCommandAllowed(argv)')).toBeLessThan(src.indexOf('execFile('));
+  });
 });
