@@ -11,3 +11,4 @@ coverage/
 .superpowers/
 *.tsbuildinfo
 db-backups/
+runs/
