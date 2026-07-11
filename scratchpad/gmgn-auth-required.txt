@@ -1,0 +1,26 @@
+GMGN read-only query access — ONE-TIME OPERATOR ACTION REQUIRED
+================================================================
+Status (verified 2026-07-11T10:09Z): gmgn-cli 1.5.2 installed;
+'gmgn-cli config --check' exits 1 = NO API KEY CONFIGURED. All GMGN work
+(read-only probes, wallet behavior audition) is blocked_by_auth until this
+is done. Nothing has been purchased; nothing needs purchasing to try it.
+
+The Ed25519 API keypair was already generated on this machine
+(~/.config/gmgn/keypair.pem — the private half never leaves this machine
+and must never be pasted anywhere).
+
+DO THIS (once, ~2 minutes):
+1. Open this link in a browser where you are logged into gmgn.ai
+   (it contains only the PUBLIC key):
+   https://gmgn.ai/ai/generateapi?pbk=-----BEGIN%20PUBLIC%20KEY-----%0AMCowBQYDK2VwAyEA9NEOqJbkPxaqwFzu2lFe5J5l%2BjZlVX3yyVRml8E1qko%3D%0A-----END%20PUBLIC%20KEY-----%0A
+2. Create the API key on that page.
+3. Back on this machine, run:
+   gmgn-cli config --apply <THE_API_KEY>
+   (paste the key ONLY into that local command — never into chat/files)
+4. Verify: 'gmgn-cli config --check' should now exit 0.
+
+After that, the agent can run the ALLOWED read-only families only:
+market trenches/trending, token info/security/pool/holders/traders,
+portfolio holdings/stats/activity, track smartmoney, track kol.
+FORBIDDEN always: swap, multi-swap, order, cooking, sign, wallet
+management, GMGN_PRIVATE_KEY, any execution (guard-enforced in repo).
