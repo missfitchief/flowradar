@@ -21,3 +21,11 @@ Executed against `flowradar_pilot` (a frozen template copy of the live backup at
 
 ## What IS proven
 Deterministic, idempotent, bounded+resumable universe/cohort/match/entry pipeline over real data; the $10M classification asymmetry (observation proves a runner; only launch-anchored coverage proves a non-runner); unknown-honesty end to end; receipts on every classified row; zero errors across 10,489 tokens.
+
+## Enrichment phase 2 (Birdeye, real API — 2026-07-11 21:47Z)
+928 targets (428 runners + 500 deterministic control candidates), 1,856 requests at plan pacing: **249 enriched**, 679 provider_error (retryable, persisted with retryCount — resumable; the plan throttles above its ceiling), 0 no_ohlcv/no_supply. Classification rerun ONCE with enrichment precedence + seven Codex-driven no-lookahead/full-life gates:
+- **Confirmed runners: 347** (independent Birdeye agreement or plausible local evidence).
+- **Downgraded: 81** — 48 caught by >3x cross-provider ATH disagreement + 32 scale-implausible (≥$10B) without successful enrichment, moved out of verified per the no-verified-and-suspect rule (audited UPDATE, receipted in evidenceJson); + the prior 4 = **84 conflicting_evidence** total.
+- **Verified non-runners: 0** — fullLifeProven requires tokenCreatedAt anchoring + untruncated + strictly consecutive daily candles + current end; no local token meets it. Honest: the below-cohort needs launch-time backfill (tokenCreatedAt population or a creation-info-capable plan).
+- Controls: 379→347 runners all matched tier2 (unknown-outcome pool, capped by rule); 0 tier1 until verified non-runners exist.
+- Early buyers: 0 in-band even with candle-END priors (1,815 unknown-skipped) — local trades on runner mints all occurred when those tokens were far above $50k; historical first-buyer *transactions* (not just prices) are the remaining gap (Birdeye token-trades pagination or Helius historical backfill — next increment).
