@@ -41,6 +41,7 @@ export * from './backtest/shadow';
 export * from './backtest/replayRequest';
 export * from './feed/explain';
 export * from './candidates/validate';
+export * from './candidates/sourceCategory';
 export * from './social/index';
 export * from './confluence/index';
 export * from './stealth/index';
