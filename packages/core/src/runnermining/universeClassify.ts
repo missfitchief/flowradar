@@ -122,8 +122,10 @@ export interface MatchFeatures {
   launchTsMs: number;
   /** Baseline (first observed) mcap — PRE-outcome by construction. */
   baselineMcapUsd: number | null;
-  /** Early activity proxy: observations in the first 24h of the series. */
+  /** Early activity proxy: observations in the FIRST 24h of the series (pre-outcome by construction). */
   earlyPointCount: number;
+  /** Unknown-outcome controls (insufficient_history) are capped at tier2 — survivorship caveat. */
+  tier2Only?: boolean;
 }
 
 export interface ControlMatch {
@@ -180,8 +182,9 @@ export function matchControls(runners: MatchFeatures[], controlPool: MatchFeatur
       const mcapComparable =
         runner.baselineMcapUsd !== null && cand.baselineMcapUsd !== null &&
         Math.abs(Math.log(cand.baselineMcapUsd / runner.baselineMcapUsd)) <= 1; // within ~e (2.7x)
-      const tier: 'tier1' | 'tier2' | null =
+      let tier: 'tier1' | 'tier2' | null =
         launchGap <= TIER1_LAUNCH_WINDOW_MS && mcapComparable ? 'tier1' : launchGap <= TIER2_LAUNCH_WINDOW_MS ? 'tier2' : null;
+      if (tier === 'tier1' && cand.tier2Only) tier = 'tier2'; // unknown-outcome control never tier1
       if (tier === null) {
         if (excluded.length < 10) excluded.push({ mint: cand.mint, reason: 'launch period too far for any tier' });
         continue;

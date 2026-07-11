@@ -1,0 +1,195 @@
+{
+  "ts": "2026-07-11T20:36:09.757Z",
+  "universe": {
+    "scanned": 10489,
+    "created": 10489,
+    "updated": 0,
+    "errors": 0,
+    "byCoverage": {
+      "covered": 3127,
+      "unavailable": 6609,
+      "partially_covered": 753
+    }
+  },
+  "classification": {
+    "byClass": {
+      "insufficient_history": 10057,
+      "verified_above_10m": 428,
+      "conflicting_evidence": 4
+    },
+    "errors": 0,
+    "confidenceDistribution": {
+      "medium": 2956,
+      "high": 7528,
+      "low": 5
+    }
+  },
+  "controls": {
+    "runners": 428,
+    "matchedTier1": 0,
+    "matchedTier2": 428,
+    "noValidControl": 0
+  },
+  "earlyBuyers": {
+    "mintsProcessed": 400,
+    "entriesPersisted": 0,
+    "byBand": {},
+    "unknownMcapSkipped": 538
+  },
+  "idempotency": {
+    "lifecyclesBeforeRerun": 10489,
+    "lifecyclesAfterRerun": 10489,
+    "identical": true
+  },
+  "samples": {
+    "runners": [
+      {
+        "mint": "HzPLGEdJKC6W1seGpsfLxKBdwGK5Kw5Kkd8diqgBT9Rq",
+        "athMcapUsd": "61080355850958",
+        "athTs": "2026-07-11T17:31:29.626Z",
+        "confidence": "medium",
+        "evidenceJson": {
+          "engine": "computeTokenOutcome + classifyRunner v1",
+          "reasons": [
+            "observed historical mcap 61,080,355,850,958 at 2026-07-11T17:31:29.626Z"
+          ],
+          "bySource": {
+            "marketSnapshots": 9,
+            "tradeObservations": 0
+          },
+          "anchorDeltaMs": null,
+          "observationSpan": {
+            "to": "2026-07-11T18:56:37.125Z",
+            "from": "2026-07-11T12:40:31.290Z"
+          },
+          "seriesTruncated": false,
+          "validPointCount": 9,
+          "anchoredAtLaunch": false,
+          "outcomeDataQuality": [
+            "liquidity never reached the $1000 floor — price moves may be fake markups",
+            "baseline = first OBSERVED point (window-relative, not launch-anchored) — runner multiples may be understated"
+          ],
+          "maxSourceDisagreement": null
+        }
+      },
+      {
+        "mint": "2jatMqQhfZGGKTca6VwB4Tka16LrZcFmnc5fPzCFechp",
+        "athMcapUsd": "40585859295217",
+        "athTs": "2026-07-11T13:55:34.525Z",
+        "confidence": "medium",
+        "evidenceJson": {
+          "engine": "computeTokenOutcome + classifyRunner v1",
+          "reasons": [
+            "observed historical mcap 40,585,859,295,217 at 2026-07-11T13:55:34.525Z"
+          ],
+          "bySource": {
+            "marketSnapshots": 9,
+            "tradeObservations": 0
+          },
+          "anchorDeltaMs": null,
+          "observationSpan": {
+            "to": "2026-07-11T18:56:37.125Z",
+            "from": "2026-07-11T12:40:31.290Z"
+          },
+          "seriesTruncated": false,
+          "validPointCount": 9,
+          "anchoredAtLaunch": false,
+          "outcomeDataQuality": [
+            "baseline = first OBSERVED point (window-relative, not launch-anchored) — runner multiples may be understated"
+          ],
+          "maxSourceDisagreement": null
+        }
+      },
+      {
+        "mint": "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4",
+        "athMcapUsd": "7281002610538",
+        "athTs": "2026-07-11T11:10:30.259Z",
+        "confidence": "high",
+        "evidenceJson": {
+          "engine": "computeTokenOutcome + classifyRunner v1",
+          "reasons": [
+            "observed historical mcap 7,281,002,610,538 at 2026-07-11T11:10:30.259Z"
+          ],
+          "bySource": {
+            "marketSnapshots": 18,
+            "tradeObservations": 35
+          },
+          "anchorDeltaMs": null,
+          "observationSpan": {
+            "to": "2026-07-11T18:56:37.125Z",
+            "from": "2026-07-11T11:10:30.259Z"
+          },
+          "seriesTruncated": false,
+          "validPointCount": 18,
+          "anchoredAtLaunch": false,
+          "outcomeDataQuality": [
+            "baseline = first OBSERVED point (window-relative, not launch-anchored) — runner multiples may be understated"
+          ],
+          "maxSourceDisagreement": 1
+        }
+      },
+      {
+        "mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        "athMcapUsd": "3659880392498",
+        "athTs": "2026-07-11T13:30:32.408Z",
+        "confidence": "high",
+        "evidenceJson": {
+          "engine": "computeTokenOutcome + classifyRunner v1",
+          "reasons": [
+            "observed historical mcap 3,659,880,392,498 at 2026-07-11T13:30:32.408Z"
+          ],
+          "bySource": {
+            "marketSnapshots": 17,
+            "tradeObservations": 97
+          },
+          "anchorDeltaMs": null,
+          "observationSpan": {
+            "to": "2026-07-11T18:56:37.125Z",
+            "from": "2026-07-11T11:15:30.185Z"
+          },
+          "seriesTruncated": false,
+          "validPointCount": 17,
+          "anchoredAtLaunch": false,
+          "outcomeDataQuality": [
+            "baseline = first OBSERVED point (window-relative, not launch-anchored) — runner multiples may be understated"
+          ],
+          "maxSourceDisagreement": 1.01515160055251
+        }
+      },
+      {
+        "mint": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "athMcapUsd": "3060379246837",
+        "athTs": "2026-07-11T13:55:34.525Z",
+        "confidence": "high",
+        "evidenceJson": {
+          "engine": "computeTokenOutcome + classifyRunner v1",
+          "reasons": [
+            "observed historical mcap 3,060,379,246,837 at 2026-07-11T13:55:34.525Z"
+          ],
+          "bySource": {
+            "marketSnapshots": 17,
+            "tradeObservations": 234
+          },
+          "anchorDeltaMs": null,
+          "observationSpan": {
+            "to": "2026-07-11T18:56:37.125Z",
+            "from": "2026-07-11T11:15:30.185Z"
+          },
+          "seriesTruncated": false,
+          "validPointCount": 17,
+          "anchoredAtLaunch": false,
+          "outcomeDataQuality": [
+            "baseline = first OBSERVED point (window-relative, not launch-anchored) — runner multiples may be understated"
+          ],
+          "maxSourceDisagreement": 1.01765802951862
+        }
+      }
+    ],
+    "nonRunners": []
+  },
+  "limitations": [
+    "local-data-only pilot: mcap series = live-observed market snapshots + per-trade marketCapAtTrade (2026-07-11 run window); Birdeye OHLCV enrichment is the documented next step",
+    "most tokens entered observation mid-life -> below-$10M verdicts require launch anchoring, so insufficient_history dominates by design (survivorship honesty)",
+    "early-buyer confidence is LOW: bounded polling cannot prove completeness before observed trades"
+  ]
+}

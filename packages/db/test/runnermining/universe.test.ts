@@ -36,12 +36,16 @@ async function cleanup() {
   await prisma.token.deleteMany({ where: { address: { startsWith: PREFIX } } });
 }
 
-async function seedToken(suffix: string, opts: { chain?: 'SOLANA' | 'BSC'; mcaps?: [number, number][]; tradeMcaps?: [number, number][]; firstSeenHoursBeforeSeries?: number } = {}) {
+async function seedToken(suffix: string, opts: { chain?: 'SOLANA' | 'BSC'; mcaps?: [number, number][]; tradeMcaps?: [number, number][]; firstSeenHoursBeforeSeries?: number; launchAnchored?: boolean } = {}) {
   const address = mint(suffix);
   const seriesStart = T0.getTime();
   const firstSeenAt = new Date(seriesStart - (opts.firstSeenHoursBeforeSeries ?? 0) * 3600_000);
   const token = await prisma.token.create({
-    data: { chain: opts.chain ?? 'SOLANA', address, symbol: suffix.slice(0, 8), name: suffix, decimals: 9, firstSeenAt, riskFlags: [] }
+    data: {
+      chain: opts.chain ?? 'SOLANA', address, symbol: suffix.slice(0, 8), name: suffix, decimals: 9, firstSeenAt, riskFlags: [],
+      // PROVEN launch time only when the fixture is explicitly launch-anchored
+      tokenCreatedAt: opts.launchAnchored ? new Date(seriesStart) : null
+    }
   });
   for (const [hours, mcap] of opts.mcaps ?? []) {
     await prisma.tokenMarketSnapshot.create({
@@ -116,18 +120,19 @@ describe.skipIf(!dbReachable)('runner-mining builders (Tasks 1-4)', () => {
     expect(page2.scanned).toBe(1);
   });
 
-  it('Task 1: BSC + quarantined tokens are classified out, never silently dropped', async () => {
+  it('Task 1: BSC tokens never enter the Solana universe (hard rule 21; also kills cross-chain mint collisions)', async () => {
     await seedToken('EVMSD', { chain: 'BSC', mcaps: [[0, 99_000_000]] });
-    await buildTokenUniverse(prisma, { batchSize: 500, mintPrefix: PREFIX });
+    const r = await buildTokenUniverse(prisma, { batchSize: 500, mintPrefix: PREFIX });
+    expect(r.scanned).toBe(0); // the scan itself is SOLANA-only
     const row = await prisma.tokenLifecycle.findUnique({ where: { mint: mint('EVMSD') } });
-    expect(row?.coverage).toBe('unsupported'); // recorded WITH classification, excluded from Solana analysis
+    expect(row).toBeNull(); // no lifecycle row for EVM tokens — chain-scoped exclusion, not silent data mixing
   });
 
   it('Task 2: classifies runners vs non-runners with the anchoring asymmetry + receipts', async () => {
     // runner: observed >= $10M mid-series (not anchored — still verified above)
     await seedToken('RUNNER', { mcaps: [[0, 500_000], [1, 15_000_000], [2, 8_000_000]], firstSeenHoursBeforeSeries: 48 });
     // non-runner: anchored at launch (firstSeen == series start), never above 100k
-    await seedToken('CTRL', { mcaps: [[0, 40_000], [1, 90_000], [2, 50_000]], firstSeenHoursBeforeSeries: 0 });
+    await seedToken('CTRL', { mcaps: [[0, 40_000], [1, 90_000], [2, 50_000]], launchAnchored: true });
     // unanchored low series: must be insufficient, NOT below
     await seedToken('WNDW', { mcaps: [[0, 30_000], [1, 35_000], [2, 33_000]], firstSeenHoursBeforeSeries: 72 });
 
@@ -152,12 +157,12 @@ describe.skipIf(!dbReachable)('runner-mining builders (Tasks 1-4)', () => {
     await seedToken('RUN2', {
       mcaps: [[0, 45_000], [1, 20_000_000], [2, 9_000_000]],
       tradeMcaps: [[0, 44_000], [0.5, 15_000], [1.5, 60_000]], // consistent with snapshots at overlap (conflict detector verified separately)
-      firstSeenHoursBeforeSeries: 0
+      launchAnchored: true
     });
     await seedToken('CTL2', {
-      mcaps: [[0, 50_000], [1, 70_000], [2, 60_000]],
-      tradeMcaps: [[0, 49_000]],
-      firstSeenHoursBeforeSeries: 0
+      mcaps: [[0, 45_000], [1, 70_000], [2, 60_000]], // t0 prior valuation 45k -> in-band
+      tradeMcaps: [[0.5, 49_000]], // strictly-prior snapshot exists at t0 (50k) -> band 20k_to_50k
+      launchAnchored: true
     });
 
     await buildTokenUniverse(prisma, { batchSize: 500, mintPrefix: PREFIX });
@@ -172,10 +177,16 @@ describe.skipIf(!dbReachable)('runner-mining builders (Tasks 1-4)', () => {
     expect(match!.confidence).not.toBe('high'); // local features only — bias recorded, never overclaimed
 
     const erep = await extractEarlyBuyers(prisma, { maxMints: 10 });
-    expect(erep.entriesPersisted).toBeGreaterThanOrEqual(3); // 44k + 15k on runner, 49k on control (60k is out of band)
+    // NO-LOOKAHEAD: bands come from the nearest STRICTLY-PRIOR snapshot, so
+    // the t=0 trades (no prior observation) are UNKNOWN and skipped; the
+    // 0.5h trades value against the t0 snapshots (45k/50k -> 20k_to_50k);
+    // the 1.5h trade values against the 1h snapshot (20M -> out of band).
+    expect(erep.entriesPersisted).toBe(2);
+    expect(erep.unknownMcapSkipped).toBe(1); // only the t=0 trade lacks a strictly-prior observation
     const entries = await prisma.earlyBuyerEntry.findMany({ where: { mint: mint('RUN2') }, orderBy: { buyerRank: 'asc' } });
-    expect(entries.map((e) => e.band)).toEqual(['20k_to_50k', '10k_to_20k']); // chronological, not band-ordered
-    expect(entries[0].buyerRank).toBe(1); // chronological ordering preserved
+    expect(entries.map((e) => e.band)).toEqual(['20k_to_50k']);
+    expect(entries[0].buyerRank).toBe(1); // distinct-wallet rank (add-ons reuse it)
+    expect((entries[0].sourceJson as { valuationStatus: string }).valuationStatus).toBe('nearest_prior_snapshot');
     expect(entries.every((e) => e.confidence === 'low')).toBe(true); // pre-trade completeness unproven
 
     // rerun idempotency: unique (mint, tx, wallet) — nothing duplicated

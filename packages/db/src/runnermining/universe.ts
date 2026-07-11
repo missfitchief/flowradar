@@ -19,6 +19,7 @@ import {
   classifyUniverseCoverage,
   classifyRunner,
   computeTokenOutcome,
+  computeEntryContext,
   matchControls,
   earlyEntryBand,
   DEFAULT_RUNNER_MINING_CONFIG
@@ -48,6 +49,7 @@ export interface UniverseBuildReport {
 async function loadSeries(prisma: PrismaClient, tokenId: string): Promise<{
   points: TokenSeriesPoint[];
   bySource: { marketSnapshots: number; tradeObservations: number };
+  truncated: boolean;
   maxSourceDisagreement: number | null;
 }> {
   const snaps = await prisma.tokenMarketSnapshot.findMany({
@@ -63,28 +65,26 @@ async function loadSeries(prisma: PrismaClient, tokenId: string): Promise<{
     select: { ts: true, marketCapAtTrade: true, priceUsd: true }
   });
 
-  const points: (TokenSeriesPoint & { source: 'snapshot' | 'trade' })[] = [
-    ...snaps.map((s) => ({
+  // LOOKAHEAD GUARD (Codex Critical-1): trade rows' marketCapAtTrade can be
+  // BACKDATED from a future snapshot by ingest's nearest-AFTER fallback, so
+  // trade observations are EXCLUDED from the outcome/ATH series. Snapshots
+  // only; trades remain provenance + entry-band inputs (low confidence).
+  const points: (TokenSeriesPoint & { source: 'snapshot' | 'trade' })[] = snaps
+    .map((s) => ({
       ts: s.ts,
       marketCapUsd: s.marketCapUsd === null ? null : Number(s.marketCapUsd),
       priceUsd: s.priceUsd === null ? null : Number(s.priceUsd),
       liquidityUsd: s.liquidityUsd === null ? null : Number(s.liquidityUsd),
       source: 'snapshot' as const
-    })),
-    ...trades.map((t) => ({
-      ts: t.ts,
-      marketCapUsd: Number(t.marketCapAtTrade),
-      priceUsd: t.priceUsd === null ? null : Number(t.priceUsd),
-      liquidityUsd: null,
-      source: 'trade' as const
     }))
-  ].sort((a, b) => a.ts.getTime() - b.ts.getTime());
+    .sort((a, b) => a.ts.getTime() - b.ts.getTime());
+  const tradeObs = trades.map((t) => ({ ts: t.ts, marketCapUsd: Number(t.marketCapAtTrade) }));
 
   // Cross-source disagreement at overlapping timestamps (within 5 min):
   // max ratio between snapshot-mcap and trade-mcap pairs.
   let maxDisagreement: number | null = null;
-  const snapPts = points.filter((p) => p.source === 'snapshot' && p.marketCapUsd !== null && p.marketCapUsd > 0);
-  const tradePts = points.filter((p) => p.source === 'trade' && p.marketCapUsd !== null && p.marketCapUsd > 0);
+  const snapPts = points.filter((p) => p.marketCapUsd !== null && p.marketCapUsd > 0);
+  const tradePts = tradeObs.filter((p) => p.marketCapUsd > 0);
   if (snapPts.length > 0 && tradePts.length > 0) {
     for (const tp of tradePts.slice(0, 500)) {
       let nearest: typeof snapPts[number] | null = null;
@@ -103,6 +103,7 @@ async function loadSeries(prisma: PrismaClient, tokenId: string): Promise<{
   return {
     points: points.map(({ source: _s, ...p }) => p),
     bySource: { marketSnapshots: snaps.length, tradeObservations: trades.length },
+    truncated: snaps.length >= 10_000 || trades.length >= 10_000, // Codex Critical-3
     maxSourceDisagreement: maxDisagreement
   };
 }
@@ -118,7 +119,10 @@ export async function buildTokenUniverse(
   const batchSize = opts.batchSize ?? 500;
   const now = opts.now ?? new Date();
   const tokens = await prisma.token.findMany({
-    where: { ...(opts.cursor ? { address: { gt: opts.cursor } } : {}), ...(opts.mintPrefix ? { address: { startsWith: opts.mintPrefix, ...(opts.cursor ? { gt: opts.cursor } : {}) } } : {}) },
+    // SOLANA only (hard rule 21; also removes the cross-chain shared-address
+    // lifecycle collision — Codex Important-3). Cursor stays address-ordered
+    // and is complete within the single chain.
+    where: { chain: 'SOLANA', ...(opts.cursor ? { address: { gt: opts.cursor } } : {}), ...(opts.mintPrefix ? { address: { startsWith: opts.mintPrefix, ...(opts.cursor ? { gt: opts.cursor } : {}) } } : {}) },
     orderBy: { address: 'asc' },
     take: batchSize,
     select: { id: true, address: true, chain: true, firstSeenAt: true }
@@ -128,19 +132,25 @@ export async function buildTokenUniverse(
 
   for (const token of tokens) {
     try {
-      const { points, bySource } = await loadSeries(prisma, token.id);
+      const { points, bySource, truncated } = await loadSeries(prisma, token.id);
       const validPoints = points.filter((p) => p.marketCapUsd !== null && p.marketCapUsd > 0);
-      const coverage = classifyUniverseCoverage({
+      const early24hPoints = validPoints.length > 0
+        ? validPoints.filter((pt) => pt.ts.getTime() - validPoints[0].ts.getTime() <= 86_400_000).length
+        : 0;
+      const rawCoverage = classifyUniverseCoverage({
         validMint: BASE58_RE.test(token.address),
         chain: token.chain as 'SOLANA' | 'BSC',
         quarantined: QUARANTINED_ADDRESSES.has(token.address),
         seriesPointCount: validPoints.length,
         minSeriesPoints: DEFAULT_RUNNER_MINING_CONFIG.minSeriesPoints
       });
+      // A take-cap-truncated series can hide the peak: never call it covered
+      // (Codex Critical-3) — degrade so below-$10M verdicts become impossible.
+      const coverage = truncated && rawCoverage === 'covered' ? 'partially_covered' : rawCoverage;
       const data = {
         tokenId: token.id,
         sourcesJson: {
-          local: bySource,
+          local: { ...bySource, early24hPoints, truncated },
           providerEnrichment: 'none_yet — Birdeye OHLCV is a budgeted future step; absence recorded, not fabricated'
         } as Prisma.InputJsonValue,
         coverage,
@@ -195,21 +205,28 @@ export async function classifyRunnerCohort(
   for (const lc of lifecycles) {
     try {
       const token = lc.tokenId
-        ? await prisma.token.findUnique({ where: { id: lc.tokenId }, select: { id: true, firstSeenAt: true } })
+        ? await prisma.token.findUnique({ where: { id: lc.tokenId }, select: { id: true, firstSeenAt: true, tokenCreatedAt: true } })
         : null;
-      const { points, bySource, maxSourceDisagreement } = token
+      const { points, bySource, truncated, maxSourceDisagreement } = token
         ? await loadSeries(prisma, token.id)
-        : { points: [], bySource: { marketSnapshots: 0, tradeObservations: 0 }, maxSourceDisagreement: null };
+        : { points: [], bySource: { marketSnapshots: 0, tradeObservations: 0 }, truncated: false, maxSourceDisagreement: null };
       const validPoints = points.filter((p) => p.marketCapUsd !== null && p.marketCapUsd > 0);
-      const anchoredAtLaunch =
-        token !== null &&
-        validPoints.length > 0 &&
-        validPoints[0].ts.getTime() - token.firstSeenAt.getTime() <= LAUNCH_ANCHOR_TOLERANCE_MS;
+      // Anchoring (Codex re-review): PROVEN launch only — tokenCreatedAt (the
+      // on-chain creation time when known) must exist, and the first
+      // observation must land AT or AFTER it within the tolerance. Local
+      // discovery time (firstSeenAt) is NOT launch proof and can never enable
+      // a verified_below_10m verdict; tokens without tokenCreatedAt stay
+      // insufficient_history however low their observed window peaked.
+      const launchTs = token?.tokenCreatedAt ?? null;
+      const anchorDelta =
+        launchTs !== null && validPoints.length > 0 ? validPoints[0].ts.getTime() - launchTs.getTime() : null;
+      const anchoredAtLaunch = anchorDelta !== null && anchorDelta >= 0 && anchorDelta <= LAUNCH_ANCHOR_TOLERANCE_MS;
 
       const outcome = computeTokenOutcome(points, DEFAULT_RUNNER_MINING_CONFIG, { anchoredAtLaunch });
+      const effectiveCoverage = truncated && lc.coverage === 'covered' ? 'partially_covered' : lc.coverage;
       const cls = classifyRunner({
         outcome,
-        coverage: lc.coverage as never,
+        coverage: effectiveCoverage as never,
         anchoredAtLaunch,
         sourceCount: (bySource.marketSnapshots > 0 ? 1 : 0) + (bySource.tradeObservations > 0 ? 1 : 0),
         maxSourceDisagreement
@@ -227,6 +244,8 @@ export async function classifyRunnerCohort(
           evidenceJson: {
             reasons: cls.reasons,
             anchoredAtLaunch,
+            anchorDeltaMs: anchorDelta,
+            seriesTruncated: truncated,
             bySource,
             maxSourceDisagreement,
             validPointCount: validPoints.length,
@@ -261,23 +280,40 @@ export interface ControlMatchReport {
  *  bias recorded — their unknown outcome is a documented limitation, never
  *  silently treated as non-runner truth). */
 export async function buildControlMatches(prisma: PrismaClient, opts: { mintPrefix?: string } = {}): Promise<ControlMatchReport> {
-  const toFeatures = (r: { mint: string; firstObservedAt: Date | null; baselineMcapUsd: Prisma.Decimal | null; seriesPointCount: number }): MatchFeatures | null =>
-    r.firstObservedAt === null
-      ? null
-      : {
-          mint: r.mint,
-          launchTsMs: r.firstObservedAt.getTime(),
-          baselineMcapUsd: r.baselineMcapUsd === null ? null : Number(r.baselineMcapUsd),
-          earlyPointCount: r.seriesPointCount
-        };
+  // PRE-outcome features only (Codex Critical-4): early activity = points in
+  // the FIRST 24h of the series (persisted at universe build), never the
+  // full-history point count (which encodes survival/later surveillance).
+  const toFeatures = (r: { mint: string; firstObservedAt: Date | null; baselineMcapUsd: Prisma.Decimal | null; sourcesJson: unknown; runnerClass: string | null }): MatchFeatures | null => {
+    if (r.firstObservedAt === null) return null;
+    const early = (r.sourcesJson as { local?: { early24hPoints?: number } } | null)?.local?.early24hPoints;
+    if (typeof early !== 'number') return null; // pre-outcome feature unavailable -> not matchable
+    return {
+      mint: r.mint,
+      launchTsMs: r.firstObservedAt.getTime(),
+      baselineMcapUsd: r.baselineMcapUsd === null ? null : Number(r.baselineMcapUsd),
+      earlyPointCount: early,
+      // Codex Important-2: unknown-outcome controls are never tier1.
+      tier2Only: r.runnerClass === 'insufficient_history'
+    };
+  };
 
+  // Bounded (Codex Important-6) + stale-match reconciliation: drop matches
+  // whose runner is no longer verified before rebuilding.
+  await prisma.cohortMatch.deleteMany({
+    where: { ...(opts.mintPrefix ? { runnerMint: { startsWith: opts.mintPrefix } } : {}) }
+  });
+  const MATCH_CAP = 5_000;
   const runnersRaw = await prisma.tokenLifecycle.findMany({
     where: { runnerClass: 'verified_above_10m', ...(opts.mintPrefix ? { mint: { startsWith: opts.mintPrefix } } : {}) },
-    select: { mint: true, firstObservedAt: true, baselineMcapUsd: true, seriesPointCount: true }
+    orderBy: { mint: 'asc' },
+    take: MATCH_CAP,
+    select: { mint: true, firstObservedAt: true, baselineMcapUsd: true, sourcesJson: true, runnerClass: true }
   });
   const poolRaw = await prisma.tokenLifecycle.findMany({
     where: { runnerClass: { in: ['verified_below_10m', 'insufficient_history'] }, ...(opts.mintPrefix ? { mint: { startsWith: opts.mintPrefix } } : {}) },
-    select: { mint: true, firstObservedAt: true, baselineMcapUsd: true, seriesPointCount: true }
+    orderBy: { mint: 'asc' },
+    take: MATCH_CAP * 4,
+    select: { mint: true, firstObservedAt: true, baselineMcapUsd: true, sourcesJson: true, runnerClass: true }
   });
 
   const runners = runnersRaw.map(toFeatures).filter((f): f is MatchFeatures => f !== null);
@@ -297,7 +333,11 @@ export async function buildControlMatches(prisma: PrismaClient, opts: { mintPref
       distance: m.distance,
       featuresJson: {
         runner: runnerFeatures,
-        note: 'pre-outcome features only: launch anchor ts, baseline mcap, early observation count; venue/holder features unavailable locally (bias recorded)'
+        control: m.controlMint ? pool.find((c) => c.mint === m.controlMint) ?? null : null,
+        controlClassCaveat: m.controlMint && pool.find((c) => c.mint === m.controlMint)?.tier2Only
+          ? 'control outcome UNKNOWN (insufficient_history) — survivorship caveat, tier2-capped'
+          : null,
+        note: 'pre-outcome features only: launch anchor ts, baseline mcap, first-24h observation count; venue/holder features unavailable locally (bias recorded)'
       } as Prisma.InputJsonValue,
       excludedJson: m.excluded as unknown as Prisma.InputJsonValue,
       confidence: m.confidence,
@@ -342,9 +382,14 @@ export async function extractEarlyBuyers(
   const report: EarlyBuyerReport = { mintsProcessed: 0, entriesPersisted: 0, byBand: {}, unknownMcapSkipped: 0 };
 
   for (const target of targets.slice(0, maxMints)) {
-    const token = await prisma.token.findFirst({ where: { address: target.mint }, select: { id: true } });
+    const token = await prisma.token.findFirst({ where: { address: target.mint, chain: 'SOLANA' }, select: { id: true } });
     if (!token) continue;
     report.mintsProcessed += 1;
+    // NO-LOOKAHEAD entry valuation (Codex): marketCapAtTrade may be backdated
+    // from a FUTURE snapshot by ingest's fallback, so bands come from
+    // computeEntryContext over STRICTLY-PRIOR snapshot observations only;
+    // trades without a usable prior snapshot stay unknown (no band).
+    const { points } = await loadSeries(prisma, token.id);
     const buys = await prisma.walletTokenTrade.findMany({
       where: { tokenId: token.id, action: 'BUY' },
       orderBy: [{ ts: 'asc' }, { id: 'asc' }],
@@ -352,12 +397,19 @@ export async function extractEarlyBuyers(
       select: { ts: true, txHash: true, blockOrSlot: true, marketCapAtTrade: true, wallet: { select: { address: true } } }
     });
     let rank = 0;
+    const rankedWallets = new Set<string>();
     for (const b of buys) {
-      rank += 1;
-      const mcap = b.marketCapAtTrade === null ? null : Number(b.marketCapAtTrade);
-      const band = earlyEntryBand(mcap !== null && mcap > 0 ? mcap : null);
+      // Rank = distinct-BUYER chronological rank (Codex Important-5): a wallet's
+      // add-on buys reuse its first-buy rank.
+      if (!rankedWallets.has(b.wallet.address)) {
+        rankedWallets.add(b.wallet.address);
+        rank += 1;
+      }
+      const entryCtx = computeEntryContext(b.ts, points, DEFAULT_RUNNER_MINING_CONFIG);
+      const mcap = entryCtx.entryMarketCapUsd;
+      const band = earlyEntryBand(mcap);
       if (band === null) {
-        if (mcap === null || mcap <= 0) report.unknownMcapSkipped += 1; // unknown mcap is NOT a band
+        if (mcap === null) report.unknownMcapSkipped += 1; // unknown mcap is NOT a band
         continue;
       }
       try {
@@ -374,7 +426,12 @@ export async function extractEarlyBuyers(
             buyerRank: rank,
             // Local bounded polling cannot prove no earlier unobserved buys.
             confidence: 'low',
-            sourceJson: { source: 'local_wallet_token_trades', note: 'entry mcap = marketCapAtTrade at the observed trade; pre-trade coverage completeness unproven (bounded polling)' } as Prisma.InputJsonValue
+            sourceJson: {
+              source: 'local_snapshot_prior_valuation',
+              valuationStatus: entryCtx.valuationStatus,
+              valuationAgeSeconds: entryCtx.valuationAgeSeconds,
+              note: 'entry mcap = nearest STRICTLY-PRIOR snapshot (no-lookahead); pre-trade coverage completeness unproven (bounded polling)'
+            } as Prisma.InputJsonValue
           }
         });
         report.entriesPersisted += 1;

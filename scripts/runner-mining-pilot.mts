@@ -11,8 +11,8 @@ const BATCH = 1000;
 const MAX_BATCHES = 30; // hard bound: 30k tokens max this pilot
 
 async function main() {
-  const url = process.env.DATABASE_URL ?? '';
-  if (!/flowradar_pilot/.test(url)) throw new Error('pilot must run against a flowradar_pilot DB copy — refusing');
+  const url = new URL(process.env.DATABASE_URL ?? 'postgresql://invalid');
+  if (url.pathname !== '/flowradar_pilot') throw new Error('pilot must run against the flowradar_pilot DB copy (pathname check) — refusing: ' + url.pathname);
 
   // Task 1 — universe (cursor loop, bounded)
   const universeTotals: Record<string, number> = {};
