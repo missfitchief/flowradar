@@ -51,7 +51,7 @@ export interface GmgnObservationInput {
  * distinct and the (source,wallet,token,ts,type,side) tuple stands.
  */
 export function gmgnDedupeKey(o: Omit<GmgnObservationInput, 'dedupeKey'> & { dedupeKey?: string }): string {
-  const tuple = [
+  const parts = [
     o.chain,
     o.sourceCommand,
     o.walletAddress,
@@ -60,8 +60,15 @@ export function gmgnDedupeKey(o: Omit<GmgnObservationInput, 'dedupeKey'> & { ded
     o.activityTs ? o.activityTs.toISOString() : '',
     o.activityType ?? '',
     o.side ?? ''
-  ].join('|');
-  return createHash('sha256').update(tuple).digest('hex').slice(0, 32);
+  ];
+  // IDENTITY-LESS rows (no txHash AND no activityTs) have no stable discriminator
+  // — fold the value payload into the key so two DISTINCT activities do not
+  // collapse, while an identical re-poll still dedupes (Codex Task-2 P1). This
+  // keeps append-only history honest without breaking idempotency.
+  if (!o.txHash && !o.activityTs) {
+    parts.push('noid', o.amountToken ?? '', o.amountUsd ?? '', JSON.stringify(o.rawClassification ?? null));
+  }
+  return createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 32);
 }
 
 // ---------------------------------------------------------------------------
@@ -218,27 +225,30 @@ export async function ingestGmgnObservations(prisma: PrismaClient, rows: GmgnObs
     }
 
     // 2. Provider metrics → shadow snapshot (provider_claimed), NEVER WalletStats.
+    //    MONOTONIC (Codex Task-2 P2): an OLDER replayed row must not overwrite a
+    //    NEWER snapshot — create if absent, else update ONLY when this row's
+    //    observedAt is strictly newer (conditional updateMany; race-safe).
     if (row.providerPnlUsd != null || row.providerWinRate != null || row.providerTradeCount != null) {
-      await prisma.observationProviderSnapshot.upsert({
-        where: { walletId_source_window: { walletId, source: `gmgn:${row.sourceCommand}`, window: '30d' } },
-        create: {
-          walletId,
-          source: `gmgn:${row.sourceCommand}`,
-          window: '30d',
-          pnlUsd: row.providerPnlUsd ?? null,
-          winRate: row.providerWinRate ?? null,
-          tradeCount: row.providerTradeCount ?? null,
-          providerClaimed: true,
-          observedAt: row.retrievedAt
-        },
-        update: {
-          pnlUsd: row.providerPnlUsd ?? null,
-          winRate: row.providerWinRate ?? null,
-          tradeCount: row.providerTradeCount ?? null,
-          observedAt: row.retrievedAt
-        }
-      });
-      result.snapshotsWritten += 1;
+      const source = `gmgn:${row.sourceCommand}`;
+      const data = {
+        pnlUsd: row.providerPnlUsd ?? null,
+        winRate: row.providerWinRate ?? null,
+        tradeCount: row.providerTradeCount ?? null,
+        observedAt: row.retrievedAt
+      };
+      try {
+        await prisma.observationProviderSnapshot.create({
+          data: { walletId, source, window: '30d', providerClaimed: true, ...data }
+        });
+        result.snapshotsWritten += 1;
+      } catch (err) {
+        if (!isUniqueViolation(err)) throw err;
+        const advanced = await prisma.observationProviderSnapshot.updateMany({
+          where: { walletId, source, window: '30d', observedAt: { lt: row.retrievedAt } },
+          data
+        });
+        if (advanced.count > 0) result.snapshotsWritten += 1;
+      }
     }
 
     // 3. Append the raw observation LAST (idempotent on dedupeKey).

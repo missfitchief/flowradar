@@ -72,9 +72,12 @@ export async function fetchWalletActivity(
   if (opts.limit) { argv.push('--limit', String(clampLimit(opts.limit, 100))); }
   if (opts.cursor) { argv.push('--cursor', opts.cursor); }
   const data = await runGmgnCli(argv, { timeoutMs: opts.timeoutMs, cliPath: opts.cliPath });
-  const obj = (data && typeof data === 'object') ? (data as Record<string, unknown>) : {};
-  const rows = Array.isArray(obj.activities) ? (obj.activities as Record<string, unknown>[]) : [];
-  const next = typeof obj.next === 'string' && obj.next ? obj.next : null;
+  // Same hardened extraction as the other feeds (Codex Task-2 P2): array /
+  // {activities} / {data:{activities}} tolerated, non-object rows dropped.
+  const obj = (data && typeof data === 'object' && !Array.isArray(data)) ? (data as Record<string, unknown>) : {};
+  const rows = asRows(data, 'activities');
+  const nextRaw = (obj.next ?? (obj.data && typeof obj.data === 'object' ? (obj.data as Record<string, unknown>).next : undefined));
+  const next = typeof nextRaw === 'string' && nextRaw ? nextRaw : null;
   return { rows, next };
 }
 

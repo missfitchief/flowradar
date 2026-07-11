@@ -84,6 +84,15 @@ describe('gmgn normalizers (pure)', () => {
     expect(tin.dedupeKey).not.toBe(tout.dedupeKey);
   });
 
+  it('identity-less rows (no tx, no ts) with DIFFERENT values do not collapse; identical ones dedupe', () => {
+    const ctx = { sourceCommand: `${PFX}:portfolio activity`, retrievedAt: NOW };
+    const a = normalizePortfolioActivityRow({ wallet: A2, token: T1, event_type: 'buy', token_amount: '10' }, ctx);
+    const b = normalizePortfolioActivityRow({ wallet: A2, token: T1, event_type: 'buy', token_amount: '20' }, ctx);
+    const aAgain = normalizePortfolioActivityRow({ wallet: A2, token: T1, event_type: 'buy', token_amount: '10' }, { ...ctx, retrievedAt: new Date(NOW.getTime() + 5000) });
+    expect(a.dedupeKey).not.toBe(b.dedupeKey); // different value -> distinct
+    expect(a.dedupeKey).toBe(aAgain.dedupeKey); // same content, later poll -> dedupe
+  });
+
   it('whitespace-only amount normalizes to null, never "0"', () => {
     const o = normalizeSmartmoneyRow({ maker: A1, base_address: T1, side: 'buy', timestamp: 1, amount_usd: '   ' }, { sourceCommand: `${PFX}:track smartmoney`, retrievedAt: NOW });
     expect(o.amountUsd).toBeNull();
@@ -144,6 +153,16 @@ d('ingestGmgnObservations (DB)', () => {
     expect(snap!.providerClaimed).toBe(true);
     expect(Number(snap!.pnlUsd)).toBe(12345.67);
     expect(snap!.winRate).toBeCloseTo(0.62, 5);
+  });
+
+  it('MONOTONIC snapshot: an older replayed row never regresses a newer provider snapshot', async () => {
+    const older = obs({ providerPnlUsd: '100', providerWinRate: 0.5, retrievedAt: new Date(NOW.getTime() - 3600_000), activityTs: new Date(NOW.getTime() - 3600_000) });
+    const newer = obs({ providerPnlUsd: '900', providerWinRate: 0.9, retrievedAt: NOW, activityTs: NOW });
+    await ingestGmgnObservations(prisma, [newer]); // newer first
+    await ingestGmgnObservations(prisma, [older]); // then an OLDER row
+    const w = await prisma.wallet.findUnique({ where: { address_chain: { address: A1, chain: 'SOLANA' } } });
+    const snap = await prisma.observationProviderSnapshot.findFirst({ where: { walletId: w!.id, source: { startsWith: 'gmgn' } } });
+    expect(Number(snap!.pnlUsd)).toBe(900); // newer value retained, not regressed
   });
 
   it('a KOL-tagged wallet becomes public_kol (crowd analysis) — never signal_eligible', async () => {
