@@ -62,13 +62,39 @@ export interface TokenOutcome {
   dataQuality: string[];
 }
 
-function validMcapPoints(series: TokenSeriesPoint[]): { ts: number; mcap: number; liq: number | null }[] {
-  return series
-    .filter((p) => p.marketCapUsd !== null && Number.isFinite(p.marketCapUsd) && p.marketCapUsd! > 0)
-    .map((p) => ({ ts: p.ts.getTime(), mcap: p.marketCapUsd!, liq: p.liquidityUsd }))
-    // Deterministic total order: ts, then mcap — duplicate-timestamp input
-    // order can never flip drawdown/ATH results (Codex).
-    .sort((a, b) => a.ts - b.ts || a.mcap - b.mcap);
+// Same-timestamp duplicates are COLLAPSED to one point per ts (Codex round 3:
+// keeping both in either order fabricates a trajectory — e.g. simultaneous
+// 10k/100k observations sorted ascending invent a 10x "at minute zero").
+// POSITIONAL conservative collapse: the BASELINE ts group takes the HIGHEST
+// value (ambiguity may never deflate the baseline), every LATER ts group
+// takes the LOWEST (ambiguity may never inflate multiples/milestones/ATH).
+// Net guarantee: tie ambiguity can only ever UNDERSTATE credited outcomes,
+// never create them. Contradictions are reported so confidence gets capped.
+function validMcapPoints(series: TokenSeriesPoint[]): {
+  pts: { ts: number; mcap: number }[];
+  contradictoryTies: boolean;
+} {
+  const groups = new Map<number, { min: number; max: number; mixed: boolean }>();
+  for (const p of series) {
+    if (p.marketCapUsd === null || !Number.isFinite(p.marketCapUsd) || p.marketCapUsd <= 0) continue;
+    const ts = p.ts.getTime();
+    const g = groups.get(ts);
+    if (!g) groups.set(ts, { min: p.marketCapUsd, max: p.marketCapUsd, mixed: false });
+    else {
+      if (p.marketCapUsd !== g.min || p.marketCapUsd !== g.max) g.mixed = true;
+      if (p.marketCapUsd < g.min) g.min = p.marketCapUsd;
+      if (p.marketCapUsd > g.max) g.max = p.marketCapUsd;
+    }
+  }
+  const sortedTs = [...groups.keys()].sort((a, b) => a - b);
+  const baselineTs = sortedTs[0];
+  let contradictoryTies = false;
+  const pts = sortedTs.map((ts) => {
+    const g = groups.get(ts)!;
+    if (g.mixed) contradictoryTies = true;
+    return { ts, mcap: ts === baselineTs ? g.max : g.min };
+  });
+  return { pts, contradictoryTies };
 }
 
 export function computeTokenOutcome(
@@ -77,7 +103,7 @@ export function computeTokenOutcome(
   opts: TokenOutcomeOptions = {}
 ): TokenOutcome {
   validateRunnerMiningConfig(cfg);
-  const pts = validMcapPoints(series);
+  const { pts, contradictoryTies } = validMcapPoints(series);
   const anchored = opts.anchoredAtLaunch === true;
   const dataQuality: string[] = [];
 
@@ -102,12 +128,8 @@ export function computeTokenOutcome(
   let peakSoFar = baseline.mcap;
   let maxDrawdownPct = 0;
   const firstCross = { x2: null as number | null, x5: null as number | null, x10: null as number | null, mcap1m: null as number | null, mcap10m: null as number | null };
-  const seenTs = new Set<number>();
-  let duplicateTs = false;
 
   for (const p of pts) {
-    if (seenTs.has(p.ts)) duplicateTs = true;
-    seenTs.add(p.ts);
     if (p.mcap > ath.mcap) ath = p;
     if (p.mcap > peakSoFar) peakSoFar = p.mcap;
     const drawdown = peakSoFar > 0 ? ((peakSoFar - p.mcap) / peakSoFar) * 100 : 0;
@@ -119,7 +141,9 @@ export function computeTokenOutcome(
     if (firstCross.mcap1m === null && p.mcap >= cfg.mcapMilestones.m1) firstCross.mcap1m = minutes;
     if (firstCross.mcap10m === null && p.mcap >= cfg.mcapMilestones.m10) firstCross.mcap10m = minutes;
   }
-  if (duplicateTs) dataQuality.push('duplicate timestamps in series — tie order resolved deterministically (ts, mcap)');
+  if (contradictoryTies) {
+    dataQuality.push('contradictory same-timestamp mcap observations — positional conservative collapse (baseline: highest; later: lowest), so tie ambiguity can only understate outcomes; confidence capped');
+  }
 
   const maxMultiple = baseline.mcap > 0 ? ath.mcap / baseline.mcap : null;
   const labels: RunnerOutcomeLabel[] = [];
@@ -139,13 +163,27 @@ export function computeTokenOutcome(
   // Liquidity assessment over ALL series points that CARRY liquidity — a
   // terminal { mcap: null, liquidity: 0 } point is liquidity-death evidence
   // and must not be discarded just because its mcap is missing (Codex).
-  const liqSeries = series
-    .filter((p) => p.liquidityUsd !== null && Number.isFinite(p.liquidityUsd))
-    .map((p) => ({ ts: p.ts.getTime(), liq: p.liquidityUsd! }))
-    .sort((a, b) => a.ts - b.ts);
+  // Same-ts liquidity ties collapse to the LOWEST value (deterministic and
+  // conservative: never credit tradeability that ambiguous data doesn't
+  // support — the safe error direction is the same as for mcap ties: it can
+  // only UNDERSTATE wallet credit, never inflate it). Codex round 3.
+  const liqByTs = new Map<number, number>();
+  let contradictoryLiqTies = false;
+  for (const p of series) {
+    if (p.liquidityUsd === null || !Number.isFinite(p.liquidityUsd)) continue;
+    const ts = p.ts.getTime();
+    const existing = liqByTs.get(ts);
+    if (existing === undefined) liqByTs.set(ts, p.liquidityUsd);
+    else if (existing !== p.liquidityUsd) {
+      contradictoryLiqTies = true;
+      if (p.liquidityUsd < existing) liqByTs.set(ts, p.liquidityUsd);
+    }
+  }
+  const liqSeries = [...liqByTs.entries()].map(([ts, liq]) => ({ ts, liq })).sort((a, b) => a.ts - b.ts);
   const everLiquid = liqSeries.some((p) => p.liq >= cfg.liquidityFloorUsd);
   const finalLiq = liqSeries.length > 0 ? liqSeries[liqSeries.length - 1]!.liq : null;
   if (liqSeries.length === 0) dataQuality.push('no liquidity data — tradeability unknown');
+  if (contradictoryLiqTies) dataQuality.push('contradictory same-timestamp liquidity observations — collapsed to the LOWEST per ts; confidence capped');
 
   if (liqSeries.length > 0 && !everLiquid) {
     labels.push('illiquid_untradeable');
@@ -171,6 +209,11 @@ export function computeTokenOutcome(
   let confidence: TokenOutcome['confidence'] = 'high';
   if (labels.includes('illiquid_untradeable') || liqSeries.length === 0) confidence = 'medium';
   if (pts.length < cfg.minSeriesPoints * 2) confidence = confidence === 'high' ? 'medium' : 'low';
+  // Contradictory same-ts observations are dirty data: never 'high', even
+  // for a launch-anchored series (Codex round 3).
+  if (contradictoryTies || contradictoryLiqTies) {
+    confidence = confidence === 'low' ? 'low' : 'medium';
+  }
   if (!anchored) {
     // Window-relative baseline: multiples may be understated for tokens that
     // entered our observation window late. Say so, and never claim 'high'.

@@ -43,8 +43,10 @@ the module's external dependency, not silently faked with synthetic series (hard
 
 ## 3. Canonical shapes (Task 2, pure `@flowradar/core/runnermining`)
 
-- `TokenSeriesPoint { ts, priceUsd|null, marketCapUsd|null, liquidityUsd|null, source }` — reuses
-  snapshot semantics; `insufficient_data` when the series can't support a judgment.
+- `TokenSeriesPoint { ts, priceUsd|null, marketCapUsd|null, liquidityUsd|null }` (IMPLEMENTED) —
+  reuses snapshot semantics; `insufficient_data` when the series can't support a judgment.
+  A per-point `source` provenance field is a **Task 3 addition** (needed once multiple providers
+  feed one series; not yet implemented).
 - `TokenOutcome` — evaluation-only labels: `runner_2x|5x|10x|50x`, `reached_1m|10m|100m_mcap`,
   `seven_figure_runner`, `eight_figure_runner`, `failed_launch`, `rug_or_collapse`,
   `illiquid_untradeable`, `insufficient_data` + peak/drawdown metrics + provenance/confidence.
@@ -62,8 +64,11 @@ the module's external dependency, not silently faked with synthetic series (hard
 
 ## 4. No-lookahead architecture (the load-bearing rule)
 
-1. `computeEntryContext(buyTs, series, …)` may only read points with `ts <= buyTs` (nearest PRIOR,
-   bounded by max age). Structurally enforced: the function first truncates the series at `buyTs`.
+1. `computeEntryContext(buyTs, series, …)` may only read points with `ts < buyTs` — STRICTLY prior
+   (a snapshot stamped at exactly `buyTs` could have been produced after the trade within the same
+   second, so ties are excluded), nearest prior bounded by max age. Structurally enforced: the
+   function truncates the series first. Same-timestamp duplicate observations resolve
+   deterministically and conservatively (highest mcap, ambiguity halves confidence).
 2. `computeTokenOutcome(series, …)` reads the FULL series — it is an OUTCOME, stored separately and
    joined to entries only at evaluation/report time. The wall is ARCHITECTURAL, not procedural:
    `entry.ts` may import only `types.ts` and never the outcome module (static leak-guard test), so

@@ -239,9 +239,57 @@ describe('outcome hardening (Codex round)', () => {
     const b = [pt(0, 10_000), pt(10, 100_000), pt(10, 10_000), pt(20, 50_000)];
     const oa = computeTokenOutcome(a, DEFAULT_RUNNER_MINING_CONFIG);
     const ob = computeTokenOutcome(b, DEFAULT_RUNNER_MINING_CONFIG);
-    expect(oa.labels).toEqual(ob.labels);
-    expect(oa.maxDrawdownPct).toBe(ob.maxDrawdownPct);
-    expect(oa.dataQuality.join()).toMatch(/duplicate timestamps/);
+    expect(oa).toEqual(ob); // full-result order insensitivity
+    expect(oa.dataQuality.join()).toMatch(/contradictory same-timestamp/);
+    expect(oa.confidence).not.toBe('high');
+  });
+
+  it('tie ambiguity can never CREATE a runner multiple (positional conservative collapse)', () => {
+    // Codex repro: simultaneous 10k/100k at the BASELINE ts — ascending
+    // orderings fabricated a 10x. Baseline collapses to the HIGHEST (100k),
+    // so the multiple is 1x, in either input order.
+    const x = [pt(0, 10_000), pt(0, 100_000), pt(10, 100_000), pt(20, 90_000)];
+    const y = [pt(0, 100_000), pt(0, 10_000), pt(10, 100_000), pt(20, 90_000)];
+    for (const s of [x, y]) {
+      const o = computeTokenOutcome(s, DEFAULT_RUNNER_MINING_CONFIG, { anchoredAtLaunch: true });
+      expect(o.labels).not.toContain('runner_2x');
+      expect(o.labels).not.toContain('runner_10x');
+      expect(o.baselineMcapUsd).toBe(100_000);
+      expect(o.confidence).not.toBe('high'); // contradictory ties: never high, even anchored
+    }
+    // LATER-ts ties collapse to the LOWEST: a 10k/100k tie at minute 10
+    // cannot mint a 10x either.
+    const later = [pt(0, 10_000), pt(10, 10_000), pt(10, 100_000), pt(20, 12_000)];
+    const o = computeTokenOutcome(later, DEFAULT_RUNNER_MINING_CONFIG);
+    expect(o.labels).not.toContain('runner_10x');
+    expect(o.labels).not.toContain('runner_5x');
+  });
+
+  it('same-timestamp LIQUIDITY ties are order-insensitive and collapse to the LOWEST', () => {
+    const end = 240;
+    const a: TokenSeriesPoint[] = [
+      pt(0, 8_000, 5_000), pt(30, 9_000, 3_000), pt(90, 8_500, 2_000),
+      { ts: new Date(T0 + end * MIN), priceUsd: null, marketCapUsd: null, liquidityUsd: 0 },
+      { ts: new Date(T0 + end * MIN), priceUsd: null, marketCapUsd: null, liquidityUsd: 5_000 }
+    ];
+    const b = [...a.slice(0, 3), a[4]!, a[3]!]; // reversed terminal ties
+    const oa = computeTokenOutcome(a, DEFAULT_RUNNER_MINING_CONFIG);
+    const ob = computeTokenOutcome(b, DEFAULT_RUNNER_MINING_CONFIG);
+    expect(oa).toEqual(ob);
+    expect(oa.finalLiquidityUsd).toBe(0); // conservative: never credit ambiguous tradeability
+    expect(oa.labels).toContain('failed_launch');
+    expect(oa.dataQuality.join()).toMatch(/contradictory same-timestamp liquidity/);
+  });
+
+  it('entry.ts equal-mcap ties with differing price/liquidity are order-insensitive + penalized', () => {
+    const buyTs = new Date(T0 + 12 * MIN);
+    const p1: TokenSeriesPoint = { ts: new Date(T0 + 10 * MIN), priceUsd: 1e-5, marketCapUsd: 30_000, liquidityUsd: 9_000 };
+    const p2: TokenSeriesPoint = { ts: new Date(T0 + 10 * MIN), priceUsd: 2e-5, marketCapUsd: 30_000, liquidityUsd: 4_000 };
+    const a = computeEntryContext(buyTs, [pt(0, 10_000), p1, p2], DEFAULT_RUNNER_MINING_CONFIG);
+    const b = computeEntryContext(buyTs, [pt(0, 10_000), p2, p1], DEFAULT_RUNNER_MINING_CONFIG);
+    expect(a).toEqual(b); // ANY field order-dependence is a bug
+    const unambiguous = computeEntryContext(buyTs, [pt(0, 10_000), p1], DEFAULT_RUNNER_MINING_CONFIG);
+    expect(a.valuationConfidence).toBeCloseTo(unambiguous.valuationConfidence / 2, 10);
   });
 
   it('a terminal liquidity-death point WITHOUT valid mcap still counts as liquidity evidence', () => {
@@ -276,8 +324,10 @@ describe('no-lookahead wall is ARCHITECTURAL (static leak guard)', () => {
       path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'runnermining', 'entry.ts'),
       'utf-8'
     );
-    // Only ./types may be imported.
-    const imports = [...src.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);
+    // Only ./types may be imported — BOTH quote styles (a double-quoted
+    // import must not slip past the guard; Codex round 3).
+    const imports = [...src.matchAll(/from\s+['"]([^'"]+)['"]/g)].map((m) => m[1]);
+    expect(imports.length).toBeGreaterThan(0);
     expect(imports.every((i) => i === './types')).toBe(true);
     // No reference to the outcome side at all.
     expect(src).not.toMatch(/TokenOutcome|computeTokenOutcome|RunnerOutcomeLabel|\.\/outcome/);

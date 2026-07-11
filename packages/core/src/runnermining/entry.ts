@@ -81,10 +81,26 @@ export function computeEntryContext(
     belowFocusCeiling: null
   };
 
-  // Nearest strictly-prior point carrying a valid mcap. Ties on the same
-  // timestamp resolve to the HIGHEST mcap, deterministically (input order
-  // must never change the answer) and conservatively (never claim a lower
-  // entry than the ambiguous data supports).
+  // Nearest strictly-prior point carrying a valid mcap. Same-timestamp ties
+  // resolve over the FULL tuple, deterministically (input order must never
+  // change ANY output field — Codex round 3) and conservatively:
+  //   mcap DESC (never claim a lower entry than ambiguous data supports),
+  //   then priceUsd DESC (nulls last), then liquidityUsd ASC (nulls last —
+  //   never credit tradeability ambiguity doesn't support).
+  // ANY differing field at the same ts marks the data ambiguous (confidence
+  // penalty), not just differing mcap.
+  const cmpDesc = (a: number | null, b: number | null): number => {
+    if (a === b) return 0;
+    if (a === null) return 1; // nulls last
+    if (b === null) return -1;
+    return b - a;
+  };
+  const cmpAsc = (a: number | null, b: number | null): number => {
+    if (a === b) return 0;
+    if (a === null) return 1; // nulls last
+    if (b === null) return -1;
+    return a - b;
+  };
   let best: TokenSeriesPoint | null = null;
   let tieAmbiguity = false;
   for (const p of prior) {
@@ -92,10 +108,18 @@ export function computeEntryContext(
     if (best === null || p.ts.getTime() > best.ts.getTime()) {
       best = p;
       tieAmbiguity = false;
-    } else if (p.ts.getTime() === best.ts.getTime() && p.marketCapUsd !== best.marketCapUsd) {
-      tieAmbiguity = true;
-      if (p.marketCapUsd > best.marketCapUsd!) best = p;
+      continue;
     }
+    if (p.ts.getTime() !== best.ts.getTime()) continue;
+    // Same-ts tie: ambiguous when ANY reported field differs.
+    if (p.marketCapUsd !== best.marketCapUsd || p.priceUsd !== best.priceUsd || p.liquidityUsd !== best.liquidityUsd) {
+      tieAmbiguity = true;
+    }
+    const order =
+      cmpDesc(p.marketCapUsd, best.marketCapUsd) ||
+      cmpDesc(p.priceUsd, best.priceUsd) ||
+      cmpAsc(p.liquidityUsd, best.liquidityUsd);
+    if (order < 0) best = p; // p wins the deterministic tuple order
   }
   if (best === null) return unavailable;
 
