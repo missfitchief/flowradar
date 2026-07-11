@@ -31,6 +31,7 @@ export * from './cluster/unionFind';
 export * from './cluster/clusterer';
 export * from './rotation/matcher';
 export * from './flow/sankeyBuilder';
+export * from './flow/snapshotPersistence';
 export * from './backtest/evaluate';
 export * from './backtest/summarize';
 export * from './backtest/replay';
