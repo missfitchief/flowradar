@@ -96,16 +96,28 @@ async function main(): Promise<void> {
       const reopened = await prisma.lineageExpansionNode.updateMany({
         where: { id: root.id, status: 'done' }, data: { status: 'pending', cursor: null }
       });
-      if (reopened.count !== 1) { console.log(JSON.stringify({ root: root.id, pass, skipped: 'node not reopenable (claimed elsewhere?)' })); break; }
+      if (reopened.count !== 1) {
+        // A root that cannot complete both passes is a VIOLATION, not a skip —
+        // otherwise the smoke could exit 0 having replayed nothing (Codex).
+        console.log(JSON.stringify({ root: root.id, pass, violation: 'node not reopenable (claimed elsewhere?) — replay incomplete' }));
+        anyViolation = true;
+        break;
+      }
       // rootId restriction: the engine processes ONLY this root's subtree —
       // the global backlog cannot displace the replay (Codex rev-3 fix).
       const r = await runLineageExpansion(prisma, provider, settings, { rootId: root.lineageRootId, maxNodesPerPass: 1, solCurrentPriceUsd: solPrice });
       results.push(r);
       totalErrors += r.errors;
+      // ASSERT the pass actually expanded the reopened node — the proof that
+      // both passes ran is enforced, not just logged (Codex).
+      if (r.nodesExpanded !== 1) {
+        console.log(JSON.stringify({ root: root.id, pass, violation: `nodesExpanded=${r.nodesExpanded}, expected 1 — replay did not run` }));
+        anyViolation = true;
+      }
       sampleRss();
       scopes.push(await rootScope(root.lineageRootId, root.walletAddress));
     }
-    if (results.length < 2) continue;
+    if (results.length < 2) { anyViolation = true; continue; }
     const pass1Delta = { edges: scopes[1]!.edges - scopes[0]!.edges, rels: scopes[1]!.rels - scopes[0]!.rels, subs: scopes[1]!.subs - scopes[0]!.subs };
     const replayDelta = { edges: scopes[2]!.edges - scopes[1]!.edges, rels: scopes[2]!.rels - scopes[1]!.rels, subs: scopes[2]!.subs - scopes[1]!.subs };
     // Root-scoped idempotency: tolerance 1 edge for an on-chain tx landing
