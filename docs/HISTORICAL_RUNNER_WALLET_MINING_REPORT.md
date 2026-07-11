@@ -34,8 +34,10 @@ engine**, on a real token (`DRAM…Y4Cw`):
   multiples may be understated."*
 - Market cap uses `current_supply_assumption` (labeled; historical supply has no source
   yet — unknown stays unknown).
-- Liquidity is current-only in the pilot (constant across the series) — illiquidity
-  labels are explicitly not meaningful there and were not claimed.
+- Historical liquidity is UNKNOWN and stored as `null` in the pilot series (current
+  liquidity is reported separately, never injected into history) — liquidity-dependent
+  labels are correctly unavailable rather than fabricated. Series points are timestamped
+  at candle END, so a candle's close can never leak into an entry inside that candle.
 - Top-trader ENTRY reconstruction was blocked by the plan-gated owner-scoped endpoint —
   the production path for Task 3 is **Helius wallet history** (already live in the repo)
   joined against Birdeye OHLCV series.

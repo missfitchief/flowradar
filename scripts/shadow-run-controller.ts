@@ -153,11 +153,15 @@ async function checkpoint(s: RunState, label: string): Promise<void> {
 }
 
 function spawnWorker(s: RunState, log: string): number | null {
-  const child = spawn('npx', ['tsx', 'apps/worker/src/index.ts'], {
+  // Direct node + resolved tsx CLI, NO shell (Codex rev-2 C#1): with
+  // shell:true the tracked pid is the cmd.exe wrapper, which the node-image
+  // pid guard then refuses to kill. This way the tracked pid IS node.
+  const tsxCli = path.join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  const child = spawn(process.execPath, [tsxCli, 'apps/worker/src/index.ts'], {
     cwd: REPO_ROOT,
     env: { ...process.env, MOCK_MODE: 'false', WALLET_ACTIVITY_MAX_WALLETS: s.env.walletBudget, HELIUS_RPS: s.env.heliusRps, WORKER_FAST: '' },
     stdio: ['ignore', 'pipe', 'pipe'],
-    shell: true,
+    shell: false,
     detached: false
   });
   child.stdout.on('data', (d: Buffer) => appendFileSync(log, d));
@@ -170,18 +174,30 @@ async function start(): Promise<void> {
   const daysIdx = process.argv.indexOf('--days');
   const days = daysIdx > -1 ? Math.max(1, Math.min(14, Number(process.argv[daysIdx + 1]) || 7)) : 7;
 
-  // Duplicate-run guard applies to BOTH fresh starts and --resume: a live
-  // CONTROLLER (which may be about to restart a temporarily-dead worker) or
-  // a live worker on the active run blocks a second start (Codex C#3).
-  const existing = activeRunId();
-  if (existing) {
-    const st = loadState(existing);
-    const controllerLive = st.controllerPid !== null && pidAlive(st.controllerPid);
-    const workerLive = st.workerPid !== null && pidAlive(st.workerPid);
-    if (st.status === 'running' && (controllerLive || workerLive)) {
-      throw new Error(`run ${existing} is ACTIVE (controller ${controllerLive ? 'alive' : 'dead'}, worker ${workerLive ? 'alive' : 'dead'}) — use status/stop; never two runs`);
+  // ATOMIC duplicate-run guard (Codex rev-2 C#4): the ACTIVE file is claimed
+  // with an EXCLUSIVE create ('wx'). A stale claim (run not running, or no
+  // live controller AND no live worker) is removed and re-claimed once; a
+  // live claim always throws. Applies to fresh starts AND --resume.
+  const claimActive = (runId: string): void => {
+    const attempt = (): void => writeFileSync(ACTIVE_FILE, runId, { flag: 'wx' });
+    try { attempt(); return; } catch { /* exists — evaluate below */ }
+    const existing = activeRunId();
+    if (existing) {
+      try {
+        const st = loadState(existing);
+        const controllerLive = st.controllerPid !== null && pidAlive(st.controllerPid);
+        const workerLive = st.workerPid !== null && pidAlive(st.workerPid);
+        if (st.status === 'running' && (controllerLive || workerLive)) {
+          throw new Error(`run ${existing} is ACTIVE (controller ${controllerLive ? 'alive' : 'dead'}, worker ${workerLive ? 'alive' : 'dead'}) — use status/stop; never two runs`);
+        }
+      } catch (e) {
+        if (e instanceof Error && e.message.includes('never two runs')) throw e;
+        // unreadable/corrupt state for a claimed id: treat as stale
+      }
     }
-  }
+    rmSync(ACTIVE_FILE, { force: true });
+    attempt(); // a second EEXIST here means a genuine concurrent start — throw
+  };
 
   let s: RunState;
   if (resumeIdx > -1) {
@@ -191,7 +207,7 @@ async function start(): Promise<void> {
     s.notes.push(`resumed at ${new Date().toISOString()}`);
     s.status = 'running';
   } else {
-    const runId = `shadow-${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12)}`;
+    const runId = `shadow-${new Date().toISOString().replace(/[-:T.]/g, "").slice(0, 14)}-${process.pid}`; // seconds + pid: collision-proof
     mkdirSync(path.join(RUNS_DIR, runId), { recursive: true });
     s = {
       runId,
@@ -213,7 +229,7 @@ async function start(): Promise<void> {
   }
   s.controllerPid = process.pid;
   if (existsSync(stopSentinel(s.runId))) rmSync(stopSentinel(s.runId));
-  writeFileSync(ACTIVE_FILE, s.runId);
+  claimActive(s.runId); // atomic exclusive claim (throws on a live duplicate)
 
   // ITEMIZED provider projection (Codex C#8): cadence read from the stored
   // settings row (not hardcoded), first-cycle backfill itemized, other
@@ -229,16 +245,13 @@ async function start(): Promise<void> {
       heliusRps: Number(s.env.heliusRps),
       walletActivityCadenceSec: cadenceSec,
       steadyStateRequestsPerDay: steadyDaily,
-      firstCycleBackfillExtra: `up to ${budget * 4} additional page requests in the first coverage rotation (5 pages/wallet vs 1)`,
-      alsoConsumingHelius: 'lineageExpansion + monitoringScheduler reopens + flowScoring risk checks (shared rate limiter, additional volume not in the above number)'
+      firstFullRotationBackfillExtra: `up to 4 extra page requests PER POLLABLE WALLET (~${(s.baseline.observation ?? 0) + (s.baseline.eligible ?? 0)} wallets) across the first full coverage rotation — not just the first cycle's ${budget}`,
+      alsoConsumingHelius: 'lineageExpansion + monitoringScheduler reopens (shared walletActivity limiter) and flowScoring risk checks (SEPARATE limiter) — additional volume not in the steady-state number'
     },
     note: 'normal worker speeds; WORKER_FAST blank; stop anytime: shadow-run-controller stop'
   }, null, 2));
 
   const log = path.join(RUNS_DIR, s.runId, 'worker.log');
-  s.workerPid = spawnWorker(s, log);
-  saveState(s);
-  console.log(JSON.stringify({ workerStarted: true, pid: s.workerPid, log }));
 
   let lastCheckpointDay = new Date().toISOString().slice(0, 10);
   let finished = false;
@@ -247,12 +260,15 @@ async function start(): Promise<void> {
     finished = true;
     console.log(JSON.stringify({ shuttingDown: reason }));
     const killed = s.workerPid === null ? true : await killWorkerVerified(s.workerPid);
-    s.status = reason === 'end-target-reached' ? 'completed' : killed ? 'stopped' : 'stop-failed';
+    // An UNVERIFIED kill is NEVER masked (Codex rev-2 C#2): the run is
+    // stop-failed regardless of reason, and ACTIVE is NOT cleared so
+    // status/stop keep pointing at the live problem.
+    s.status = !killed ? 'stop-failed' : reason === 'end-target-reached' ? 'completed' : 'stopped';
     if (!killed) s.notes.push(`WORKER KILL UNVERIFIED (pid ${s.workerPid}) — kill manually: taskkill /PID ${s.workerPid} /T /F`);
     s.stoppedAt = new Date().toISOString();
     saveState(s);
     await checkpoint(s, `final-${reason}`);
-    writeFileSync(ACTIVE_FILE, '');
+    if (killed) writeFileSync(ACTIVE_FILE, '');
     await prisma.$disconnect();
     process.exit(killed ? 0 : 1);
   };
@@ -261,8 +277,14 @@ async function start(): Promise<void> {
   process.on('uncaughtException', (e) => { console.error('controller uncaught:', e); void shutdown('controller-error'); });
   process.on('unhandledRejection', (e) => { console.error('controller rejection:', e); void shutdown('controller-error'); });
 
-  // Supervision loop inside try/finally: ANY escape kills the worker.
+  // Handlers are installed and shutdown is defined BEFORE the worker exists
+  // (Codex rev-2 C#3): spawn + state-save happen INSIDE the try, so any
+  // escape — even between spawn and the first loop tick — hits finally.
   try {
+    s.workerPid = spawnWorker(s, log);
+    saveState(s);
+    console.log(JSON.stringify({ workerStarted: true, pid: s.workerPid, log }));
+
     let sinceHeartbeatSec = 0;
     for (;;) {
       await new Promise((r) => setTimeout(r, SENTINEL_POLL_SEC * 1000));
@@ -373,10 +395,14 @@ async function report(): Promise<void> {
     for (const [label, hours] of [['h1', 1], ['h6', 6], ['h24', 24], ['h72', 72]] as const) {
       const end = new Date(t0.getTime() + hours * 3600_000);
       if (end > new Date()) { row[label] = 'not yet elapsed'; continue; }
+      // Coverage endpoint must be FRESH: a snapshot within 1h AFTER the
+      // horizon end (Codex rev-2 C#5 — a snapshot days later proves nothing
+      // about coverage through the horizon).
       const covered = await prisma.tokenMarketSnapshot.findFirst({
-        where: { tokenId: sig.tokenId, ts: { gte: end }, ...notSynthetic }, select: { id: true }
+        where: { tokenId: sig.tokenId, ts: { gte: end, lte: new Date(end.getTime() + 3600_000) }, ...notSynthetic },
+        select: { id: true }
       });
-      if (!covered) { row[label] = 'elapsed but snapshot coverage incomplete — not reported'; continue; }
+      if (!covered) { row[label] = 'elapsed but no fresh post-horizon snapshot (within 1h of horizon end) — not reported'; continue; }
       const pts = await prisma.tokenMarketSnapshot.findMany({
         where: { tokenId: sig.tokenId, ts: { gt: t0, lte: end }, marketCapUsd: { gt: 0 }, ...notSynthetic },
         orderBy: { ts: 'asc' },
