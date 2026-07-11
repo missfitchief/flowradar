@@ -26,13 +26,22 @@
 9. **`realized_pnl_30d`** (USD) — **min $43,044 / median $88,823 / max $1,659,760.**
 10. **`trade_count_30d`** — **min 22 / median 520 / max 56,026.**
 11. **Suspicious win_rate artifacts (`winrate_provider_artifact`, ≥0.99) in the approved 500:** **21** — all inside the `cross_source_confirmed` tier (kept for two-provider confirmation despite the 100%-win-rate flag; spot-verify before trusting).
-12. **Exact import command (DO NOT RUN — awaiting your approval):**
+12. **Import command — OBSERVATION-ONLY path (superseded 2026-07-11, pre-public-accumulation refocus):**
     ```
-    # dev server running + DB reachable; importer .toUpperCase()s chain, so 'solana' is accepted
-    curl -sS -F "file=@<scratchpad>/wallet-universe-import-approved-500.csv" \
-      http://localhost:<web-port>/api/import
+    npx tsx scripts/import-observation-universe.ts data/wallet-universe/wallet-universe-import-approved-500.csv 500 --apply
     ```
-    (or upload `wallet-universe-import-approved-500.csv` via the `/wallets/import` UI). Import upserts each as `Wallet(isWatched=true)` + inserts `WalletStats(source='csv')`.
+    **NEVER import this universe batch via `/api/import` or the `/wallets/import` UI** — that
+    path is the OPERATOR-VOUCHED importer: it grants `signal_eligible`, sets `isWatched=true`,
+    and writes `WalletStats(source='csv')`, i.e. it would hand 500 provider-claimed wallets
+    early smart-money votes AND perturb FlowScore's walletQuality averages. The observation
+    path imports every wallet as `observation_only` with provider stats in the shadow
+    `ObservationProviderSnapshot` model (zero signal weight, zero FlowScore impact).
+    *Approval semantics:* "import-approved" means approved for **observation import**; the
+    `operator_pending_review` tag on every row stays accurate — provider metrics remain
+    provider_claimed until locally verified, and individual wallets only ever become
+    signal_eligible later via the existing candidate-validation/operator promotion paths.
+    (Executed 2026-07-11: stages 100/250/500 + replay, all invariants held — 499 created,
+    1 preserved, 500 shadow snapshots, signal_eligible count unchanged.)
 
 ---
 
