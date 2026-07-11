@@ -127,8 +127,9 @@ const IntervalsSchema = z.object({
   backtestHours: z.number(),
   /** Shadow stealth-accumulation pass cadence (P2, 2026-07-11). Additive with
    *  a default so stored settings rows without it keep parsing; a job
-   *  interval, NOT a signal threshold. */
-  stealthAccumulationSec: z.number().default(300)
+   *  interval, NOT a signal threshold. Floor 30s: PUT /api/settings must not
+   *  be able to configure a near-zero worker loop (Codex P2 review). */
+  stealthAccumulationSec: z.number().min(30).default(300)
 });
 
 // Task 34 (Wave 4.5, Spec §5b) — external smart-wallet source connectors.

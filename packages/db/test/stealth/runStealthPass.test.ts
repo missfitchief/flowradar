@@ -265,4 +265,44 @@ d('runStealthPass (persistence + idempotency + invariants)', () => {
     expect(res.tokensEvaluated).toBe(0);
     expect(res.snapshotsWritten).toBe(0);
   });
+
+  it('SELL-ONLY eligible flow (Infinity ratio) persists cleanly with non-finite -> null (Codex #1)', async () => {
+    const token = await mkToken('INF');
+    const w = await mkWallet('signal_eligible', 95);
+    await mkTrade(w.id, token.id, 'SELL', 5000, 5); // sell with zero buys => ratio Infinity in-memory
+    const res = await runStealthPass(prisma, { now: NOW, tokenLimit: 10, bucketSec: 300 });
+    expect(res.errors).toBe(0);
+    expect(res.snapshotsWritten).toBe(1);
+    const snap = await prisma.stealthSnapshot.findFirst({ where: { tokenId: token.id } });
+    const m = snap!.metrics as { eligibleSellToBuyRatio24h?: number | null };
+    expect(m.eligibleSellToBuyRatio24h).toBeNull(); // honest unknown, never a coerced number
+    expect(snap!.explanation).not.toMatch(/Infinity|NaN|undefined/);
+  });
+
+  it('OUT-OF-ORDER buckets: writing an earlier bucket repairs the successor transition chain (Codex #4)', async () => {
+    const token = await mkToken('OOO');
+    const w = await mkWallet('signal_eligible', 96);
+    await mkTrade(w.id, token.id, 'BUY', 5000, 2);
+    const later = new Date(NOW.getTime() + 10 * 60_000);
+    await runStealthPass(prisma, { now: later, tokenLimit: 10, bucketSec: 300 }); // bucket N+2 first
+    await runStealthPass(prisma, { now: NOW, tokenLimit: 10, bucketSec: 300 }); // then bucket N
+    const rows = await prisma.stealthSnapshot.findMany({ where: { tokenId: token.id }, orderBy: { bucketTs: 'asc' } });
+    expect(rows).toHaveLength(2);
+    expect(rows[1]!.previousState).toBe(rows[0]!.state); // chain repaired
+  });
+
+  it('retention prune: snapshots older than 14 days are removed by the pass', async () => {
+    const token = await mkToken('OLD');
+    const w = await mkWallet('signal_eligible', 97);
+    await mkTrade(w.id, token.id, 'BUY', 5000, 2);
+    const ancient = new Date(NOW.getTime() - 20 * 24 * 3600_000);
+    await prisma.stealthSnapshot.create({
+      data: {
+        tokenId: token.id, chain: 'SOLANA', state: 'WATCHING', stateChanged: false, stealthScore: 0,
+        metrics: {}, evidence: {}, explanation: 'old', invalidationReasons: [], bucketTs: ancient, computedAt: ancient
+      }
+    });
+    await runStealthPass(prisma, { now: NOW, tokenLimit: 10, bucketSec: 300 });
+    expect(await prisma.stealthSnapshot.count({ where: { tokenId: token.id, bucketTs: ancient } })).toBe(0);
+  });
 });

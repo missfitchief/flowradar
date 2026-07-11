@@ -36,17 +36,41 @@ import {
 
 const WINDOW_MINUTES: Record<StealthWindow, number> = { '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '24h': 1440 };
 const DAY_MS = 24 * 3600 * 1000;
+/** Snapshots older than this are pruned each pass (bounded retention). */
+const RETENTION_DAYS = 14;
+
+/**
+ * JSONB cannot represent Infinity/NaN (Codex P2 #1): non-finite numbers are
+ * persisted as null — an honest "not representable/unknown" — recursively.
+ * The in-memory engine result is untouched.
+ */
+export function jsonSafe<T>(value: T): T {
+  if (typeof value === 'number') return (Number.isFinite(value) ? value : null) as T;
+  if (Array.isArray(value)) return value.map(jsonSafe) as T;
+  if (value !== null && typeof value === 'object' && !(value instanceof Date)) {
+    return Object.fromEntries(Object.entries(value as object).map(([k, v]) => [k, jsonSafe(v)])) as T;
+  }
+  return value;
+}
 
 type Cohort = 'eligible' | 'observation' | 'publicKol' | 'crowd';
 
-function cohortOf(status: string): Cohort | null {
+function cohortOf(status: string | undefined): Cohort | null {
   switch (status) {
     case 'signal_eligible': return 'eligible';
     case 'observation_only': return 'observation';
     case 'public_kol':
     case 'public_promoter': return 'publicKol';
     case 'copytrader': return 'crowd';
-    default: return null; // bot_or_service / excluded: dropped from every cohort
+    case 'bot_or_service':
+    case 'excluded':
+      return null; // operational noise: dropped from every cohort
+    default:
+      // MISSING/unknown status (FK makes this near-impossible, but rule 9:
+      // missing = unknown, never silently dropped as if safe) — the honest
+      // conservative cohort is observation: zero signal weight, still counted
+      // in totals. Mirrors aggregateWindow's canonical fallback direction.
+      return 'observation';
   }
 }
 
@@ -85,61 +109,76 @@ export async function fetchStealthInputs(
   const tokenLimit = Math.max(1, Math.min(opts.tokenLimit ?? 50, 500));
   const since = new Date(now.getTime() - DAY_MS);
 
-  // Bounded token selection: tokens with trade activity in the last 24h,
-  // most recent first.
-  const active = await prisma.walletTokenTrade.groupBy({
-    by: ['tokenId'],
-    where: { ts: { gte: since, lte: now }, action: { in: ['BUY', 'SELL'] } },
-    _max: { ts: true },
-    orderBy: { _max: { ts: 'desc' } },
-    take: tokenLimit
-  });
-  if (active.length === 0) return [];
-  const tokenIds = active.map((t) => t.tokenId);
-  const tokens = await prisma.token.findMany({ where: { id: { in: tokenIds } }, select: { id: true, chain: true } });
-  const chainOf = new Map(tokens.map((t) => [t.id, t.chain]));
+  // ONE consistent read snapshot (RepeatableRead): entityClustering rebuilds
+  // memberships delete-then-recreate without a wrapping transaction, so an
+  // overlapping pass could otherwise read a torn membership set and inflate
+  // "independent clusters" (Codex P2 #2). Every read below sees one snapshot.
+  const { tokenIds, chainOf, trades, statusOf, clusterOf, firstBuyTs, hotWallets, confluence } =
+    await prisma.$transaction(async (tx) => {
+      // Bounded token selection: tokens with trade activity in the last 24h
+      // (strictly after now-24h, matching the per-window `> from` semantics —
+      // a boundary-only trade can no longer select a token it won't count
+      // for), most recent first.
+      const active = await tx.walletTokenTrade.groupBy({
+        by: ['tokenId'],
+        where: { ts: { gt: since, lte: now }, action: { in: ['BUY', 'SELL'] } },
+        _max: { ts: true },
+        orderBy: { _max: { ts: 'desc' } },
+        take: tokenLimit
+      });
+      const tokenIds = active.map((t) => t.tokenId);
+      if (tokenIds.length === 0) {
+        return { tokenIds, chainOf: new Map<string, string>(), trades: [] as { tokenId: string; walletId: string; action: string; amountUsd: unknown; ts: Date }[], statusOf: new Map<string, string>(), clusterOf: new Map<string, string>(), firstBuyTs: new Map<string, number>(), hotWallets: new Set<string>(), confluence: [] as { tokenId: string | null; snapshotType: string; status: string }[] };
+      }
+      const tokens = await tx.token.findMany({ where: { id: { in: tokenIds } }, select: { id: true, chain: true } });
+      const chainOf = new Map<string, string>(tokens.map((t) => [t.id, t.chain]));
 
-  // One bounded trade fetch for all selected tokens.
-  const trades = await prisma.walletTokenTrade.findMany({
-    where: { tokenId: { in: tokenIds }, ts: { gte: since, lte: now }, action: { in: ['BUY', 'SELL'] } },
-    select: { tokenId: true, walletId: true, action: true, amountUsd: true, ts: true }
-  });
-  const walletIds = [...new Set(trades.map((t) => t.walletId))];
+      // One bounded trade fetch for all selected tokens.
+      const trades = await tx.walletTokenTrade.findMany({
+        where: { tokenId: { in: tokenIds }, ts: { gt: since, lte: now }, action: { in: ['BUY', 'SELL'] } },
+        select: { tokenId: true, walletId: true, action: true, amountUsd: true, ts: true }
+      });
+      const walletIds = [...new Set(trades.map((t) => t.walletId))];
 
-  const wallets = await prisma.wallet.findMany({ where: { id: { in: walletIds } }, select: { id: true, status: true } });
-  const statusOf = new Map(wallets.map((w) => [w.id, w.status]));
+      const wallets = await tx.wallet.findMany({ where: { id: { in: walletIds } }, select: { id: true, status: true } });
+      const statusOf = new Map<string, string>(wallets.map((w) => [w.id, w.status]));
 
-  const clusterRows = await prisma.entityClusterWallet.findMany({
-    where: { walletId: { in: walletIds } },
-    select: { walletId: true, clusterId: true }
-  });
-  const clusterOf = new Map(clusterRows.map((c) => [c.walletId, c.clusterId]));
+      const clusterRows = await tx.entityClusterWallet.findMany({
+        where: { walletId: { in: walletIds } },
+        select: { walletId: true, clusterId: true }
+      });
+      const clusterOf = new Map<string, string>(clusterRows.map((c) => [c.walletId, c.clusterId]));
 
-  // First-EVER buy per (wallet, token) among the involved wallets — needed
-  // for the freshBuyers definition ("first-ever buy falls in this window").
-  const firstBuys = await prisma.walletTokenTrade.groupBy({
-    by: ['tokenId', 'walletId'],
-    where: { tokenId: { in: tokenIds }, walletId: { in: walletIds }, action: 'BUY' },
-    _min: { ts: true }
-  });
-  const firstBuyTs = new Map(firstBuys.map((f) => [`${f.tokenId}:${f.walletId}`, f._min.ts!.getTime()]));
+      // First-EVER buy per (wallet, token) among the involved wallets — needed
+      // for the freshBuyers definition ("first-ever buy falls in this window").
+      // Bounded by (tokenIds, walletIds); table-wide in TIME by definition of
+      // "first ever" — index (tokenId, walletId) keeps it cheap.
+      const firstBuys = await tx.walletTokenTrade.groupBy({
+        by: ['tokenId', 'walletId'],
+        where: { tokenId: { in: tokenIds }, walletId: { in: walletIds }, action: 'BUY' },
+        _min: { ts: true }
+      });
+      const firstBuyTs = new Map<string, number>(firstBuys.map((f) => [`${f.tokenId}:${f.walletId}`, f._min.ts!.getTime()]));
 
-  // Active fresh_receiver_hot wallets among the involved buyers.
-  const hotSubs = await prisma.monitoringSubscription.findMany({
-    where: { walletId: { in: walletIds }, priority: 'fresh_receiver_hot', active: true },
-    select: { walletId: true }
-  });
-  const hotWallets = new Set(hotSubs.map((s) => s.walletId));
+      // Active fresh_receiver_hot wallets among the involved buyers.
+      const hotSubs = await tx.monitoringSubscription.findMany({
+        where: { walletId: { in: walletIds }, priority: 'fresh_receiver_hot', active: true },
+        select: { walletId: true }
+      });
+      const hotWallets = new Set<string>(hotSubs.map((s) => s.walletId));
 
-  // External-confluence health notes per token (shadow evidence, optional):
-  // any recent NON-ok snapshot is surfaced as a caveat — absence/unavailable
-  // is never treated as safe (existing confluence honesty rule).
-  const confluence = await prisma.tokenConfluenceSnapshot.findMany({
-    where: { tokenId: { in: tokenIds }, status: { not: 'ok' } },
-    orderBy: { observedAt: 'desc' },
-    take: 3 * tokenIds.length,
-    select: { tokenId: true, snapshotType: true, status: true }
-  });
+      // External-confluence health notes (shadow evidence): recent (7d)
+      // NON-ok snapshots — absence/unavailable is never treated as safe.
+      // Capped per token AFTER fetch; the fetch itself is time-bounded.
+      const confluence = await tx.tokenConfluenceSnapshot.findMany({
+        where: { tokenId: { in: tokenIds }, status: { not: 'ok' }, observedAt: { gte: new Date(now.getTime() - 7 * DAY_MS) } },
+        orderBy: { observedAt: 'desc' },
+        take: 3 * tokenIds.length,
+        select: { tokenId: true, snapshotType: true, status: true }
+      });
+      return { tokenIds, chainOf, trades, statusOf, clusterOf, firstBuyTs, hotWallets, confluence };
+    }, { isolationLevel: 'RepeatableRead' });
+  if (tokenIds.length === 0) return [];
 
   const results: StealthTokenInput[] = [];
   for (const tokenId of tokenIds) {
@@ -185,6 +224,7 @@ export async function fetchStealthInputs(
     const freshFundedReceiverBuyers = [...buyers24h].filter((w) => hotWallets.has(w)).length;
     const conflictNotes = confluence
       .filter((c) => c.tokenId === tokenId)
+      .slice(0, 3) // per-token cap — one noisy token can't crowd out others
       .map((c) => `${c.snapshotType}: ${c.status}`);
 
     const chain = (chainOf.get(tokenId) ?? 'SOLANA') as 'SOLANA' | 'BSC';
@@ -261,6 +301,13 @@ export async function runStealthPass(prisma: PrismaClient, opts: RunStealthPassO
   const bucketSec = Math.max(60, opts.bucketSec ?? 300);
   const bucketTs = new Date(Math.floor(now.getTime() / (bucketSec * 1000)) * bucketSec * 1000);
 
+  // Bounded retention: without pruning, per-bucket snapshots grow without
+  // limit (up to 288/day/token at the default cadence). 14 days of lifecycle
+  // history is ample for shadow evaluation.
+  await prisma.stealthSnapshot.deleteMany({
+    where: { bucketTs: { lt: new Date(now.getTime() - RETENTION_DAYS * DAY_MS) } }
+  });
+
   const inputs = await fetchStealthInputs(prisma, { now, tokenLimit: opts.tokenLimit });
   const result: StealthPassResult = { tokensEvaluated: 0, snapshotsWritten: 0, byState: {}, errors: 0 };
 
@@ -277,34 +324,38 @@ export async function runStealthPass(prisma: PrismaClient, opts: RunStealthPassO
         select: { state: true }
       });
 
+      // JSONB cannot hold Infinity/NaN — jsonSafe maps non-finite -> null
+      // (honest unknown) so the write never silently coerces or rejects.
+      const fields = {
+        state: r.state,
+        previousState: prev?.state ?? null,
+        stateChanged: prev !== null && prev.state !== r.state,
+        stealthScore: Number.isFinite(r.stealthScore) ? r.stealthScore : 0,
+        metrics: jsonSafe(r.metrics) as unknown as Prisma.InputJsonValue,
+        evidence: jsonSafe(evidence) as unknown as Prisma.InputJsonValue,
+        explanation: buildExplanation(r, evidence),
+        invalidationReasons: buildInvalidationReasons(r) as unknown as Prisma.InputJsonValue,
+        computedAt: now
+      };
       await prisma.stealthSnapshot.upsert({
         where: { tokenId_bucketTs: { tokenId, bucketTs } },
-        create: {
-          tokenId,
-          chain,
-          state: r.state,
-          previousState: prev?.state ?? null,
-          stateChanged: prev !== null && prev.state !== r.state,
-          stealthScore: r.stealthScore,
-          metrics: r.metrics as unknown as Prisma.InputJsonValue,
-          evidence: evidence as unknown as Prisma.InputJsonValue,
-          explanation: buildExplanation(r, evidence),
-          invalidationReasons: buildInvalidationReasons(r) as unknown as Prisma.InputJsonValue,
-          bucketTs,
-          computedAt: now
-        },
-        update: {
-          state: r.state,
-          previousState: prev?.state ?? null,
-          stateChanged: prev !== null && prev.state !== r.state,
-          stealthScore: r.stealthScore,
-          metrics: r.metrics as unknown as Prisma.InputJsonValue,
-          evidence: evidence as unknown as Prisma.InputJsonValue,
-          explanation: buildExplanation(r, evidence),
-          invalidationReasons: buildInvalidationReasons(r) as unknown as Prisma.InputJsonValue,
-          computedAt: now
-        }
+        create: { tokenId, chain, bucketTs, ...fields },
+        update: fields
       });
+      // Out-of-order repair (Codex P2 #4): if a LATER bucket already exists
+      // (written by a concurrent/replayed pass), its previousState may predate
+      // this row — repair the immediate successor's transition chain.
+      const nextRow = await prisma.stealthSnapshot.findFirst({
+        where: { tokenId, bucketTs: { gt: bucketTs } },
+        orderBy: { bucketTs: 'asc' },
+        select: { id: true, previousState: true, state: true }
+      });
+      if (nextRow && nextRow.previousState !== r.state) {
+        await prisma.stealthSnapshot.update({
+          where: { id: nextRow.id },
+          data: { previousState: r.state, stateChanged: nextRow.state !== r.state }
+        });
+      }
       result.snapshotsWritten += 1;
     } catch (err) {
       // Per-token isolation: one token's failure never aborts the pass.
