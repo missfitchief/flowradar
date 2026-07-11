@@ -15,8 +15,10 @@ import {
   computeHolderConcentration,
   createHeliusRiskProvider,
   getMintAuthorityFlags,
+  HeliusHttpError,
   HeliusRpcError,
-  isTokenAccountsUnavailableError
+  isTokenAccountsUnavailableError,
+  parseRetryAfterSeconds
 } from '../src/solana/risk';
 import largestAccountsFixture from './fixtures/helius/rpc-token-largest-accounts.json';
 import supplyFixture from './fixtures/helius/rpc-token-supply.json';
@@ -134,6 +136,26 @@ describe('createHeliusRiskProvider', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('throws a typed HeliusHttpError carrying status + parsed Retry-After on a 429 (Task 1 backoff)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('slow down', { status: 429, statusText: 'Too Many Requests', headers: { 'Retry-After': '120' } })
+      )
+    );
+    const provider = createHeliusRiskProvider({ HELIUS_API_KEY: 'test-key-12345' });
+    try {
+      await provider!.getTokenRisk('SOLANA', MINT);
+      throw new Error('expected a throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(HeliusHttpError);
+      const e = err as HeliusHttpError;
+      expect(e.status).toBe(429);
+      expect(e.retryAfterSec).toBe(120);
+    }
+  });
+
   it('never leaks the api key into a thrown error message on a non-2xx response', async () => {
     const secretKey = 'super-secret-key-abc123';
     vi.stubGlobal(
@@ -155,6 +177,24 @@ describe('createHeliusRiskProvider', () => {
 // ---------------------------------------------------------------------------
 // F9: mega-holder / stablecoin mint risk-unavailable handling
 // ---------------------------------------------------------------------------
+
+describe('parseRetryAfterSeconds', () => {
+  const NOW = Date.parse('2026-07-11T12:00:00Z');
+  it('parses delta-seconds', () => {
+    expect(parseRetryAfterSeconds('120', NOW)).toBe(120);
+    expect(parseRetryAfterSeconds('0', NOW)).toBe(0);
+  });
+  it('parses an HTTP-date into seconds-from-now (ceil, non-negative)', () => {
+    expect(parseRetryAfterSeconds('Sat, 11 Jul 2026 12:02:00 GMT', NOW)).toBe(120);
+    // a past date clamps to undefined (never negative)
+    expect(parseRetryAfterSeconds('Sat, 11 Jul 2026 11:00:00 GMT', NOW)).toBeUndefined();
+  });
+  it('returns undefined for absent/garbage values', () => {
+    expect(parseRetryAfterSeconds(null, NOW)).toBeUndefined();
+    expect(parseRetryAfterSeconds('soon', NOW)).toBeUndefined();
+    expect(parseRetryAfterSeconds('-5', NOW)).toBeUndefined();
+  });
+});
 
 describe('isTokenAccountsUnavailableError', () => {
   it('is true only for a -32600 "too many accounts" HeliusRpcError', () => {

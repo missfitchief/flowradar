@@ -58,6 +58,7 @@ import * as marketDataHot from './jobs/marketDataHot';
 import * as marketDataNormal from './jobs/marketDataNormal';
 import * as flowScoring from './jobs/flowScoring';
 import * as entityClustering from './jobs/entityClustering';
+import * as tokenRiskRefresh from './jobs/tokenRiskRefresh';
 import * as moneyFlow from './jobs/moneyFlow';
 import * as bridgeFlow from './jobs/bridgeFlow';
 import * as profitRotation from './jobs/profitRotation';
@@ -183,6 +184,11 @@ async function main(): Promise<void> {
     { name: 'walletActivity', run: walletActivity.run, intervalSec: settings.intervals.walletActivitySec },
     { name: 'marketDataHot', run: marketDataHot.run, intervalSec: settings.intervals.marketDataHotSec },
     { name: 'marketDataNormal', run: marketDataNormal.run, intervalSec: settings.intervals.marketDataNormalSec },
+    // tokenRiskRefresh (Task 1, Helius 429 fix): the ONE bounded job that
+    // fetches token risk and keeps the TokenRiskSnapshot cache warm. flowScoring
+    // and entityClustering read that cache instead of calling Helius per token
+    // per pass. Bounded per run by intervals.tokenRiskRefreshBatch.
+    { name: 'tokenRiskRefresh', run: tokenRiskRefresh.run, intervalSec: settings.intervals.tokenRiskRefreshSec },
     { name: 'flowScoring', run: flowScoring.run, intervalSec: settings.intervals.flowScoringSec },
     { name: 'entityClustering', run: entityClustering.run, intervalSec: settings.intervals.entityClusteringSec },
     { name: 'moneyFlow', run: moneyFlow.run, intervalSec: settings.intervals.moneyFlowSec },
