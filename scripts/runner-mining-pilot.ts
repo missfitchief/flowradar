@@ -67,11 +67,18 @@ async function main(): Promise<void> {
   const supply = overview?.circulatingSupply ?? overview?.totalSupply ?? null;
   const supplySource = supply !== null ? 'current_supply_assumption' : 'unavailable';
 
+  // Candle CLOSE prices are only knowable at candle END — timestamp each
+  // point at unixTime + interval so computeEntryContext can never hand a buy
+  // inside a candle that candle's own close (Codex P5 #1: no lookahead).
+  // Historical liquidity is UNKNOWN (null) — repeating CURRENT liquidity
+  // across history would let present-day liquidity mint historical
+  // illiquidity labels (Codex P5 #2); current liquidity reported separately.
+  const CANDLE_SEC = 3600; // matches type=1H
   const series: TokenSeriesPoint[] = ohlcv.items.map((c) => ({
-    ts: new Date(c.unixTime * 1000),
+    ts: new Date((c.unixTime + CANDLE_SEC) * 1000),
     priceUsd: Number.isFinite(c.c) ? c.c : null,
     marketCapUsd: supply !== null && Number.isFinite(c.c) ? c.c * supply : null, // labeled assumption
-    liquidityUsd: overview?.liquidity ?? null // current liquidity only — flagged below
+    liquidityUsd: null // historical liquidity has no source — unknown stays unknown
   }));
 
   // 4. Outcome (window-relative — NOT launch-anchored; engine caps confidence).
@@ -107,7 +114,8 @@ async function main(): Promise<void> {
     token: { mint, symbol },
     seriesPoints: series.length,
     supplySource,
-    liquidityCaveat: 'liquidity is CURRENT-only (constant across series) — illiquidity labels not meaningful in this pilot',
+    currentLiquidityUsd: overview?.liquidity ?? null, // reported separately, never injected into history
+    liquidityCaveat: 'historical liquidity unknown (null in series) — liquidity-dependent labels correctly unavailable in this pilot',
     outcome: {
       labels: outcome.labels,
       baselineMcapUsd: outcome.baselineMcapUsd,
