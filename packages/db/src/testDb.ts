@@ -89,6 +89,15 @@ export function resolveDatabaseUrlForEnv(env: NodeJS.ProcessEnv): string {
       `test database name "${test.db}" must end with "_test" (explicit test identity; live db names never qualify)`
     );
   }
+  // Safe-charset rule (Codex round 4): the DECODED name flows into a
+  // CREATE DATABASE statement in the provisioner — a quote/space/uppercase
+  // trick (e.g. x%22%20WITH%20TEMPLATE…_test) must die HERE, fail closed,
+  // before any SQL exists. [a-z0-9_] covers every legitimate test db name.
+  if (!/^[a-z0-9_]+$/.test(test.db)) {
+    throw new TestDbIsolationError(
+      `test database name "${test.db}" contains characters outside [a-z0-9_] — refusing (identifier-injection guard)`
+    );
+  }
   // Test databases are LOCAL by policy: a "_test"-suffixed database on a
   // remote host could be someone's production cluster — refuse (Codex Task-A
   // review). This also guarantees the globalSetup provisioner and the workers

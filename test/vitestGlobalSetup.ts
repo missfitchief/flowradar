@@ -57,8 +57,10 @@ export default async function globalSetup(): Promise<void> {
     const rows = await admin.$queryRaw<{ n: number }[]>`SELECT 1 AS n FROM pg_database WHERE datname = ${testDbName}`;
     if (rows.length === 0) {
       try {
-        // Database identifier comes from the VALIDATED resolver output.
-        await admin.$executeRawUnsafe(`CREATE DATABASE "${testDbName}"`);
+        // Identifier comes from the VALIDATED resolver output (safe charset
+        // [a-z0-9_] enforced fail-closed in resolveDatabaseUrlForEnv); the
+        // quote-doubling below is defense-in-depth, not the primary guard.
+        await admin.$executeRawUnsafe(`CREATE DATABASE "${testDbName.replace(/"/g, '""')}"`);
         console.log(`[testdb] created test database "${testDbName}"`);
       } catch (err) {
         // 42P04 duplicate_database: two vitest runs raced the check-then-create

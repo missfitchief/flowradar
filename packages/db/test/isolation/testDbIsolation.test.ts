@@ -62,6 +62,17 @@ describe('resolveDatabaseUrlForEnv (pure fail-closed rules)', () => {
     expect(() => resolveDatabaseUrlForEnv({ VITEST: 'true', TEST_DATABASE_URL: 'not a url' })).toThrow(TestDbIsolationError);
   });
 
+  it('FAILS CLOSED: identifier-injection via percent-encoding throws (safe charset only)', () => {
+    // Decodes to `x" WITH TEMPLATE flowradar -- _test` — ends '_test' and is
+    // local, but the charset rule must kill it before any SQL can exist.
+    expect(() =>
+      resolveDatabaseUrlForEnv({
+        VITEST: 'true',
+        TEST_DATABASE_URL: 'postgresql://u:p@localhost:5439/x%22%20WITH%20TEMPLATE%20flowradar%20--%20_test'
+      })
+    ).toThrow(/identifier-injection|characters outside/);
+  });
+
   it('FAILS CLOSED: a _test database on a NON-LOCAL host throws (could be production)', () => {
     expect(() =>
       resolveDatabaseUrlForEnv({ VITEST: 'true', TEST_DATABASE_URL: 'postgresql://u:p@db.prod.example.com:5432/foo_test' })
