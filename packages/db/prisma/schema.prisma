@@ -353,6 +353,7 @@ model Token {
   /// the (chain, tokenAddress) pair. NEVER feeds FlowScore / signals / wallet scoring.
   confluenceSnapshots TokenConfluenceSnapshot[]
   stealthSnapshots    StealthSnapshot[]
+  riskSnapshot        TokenRiskSnapshot?
 
   @@unique([chain, address])
   @@map("tokens")
@@ -588,6 +589,60 @@ model ProviderSyncState {
 
   @@unique([provider, chain, scope])
   @@map("provider_sync_states")
+}
+
+/// TokenRiskSnapshot.status — the RESULT of the last risk fetch (freshness is
+/// DERIVED at read time from observedAt/expiresAt, not stored here).
+enum RiskSnapshotStatus {
+  ok // holder/supply data fetched, penalty+flags meaningful
+  unavailable // honestly unavailable (e.g. mega-holder mint) — penalty 0 is NOT "safe"
+  throttled // provider 429 — nextRefreshAt backs off
+  error // other provider/RPC error — retried with backoff
+}
+
+/// TokenRiskSnapshot — canonical cache of per-token risk (Helius holder/supply
+/// checks). Eliminates the per-token, per-cycle live risk calls that
+/// flowScoring + entityClustering were each issuing (the 429 burst). The
+/// bounded tokenRiskRefresh job is the ONLY writer of live provider data here;
+/// scoring/clustering READ this cache. Does NOT change FlowScore: a fresh row
+/// returns the exact {penalty, flags} the live call produced.
+model TokenRiskSnapshot {
+  id            String             @id @default(cuid())
+  tokenId       String             @unique
+  chain         ChainId
+  tokenAddress  String
+  provider      String
+  /// When a refresh was last ATTEMPTED (success or failure).
+  requestedAt   DateTime
+  /// When the underlying provider data was OBSERVED (success only). Drives freshness.
+  observedAt    DateTime?
+  status        RiskSnapshotStatus
+  /// RiskReport.flags verbatim (JSON) — reconstructs the exact report on read.
+  flags         Json
+  /// RiskReport.penalty (0..1) — the ONLY field FlowScore reads.
+  penalty       Float
+  /// 0..100 confidence in this snapshot (lower when stale/unavailable/derived).
+  confidence    Float
+  /// Non-null when status != ok — the failure class ('rate_limited'|'mega_holder'|'rpc'|...).
+  errorCategory String?
+  /// Consecutive failures — drives exponential backoff of nextRefreshAt.
+  failCount     Int                @default(0)
+  /// Hard freshness edge: after this the cached report is STALE (still usable, labeled).
+  expiresAt     DateTime
+  /// Earliest time the refresh job should re-fetch this token.
+  nextRefreshAt DateTime
+  /// Bumped when the risk-computation logic changes (invalidate cache semantics).
+  sourceVersion Int                @default(1)
+  metadataJson  Json?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  token         Token              @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@unique([chain, tokenAddress])
+  @@index([nextRefreshAt])
+  @@index([status])
+  @@map("token_risk_snapshots")
 }
 
 // ---------------------------------------------------------------------------

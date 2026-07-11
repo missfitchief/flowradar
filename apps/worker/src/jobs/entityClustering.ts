@@ -15,11 +15,12 @@
 // scheduled flowScoring tick, and a manual/one-shot run (e.g. the seed
 // script) would never see uniqueEntityCount diverge from smartWalletCount
 // at all. Registered on settings.intervals.entityClusteringSec.
-import { runEntityClustering, runFlowScoringPass } from '@flowradar/db';
+import { runEntityClustering, runFlowScoringPass, cachedRiskResolver } from '@flowradar/db';
 import type { JobContext, JobLogger } from '../context';
+import { buildRiskCache } from '../risk';
 
 export async function run(ctx: JobContext): Promise<void> {
-  const { prisma, providers, settings, log } = ctx;
+  const { prisma, settings, log } = ctx;
   const clusteringResult = await runEntityClustering(prisma, settings, log);
   // Re-score immediately so uniqueEntityCount reflects the clusters just
   // written (see file header "Ordering"). runFlowScoringPass emits its own
@@ -30,10 +31,15 @@ export async function run(ctx: JobContext): Promise<void> {
     info: (message, meta) => log.info(`entityClustering→${message}`, meta),
     error: (message, meta) => log.error(`entityClustering→${message}`, meta),
   };
+  // Task 1: re-score off the cached risk layer as a PURE read (no inline
+  // fetch). flowScoring already warms the shared TokenRiskSnapshot cache each
+  // cycle, and the bounded tokenRiskRefresh job keeps it fresh — so this
+  // re-score issues ZERO Helius risk calls (the double-pass burst is gone).
+  const riskCache = buildRiskCache(ctx);
   const scoringResult = await runFlowScoringPass(
     prisma,
     settings,
-    (chain) => providers(chain, 'risk'),
+    cachedRiskResolver(riskCache),
     subLog,
   );
   // The entityClustering job's OWN cycle-complete line, labelled as itself so a
