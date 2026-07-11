@@ -1,6 +1,6 @@
 # Wallet Universe — win_rate Enrichment Report
 
-**Run:** 2026-07-09. **Status (updated 2026-07-11):** enriched + import-approved CSVs produced; **IMPORTED via the OBSERVATION-ONLY path** (§12) in stages 100/250/500 — all wallets `observation_only`, provider stats in shadow `ObservationProviderSnapshot`, zero signal weight. Shadow run NOT started. All metrics **provider-claimed, unverified on-chain** (nothing marked `locally_verified`).
+**Run:** 2026-07-09. **Status (updated 2026-07-11):** enriched + import-approved CSVs produced; **IMPORTED via the OBSERVATION-ONLY path** (§12) in stages 100/250/500 — 499 created as `observation_only`, 1 pre-existing wallet (already an `observation_only` lineage receiver) preserved; post-import query verifies all 500 staged addresses are `observation_only`. Provider stats live in the shadow `ObservationProviderSnapshot` (zero signal weight). Shadow run NOT started. All metrics **provider-claimed, unverified on-chain** (nothing marked `locally_verified`).
 
 **Goal:** turn the 670-wallet universe into an **import-ready 500-wallet CSV** by filling the missing `win_rate` on the 516 Birdeye-only rows (which the importer would otherwise skip).
 

@@ -341,3 +341,32 @@ describe('walletActivity — status exclusion (Phase 0, pre-public-accumulation)
     expect(polledAddresses.has('BANNED')).toBe(false); // excluded is never polled
   });
 });
+
+describe('walletActivity — per-cycle wallet budget (overnight 2026-07-11)', () => {
+  it('selectPollWindow rotates deterministic windows that cover the whole set', async () => {
+    const { selectPollWindow } = await import('../src/jobs/walletActivity');
+    const all = Array.from({ length: 648 }, (_, i) => `w${i}`);
+    const budget = 200;
+    const seen = new Set<string>();
+    const windows = Math.ceil(all.length / budget); // 4
+    for (let cycle = 0; cycle < windows; cycle++) {
+      const r = selectPollWindow(all, budget, cycle);
+      expect(r.windows).toBe(windows);
+      expect(r.window.length).toBeLessThanOrEqual(budget);
+      for (const w of r.window) seen.add(w);
+    }
+    expect(seen.size).toBe(all.length); // full coverage across one rotation
+    // Deterministic: same cycle index -> identical window.
+    expect(selectPollWindow(all, budget, 1)).toEqual(selectPollWindow(all, budget, 1));
+    // Wrap-around: cycle N === cycle 0.
+    expect(selectPollWindow(all, budget, windows)).toEqual(selectPollWindow(all, budget, 0));
+  });
+
+  it('under-budget sets are returned whole (pre-import behavior unchanged)', async () => {
+    const { selectPollWindow } = await import('../src/jobs/walletActivity');
+    const all = Array.from({ length: 150 }, (_, i) => `w${i}`);
+    const r = selectPollWindow(all, 200, 7);
+    expect(r.window).toEqual(all);
+    expect(r.windows).toBe(1);
+  });
+});
