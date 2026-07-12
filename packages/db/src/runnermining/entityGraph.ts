@@ -359,10 +359,6 @@ export async function buildEntityGraph(
   const unpricedTruncated = unpricedLegRows.length > UNPRICED_LEG_CAP;
   truncation.unpricedLegs = unpricedTruncated;
   const usableUnpriced = unpricedLegRows.slice(0, UNPRICED_LEG_CAP);
-  // Under truncation the LAST walletId in the loaded window may be missing
-  // rows — its unpriced set is incomplete, so it is win-INELIGIBLE (unknown
-  // basis) rather than wrongly counted as a winner.
-  const boundaryWalletId = unpricedTruncated ? usableUnpriced[usableUnpriced.length - 1]?.walletId ?? null : null;
   const unpricedTokensOf = new Map<string, Set<string>>();
   for (const t of usableUnpriced) {
     const a = addrOfWalletId.get(t.walletId);
@@ -371,16 +367,24 @@ export async function buildEntityGraph(
     s.add(t.token.address);
     unpricedTokensOf.set(a, s);
   }
-  const boundaryAddr = boundaryWalletId ? addrOfWalletId.get(boundaryWalletId) ?? null : null;
+  // Win-eligibility under truncation: the query is ordered by walletId asc, so
+  // only wallets whose id is STRICTLY LESS than the boundary walletId are
+  // fully loaded. The boundary wallet (possibly partial) AND every wallet
+  // after it are absent from the unpriced set, so their cost basis is unknown
+  // and they are win-INELIGIBLE — never wrongly counted as winners.
+  const boundaryWalletId = unpricedTruncated ? usableUnpriced[usableUnpriced.length - 1]?.walletId ?? null : null;
+  const winEligibleAddrs = new Set<string>(
+    unpricedTruncated && boundaryWalletId !== null
+      ? dnaWalletRows.filter((w) => w.id < boundaryWalletId).map((w) => w.address)
+      : dnaWalletRows.map((w) => w.address)
+  );
   for (const bp of behaviorProfiles) {
     const positions =
       ((bp.profileJson as { local?: { tokenPositions?: {
         tokenAddress: string; buyUsd: number; sellUsd: number; exitRatio: number | null; fullExitSec: number | null; firstBuyTs: string | null;
       }[] } } | null)?.local?.tokenPositions ?? []);
     const unpriced = unpricedTokensOf.get(bp.walletAddress) ?? new Set<string>();
-    // A wallet whose unpriced set may be incomplete (the truncation boundary)
-    // cannot have any win asserted — cost basis is unknown.
-    const winEligible = bp.walletAddress !== boundaryAddr;
+    const winEligible = winEligibleAddrs.has(bp.walletAddress);
     const entered = new Set<string>();
     const won = new Set<string>();
     for (const p of positions) {
