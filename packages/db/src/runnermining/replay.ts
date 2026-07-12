@@ -38,7 +38,7 @@ const KOL_STATUSES = ['public_kol', 'public_promoter', 'copytrader'] as const;
 const SIGNAL_STATES: CandidateState[] = ['STEALTH_ACCUMULATION', 'EARLY_INDEPENDENT_CONFIRMATION'];
 
 const BASE_CAVEATS = [
-  'anti-circularity: wallets whose only discovery evidence is the replayed token are EXCLUDED from its buyer universe; residual ambiguity (qualification is full-history, not a historical snapshot) remains and is acknowledged here',
+  'as-of-T qualification: a wallet joins the qualified walk only from max(first buy, earliest OTHER-mint evidence timestamp); wallets whose only evidence is the replayed token (or whose other-mint evidence is untimestamped) are excluded from qualification but still counted as crowd; externally-seeded cohort wallets without discovery rows are treated as always-qualified',
   'entity linkage and KOL status are current-state mappings (no historical wallet-status snapshots exist) — an approximation, receipted',
   'post-entry behavior is post-T by definition and is EXCLUDED from at-event evidence (distribution risk cannot fire in replay v1)',
   'price series granularity is bounded by 1D candles plus local snapshots — short windows are null where not covered, never interpolated'
@@ -130,17 +130,23 @@ export async function runNoLookaheadReplay(
       where: { chain, validation: { notIn: ['provider_only', 'invalid'] } },
       orderBy: [{ walletAddress: 'asc' }, { mint: 'asc' }],
       take: 20_000,
-      select: { walletAddress: true, mint: true }
+      select: { walletAddress: true, mint: true, localFirstBuyTs: true, localFirstSellTs: true }
     })
   ]);
-  const evidenceMintsOf = new Map<string, Set<string>>();
+  // Per-wallet evidence rows WITH their earliest local timestamp — the basis
+  // for AS-OF-T qualification (a wallet is qualified at T only once its
+  // evidence on some OTHER mint had already occurred at <= T).
+  const evidenceOf = new Map<string, { mint: string; tsMs: number | null }[]>();
   for (const r of discoveryRows) {
-    const set = evidenceMintsOf.get(r.walletAddress) ?? new Set<string>();
-    set.add(r.mint);
-    evidenceMintsOf.set(r.walletAddress, set);
+    const list = evidenceOf.get(r.walletAddress) ?? [];
+    const candidates = [r.localFirstBuyTs?.getTime(), r.localFirstSellTs?.getTime()].filter(
+      (x): x is number => x !== undefined && x !== null
+    );
+    list.push({ mint: r.mint, tsMs: candidates.length > 0 ? Math.min(...candidates) : null });
+    evidenceOf.set(r.walletAddress, list);
   }
   const cohortWallets = [
-    ...new Set([...goldenWallets.map((w) => w.key), ...evidenceMintsOf.keys()])
+    ...new Set([...goldenWallets.map((w) => w.key), ...evidenceOf.keys()])
   ].sort();
 
   const walletRows = await prisma.wallet.findMany({
@@ -168,14 +174,30 @@ export async function runNoLookaheadReplay(
     const mint = member.key;
     const cohortKind = member.kind === 'token' ? 'runner' : 'control';
     try {
-      // ANTI-CIRCULARITY: exclude wallets whose ONLY local evidence is this
-      // very mint — their qualification would be the outcome leaking back.
-      const eligibleWallets = cohortWallets.filter((w) => {
-        const ev = evidenceMintsOf.get(w);
-        if (!ev) return true; // no discovery evidence ties this wallet to the mint
-        return [...ev].some((m) => m !== mint);
-      });
+      // AS-OF-T QUALIFICATION + ANTI-CIRCULARITY: a wallet is qualified for
+      // this mint only from the moment its earliest evidence on some OTHER
+      // mint occurred (qualifiedFromMs). Wallets whose only evidence is this
+      // very mint — or whose other-mint evidence carries no timestamp — are
+      // excluded (their qualification cannot be honestly placed before T).
+      // Wallets with no discovery rows at all (externally seeded cohort
+      // members) are treated as always-qualified — receipted below.
+      const qualifiedFromMs = new Map<string, number>();
+      for (const w of cohortWallets) {
+        const ev = evidenceOf.get(w);
+        if (!ev) {
+          qualifiedFromMs.set(w, 0);
+          continue;
+        }
+        const others = ev.filter((e) => e.mint !== mint && e.tsMs !== null).map((e) => e.tsMs as number);
+        if (others.length > 0) qualifiedFromMs.set(w, Math.min(...others));
+      }
+      const eligibleWallets = cohortWallets.filter((w) => qualifiedFromMs.has(w));
       const eligibleIds = walletRows.filter((w) => eligibleWallets.includes(w.address)).map((w) => w.id);
+      // Cohort wallets NOT eligible for this mint remain OBSERVABLE buyers —
+      // their priced buys count as crowd evidence, never silently vanish.
+      const excludedIds = walletRows
+        .filter((w) => !qualifiedFromMs.has(w.address))
+        .map((w) => w.id);
       const token = await prisma.token.findUnique({
         where: { chain_address: { chain, address: mint } },
         select: { id: true }
@@ -219,12 +241,27 @@ export async function runNoLookaheadReplay(
         take: 5000,
         select: { walletId: true, ts: true, amountUsd: true }
       });
-      const nonCohortBuys = await prisma.walletTokenTrade.findMany({
-        where: { tokenId: token.id, chain, action: 'BUY', walletId: { notIn: cohortIds }, amountUsd: { gt: 0 } },
-        orderBy: [{ ts: 'asc' }, { id: 'asc' }],
-        take: 20_000,
-        select: { walletId: true, ts: true }
-      });
+      // Crowd = non-cohort buyers PLUS cohort wallets excluded for THIS mint
+      // (observable buys are evidence of buying pressure either way).
+      const [nonCohortOnly, excludedCohortBuys] = await Promise.all([
+        prisma.walletTokenTrade.findMany({
+          where: { tokenId: token.id, chain, action: 'BUY', walletId: { notIn: cohortIds }, amountUsd: { gt: 0 } },
+          orderBy: [{ ts: 'asc' }, { id: 'asc' }],
+          take: 20_000,
+          select: { walletId: true, ts: true }
+        }),
+        excludedIds.length > 0
+          ? prisma.walletTokenTrade.findMany({
+              where: { tokenId: token.id, chain, action: 'BUY', walletId: { in: excludedIds }, amountUsd: { gt: 0 } },
+              orderBy: [{ ts: 'asc' }, { id: 'asc' }],
+              take: 5000,
+              select: { walletId: true, ts: true }
+            })
+          : Promise.resolve([] as { walletId: string; ts: Date }[])
+      ]);
+      const nonCohortBuys = [...nonCohortOnly, ...excludedCohortBuys].sort(
+        (a, b) => a.ts.getTime() - b.ts.getTime()
+      );
 
       // Pre-fetch anchored evidence for this mint (filtered by <= T later).
       const [dormantObs, fundedPaths] = await Promise.all([
@@ -239,14 +276,19 @@ export async function runNoLookaheadReplay(
       ]);
 
       // --- Walk buyer-join events ------------------------------------------
+      // A buyer JOINS the qualified walk at max(first buy, qualification
+      // moment) — a buy made before the wallet's other-mint evidence existed
+      // cannot be counted as qualified accumulation at that earlier time.
       const seenBuyers = new Set<string>();
       const buyerJoinEvents: { ts: Date; buyer: string }[] = [];
       for (const b of cohortBuys) {
         const buyer = addressOfId.get(b.walletId);
         if (!buyer || seenBuyers.has(buyer)) continue;
         seenBuyers.add(buyer);
-        buyerJoinEvents.push({ ts: b.ts, buyer });
+        const qualMs = qualifiedFromMs.get(buyer) ?? 0;
+        buyerJoinEvents.push({ ts: b.ts.getTime() >= qualMs ? b.ts : new Date(qualMs), buyer });
       }
+      buyerJoinEvents.sort((a, b) => a.ts.getTime() - b.ts.getTime());
 
       interface EvalPoint {
         ts: Date;
