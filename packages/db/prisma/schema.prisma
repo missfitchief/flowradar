@@ -2390,3 +2390,84 @@ model ReplaySignalEvent {
   @@index([cohortKind])
   @@map("replay_signal_events")
 }
+
+/// Evidence-backed wallet role (discovery sprint) — one row per (wallet,
+/// role). Roles are PROBABILISTIC on-chain relationships, never identity
+/// claims; every row carries its evidence tier and receipts. SHADOW-ONLY.
+model WalletRoleAssignment {
+  id            String   @id @default(cuid())
+  chain         ChainId
+  walletAddress String
+  /// execution_wallet | fresh_funded_receiver | dormant_funded_receiver |
+  /// probable_side_wallet | probable_linked_wallet | bridge_linked_receiver |
+  /// possible_cex_mediated_receiver | profit_collection_wallet |
+  /// funding_wallet | service_router_cex_node | operator_root |
+  /// unknown_related_wallet
+  role          String
+  /// direct_transfer | repeated_direct | bridge_inference | cex_correlation |
+  /// relationship_tier | derived
+  evidenceTier  String
+  /// Entity this wallet is grouped under (union-find root key).
+  entityKey     String?
+  confidence    Float
+  reasonCodes   String[]
+  receiptsJson  Json
+  caveats       String[]
+  engineVersion Int
+  computedAt    DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([chain, walletAddress, role])
+  @@index([role])
+  @@index([entityKey])
+  @@map("wallet_role_assignments")
+}
+
+/// ENTITY DNA (discovery sprint) — aggregates only sufficiently linked
+/// addresses (union-find over receiver-funding links, probable/strong
+/// relationship tiers, repeat-candidate membership and operator-root
+/// funding) while preserving uncertainty. ADDRESS DNA stays per-wallet in
+/// wallet_dna_profiles; this row is the entity-adjusted view. Ten linked
+/// side wallets never count as ten independent wallets here. SHADOW-ONLY,
+/// observation_only always.
+model EntityDnaProfile {
+  id                        String   @id @default(cuid())
+  chain                     ChainId
+  entityKey                 String
+  memberWallets             String[]
+  memberCount               Int      @default(1)
+  /// Operator lineage-root address when a member is a known root.
+  rootWallet                String?
+  linkEvidenceJson          Json
+  runnersInvolved           Int      @default(0)
+  completedPositions        Int      @default(0)
+  winCount                  Int      @default(0)
+  lossCount                 Int      @default(0)
+  unresolvedPositions       Int      @default(0)
+  winRate                   Float?
+  evUsdPerCompletedPosition Float?
+  avgReturn                 Float?
+  medianReturn              Float?
+  totalRealizedPnlUsd       Decimal? @db.Decimal(24, 4)
+  repeatRunnerCount         Int?
+  oneWinnerDependence       Float?
+  dormantReactivations      Int      @default(0)
+  fundedEntries             Int      @default(0)
+  stagedCapitalUsd          Decimal? @db.Decimal(24, 4)
+  undeployedReceivers       Int      @default(0)
+  deployedReceivers         Int      @default(0)
+  coverage                  String
+  confidence                Float
+  reasonCodes               String[]
+  receiptsJson              Json
+  caveats                   String[]
+  engineVersion             Int
+  computedAt                DateTime
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  @@unique([chain, entityKey])
+  @@index([memberCount])
+  @@map("entity_dna_profiles")
+}
