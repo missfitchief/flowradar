@@ -148,14 +148,24 @@ describe('mapBirdeyeTopTrader', () => {
     const mapped = items.map((item) => mapBirdeyeTopTrader(item as any, 'SOLANA'));
 
     expect(mapped).toHaveLength(2);
-    expect(mapped[0]).toEqual({
+    // Original mapping semantics preserved…
+    expect(mapped[0]).toMatchObject({
       walletAddress: 'BirdeyeTopTrader1WalletXXXXXXXXXXXXXXXXXXXX',
       chain: 'SOLANA',
       pnlUsd: 17000,
       tradeCount: 45
     });
+    // …plus the additive provider-CLAIMED detail for the top-PnL discovery
+    // pipeline (claims stay claims — never local truth) and the verbatim raw
+    // item as receipt.
+    expect(mapped[0].realizedPnlUsd).toBe(17000);
+    expect(mapped[0].totalPnlUsd).toBe(18000);
+    expect(mapped[0].tradeBuy).toBe(22);
+    expect(mapped[0].tradeSell).toBe(23);
+    expect(mapped[0].raw).toEqual(items[0]);
     // Second item's realizedPnl is 0 (falsy but defined) — must NOT fall back to totalPnl.
     expect(mapped[1].pnlUsd).toBe(0);
+    expect(mapped[1].realizedPnlUsd).toBe(0);
   });
 });
 
