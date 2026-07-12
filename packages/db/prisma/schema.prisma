@@ -1764,3 +1764,115 @@ model TokenEnrichment {
   @@index([status])
   @@map("token_enrichments")
 }
+
+/// Dormancy Task 6 — per-event meaningful-activity classification (the
+/// gatekeeper for every dormancy calculation: only `meaningful` rows may
+/// establish or reset dormancy). One row per (source row, wallet perspective)
+/// — source tables are unique-constrained on their own natural keys, so the
+/// (sourceTable, sourceId, walletAddress, chain) key is idempotent by
+/// construction (chain included: a cross-chain edge can carry the same
+/// textual address on both sides).
+/// SHADOW-ONLY analytics: never read by FlowScore/signals/eligibility.
+model WalletActivityClassification {
+  id                  String   @id @default(cuid())
+  chain               ChainId
+  walletAddress       String
+  /// 'wallet_token_trades' | 'money_flow_edges' — provenance of the source row.
+  sourceTable         String
+  /// Source row id (stable across reruns).
+  sourceId            String
+  /// 'trade' | 'transfer'
+  eventKind           String
+  /// BUY | SELL (trades); in | out (transfers, wallet perspective).
+  eventRole           String
+  txHash              String
+  tokenAddress        String?
+  counterpartyAddress String?
+  eventTs             DateTime
+  /// HONEST valuation — NULL == unknown (never 0-for-unknown).
+  usd                 Decimal? @db.Decimal(20, 4)
+  classification      String
+  meaningful          Boolean
+  reasonCodes         String[]
+  confidence          Float
+  ruleVersion         Int
+  receiptsJson        Json
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  /// map matches the hand-authored 20260712001000 migration's index name
+  /// (chain widened into the key) — keeps schema and DB drift-free.
+  @@unique([sourceTable, sourceId, walletAddress, chain], map: "wallet_activity_classifications_sourceTable_sourceId_wa_key")
+  @@index([chain, walletAddress, meaningful, eventTs])
+  @@index([classification])
+  @@map("wallet_activity_classifications")
+}
+
+/// Dormancy Task 7 — strictly-pre-event address dormancy observation, one row
+/// per (wallet, anchor). Windows over MEANINGFUL events only; coverage-start
+/// honesty (history starting inside a window is incomplete, never dormant).
+/// SHADOW-ONLY analytics: never read by FlowScore/signals/eligibility.
+model AddressDormancyObservation {
+  id                    String    @id @default(cuid())
+  chain                 ChainId
+  walletAddress         String
+  /// Anchor vocabulary: 'token_entry' (first local buy of a token).
+  eventKind             String
+  /// Non-null anchor discriminator (token address for token_entry).
+  anchorKey             String
+  eventTs               DateTime
+  /// fresh | covered_dormant | active | apparently_dormant_incomplete_history | unknown
+  overallClass          String
+  maxCoveredDormantDays Int?
+  coverageStartTs       DateTime?
+  /// Strictly-pre-event meaningful events considered.
+  meaningfulEventCount  Int
+  windowsJson           Json
+  receiptsJson          Json
+  caveats               String[]
+  engineVersion         Int
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([chain, walletAddress, eventKind, anchorKey])
+  @@index([overallClass])
+  @@index([chain, walletAddress])
+  @@map("address_dormancy_observations")
+}
+
+/// Dormancy Task 8 — entity-level dormancy observation joining the address
+/// observation with probabilistic wallet links (wallet_relationships +
+/// money_flow_edges + receipts-engine tiers). Per-link receipts; service
+/// nodes excluded; NEUTRAL wording (possible/probable linked wallet — never
+/// same-person claims). SHADOW-ONLY analytics.
+model EntityDormancyObservation {
+  id                      String   @id @default(cuid())
+  chain                   ChainId
+  walletAddress           String
+  eventKind               String
+  anchorKey               String
+  eventTs                 DateTime
+  /// independent_dormant_entity | address_dormant_entity_active |
+  /// probable_side_wallet_reactivation | fresh_funded_by_active_entity |
+  /// active_entity | insufficient_evidence
+  entityClass             String
+  /// The Task 7 address-level class this row was derived from.
+  addressClass            String
+  linkedWalletsConsidered Int
+  linkedWalletsActive     Int
+  serviceNodesExcluded    Int
+  confidence              Float
+  reasonCodes             String[]
+  /// Per-link receipts: counterparty, tier, kinds, evidence tx/edge ids.
+  linksJson               Json
+  receiptsJson            Json
+  caveats                 String[]
+  engineVersion           Int
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@unique([chain, walletAddress, eventKind, anchorKey])
+  @@index([entityClass])
+  @@index([chain, walletAddress])
+  @@map("entity_dormancy_observations")
+}

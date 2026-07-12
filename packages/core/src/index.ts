@@ -45,11 +45,13 @@ export * from './candidates/validate';
 export * from './candidates/sourceCategory';
 export * from './behavior/reconstruct';
 export * from './behavior/holdClassifier';
+export * from './behavior/receipts';
 export * from './social/index';
 export * from './confluence/index';
 export * from './stealth/index';
 export * from './runnermining/index';
 export * from './risk/freshness';
+export * from './dormancy/meaningfulActivity';
 
 // Graph module: the unused sketch GraphNode/GraphEdge/RawGraphEdge that used
 // to live in ./types (never implemented or consumed — confirmed by repo-wide
