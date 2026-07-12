@@ -358,14 +358,19 @@ export async function buildTokenCandidateScores(
       ]);
       const behaviorMix: Record<string, number> = {};
       for (const pe of postEntry) behaviorMix[pe.primaryClass] = (behaviorMix[pe.primaryClass] ?? 0) + 1;
-      const distributionBehaviorCount = postEntry.filter((pe) =>
+      const pricedSet = new Set(pricedBuyers);
+      // Distribution-risk basis: rows from PRICED buyers plus any
+      // DISTRIBUTION row regardless of pricing — negative evidence always
+      // counts, but unknown-behavior rows from unpriced buyers never enter
+      // the denominator (unknown must never dilute risk into safety).
+      const distributionEligibleRows = postEntry.filter(
+        (pe) => pricedSet.has(pe.walletAddress) || DISTRIBUTION_CLASSES.includes(pe.primaryClass)
+      );
+      const distributionBehaviorCount = distributionEligibleRows.filter((pe) =>
         DISTRIBUTION_CLASSES.includes(pe.primaryClass)
       ).length;
-      // Durable behavior is POSITIVE evidence — priced buyers only (the
-      // distribution/negative counts above intentionally span all clean
-      // buyers so bad behavior is never discarded for being unpriced).
-      const pricedSet = new Set(pricedBuyers);
-      const durableBehaviorCount = postEntry.filter(
+      // Durable behavior is POSITIVE evidence — priced buyers only.
+      const durableBehaviorCount = distributionEligibleRows.filter(
         (pe) =>
           (pe.primaryClass === 'durable_hold' || pe.primaryClass === 'still_holding') &&
           pricedSet.has(pe.walletAddress)
@@ -391,7 +396,7 @@ export async function buildTokenCandidateScores(
 
       const { state, reasonCodes: stateReasons } = deriveCandidateState({
         invalidated,
-        qualifiedWithPostEntry: postEntry.length,
+        qualifiedWithPostEntry: distributionEligibleRows.length,
         distributionBehaviorCount,
         kolContamination,
         cohortBuyers: pricedBuyers.length,
@@ -407,7 +412,7 @@ export async function buildTokenCandidateScores(
         fundedPathCount: funded,
         receiverDeployments,
         durableBehaviorCount,
-        qualifiedWithPostEntry: postEntry.length,
+        qualifiedWithPostEntry: distributionEligibleRows.length,
         kolContamination,
         state
       });
