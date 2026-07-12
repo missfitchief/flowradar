@@ -330,22 +330,48 @@ export async function buildEntityGraph(
   );
   const enteredRunnersOf = new Map<string, Set<string>>();
   const wonRunnersOf = new Map<string, Set<string>>();
-  const behaviorProfiles = await prisma.walletBehaviorProfile.findMany({
-    where: { chain, walletAddress: { in: dnaRows.map((d) => d.walletAddress) } },
-    select: { walletAddress: true, profileJson: true }
+  const dnaWalletRows = await prisma.wallet.findMany({
+    where: { chain, address: { in: dnaRows.map((d) => d.walletAddress) } },
+    select: { id: true, address: true }
   });
+  const [behaviorProfiles, unpricedLegRows] = await Promise.all([
+    prisma.walletBehaviorProfile.findMany({
+      where: { chain, walletAddress: { in: dnaRows.map((d) => d.walletAddress) } },
+      select: { walletAddress: true, profileJson: true }
+    }),
+    // Trade-level mixed-leg detection (same rule the DNA builder uses): a
+    // token with ANY unpriced BUY/SELL leg has an unknown cost basis — it can
+    // never be counted as a WON runner.
+    prisma.walletTokenTrade.findMany({
+      where: { chain, walletId: { in: dnaWalletRows.map((w) => w.id) }, action: { in: ['BUY', 'SELL'] }, amountUsd: 0 },
+      select: { walletId: true, token: { select: { address: true } } },
+      distinct: ['walletId', 'tokenId'],
+      take: 50_000
+    })
+  ]);
+  const addrOfWalletId = new Map(dnaWalletRows.map((w) => [w.id, w.address]));
+  const unpricedTokensOf = new Map<string, Set<string>>();
+  for (const t of unpricedLegRows) {
+    const a = addrOfWalletId.get(t.walletId);
+    if (!a) continue;
+    const s = unpricedTokensOf.get(a) ?? new Set<string>();
+    s.add(t.token.address);
+    unpricedTokensOf.set(a, s);
+  }
   for (const bp of behaviorProfiles) {
     const positions =
       ((bp.profileJson as { local?: { tokenPositions?: {
         tokenAddress: string; buyUsd: number; sellUsd: number; exitRatio: number | null; fullExitSec: number | null; firstBuyTs: string | null;
       }[] } } | null)?.local?.tokenPositions ?? []);
+    const unpriced = unpricedTokensOf.get(bp.walletAddress) ?? new Set<string>();
     const entered = new Set<string>();
     const won = new Set<string>();
     for (const p of positions) {
       if (!runnerMints.has(p.tokenAddress) || p.firstBuyTs === null) continue;
-      entered.add(p.tokenAddress);
+      entered.add(p.tokenAddress); // entering is a fact regardless of pricing
       const completed = p.exitRatio !== null && p.exitRatio >= 0.95 && p.fullExitSec !== null;
-      if (completed && p.buyUsd > 0 && p.sellUsd - p.buyUsd > 0) won.add(p.tokenAddress);
+      const priced = p.buyUsd > 0 && !unpriced.has(p.tokenAddress); // mixed-leg -> unknown basis, never a win
+      if (completed && priced && p.sellUsd - p.buyUsd > 0) won.add(p.tokenAddress);
     }
     enteredRunnersOf.set(bp.walletAddress, entered);
     wonRunnersOf.set(bp.walletAddress, won);
@@ -414,6 +440,10 @@ export async function buildEntityGraph(
       const memberReceivers = members.map((m) => receiverByAddr.get(m)).filter((r): r is NonNullable<typeof r> => r !== undefined);
       const stagedKnown = memberReceivers.filter((r) => r.totalKnownInflowUsd !== null);
       const staged = stagedKnown.length > 0 ? stagedKnown.reduce((a, r) => a + Number(r.totalKnownInflowUsd), 0) : null;
+      const stagedIncomplete = stagedKnown.length < memberReceivers.length;
+      // Repeat-runner count is a lower bound whenever a member's runner-win
+      // data is missing (no behavior profile) — flagged, never silently exact.
+      const repeatIncomplete = membersMissingRunnerData > 0;
 
       const dormantReact = memberDna.reduce((a, d) => {
         const s = (d.dormancySummaryJson ?? {}) as { address?: Record<string, number> };
@@ -459,6 +489,8 @@ export async function buildEntityGraph(
           `members_with_dna:${memberDna.length}`,
           `distinct_runners:${enteredRunnerMints.size}`,
           ...(realizedIncomplete ? ['realized_pnl_incomplete_some_members_unknown'] : []),
+          ...(stagedIncomplete ? ['staged_capital_incomplete_some_receivers_unknown'] : []),
+          ...(repeatIncomplete ? ['repeat_runner_count_lower_bound_missing_member_data'] : []),
           ...(rootMember ? ['contains_operator_root'] : [])
         ],
         receiptsJson: {
@@ -475,7 +507,9 @@ export async function buildEntityGraph(
           'entity grouping is probabilistic linkage — never an identity claim',
           'entity metrics aggregate ADDRESS DNA rollups; median return is not derivable from per-wallet averages and is left null; one-winner dependence uses known-realized members only',
           ...(realizedIncomplete ? ['realized PnL / EV cover only members with a known realized figure — the true entity total may be larger'] : []),
-          ...(anyTruncation ? ['an evidence input hit its row cap — a component may be under-linked; counts are a lower bound'] : []),
+          ...(stagedIncomplete ? ['staged capital covers only receivers with a known inflow — the true staged total may be larger'] : []),
+          ...(repeatIncomplete ? ['repeat-runner count is a LOWER BOUND — a member lacked behavior-profile data'] : []),
+          ...(anyTruncation ? ['an evidence input hit its row cap — a component may be under-linked; counts are a lower bound and stale-row reconciliation was SKIPPED this pass'] : []),
           'observation_only: no votes, no eligibility, no promotion'
         ],
         engineVersion: ENTITY_GRAPH_ENGINE_VERSION,
@@ -500,7 +534,10 @@ export async function buildEntityGraph(
   // with an earlier computedAt is from a prior run whose evidence disappeared
   // (or whose entity merged into a different key) and must not linger — else
   // linked wallets could reappear as independent entities.
-  if (report.errors === 0) {
+  // ONLY reconcile when the full evidence set was loaded — under truncation a
+  // "stale" row may just be an un-recomputed real one, so deleting it would
+  // lose data. Skipped (never a silent partial wipe) when any input was capped.
+  if (report.errors === 0 && !anyTruncation) {
     const [staleRoles, staleEntities] = await Promise.all([
       prisma.walletRoleAssignment.deleteMany({ where: { chain, computedAt: { lt: now } } }),
       prisma.entityDnaProfile.deleteMany({ where: { chain, computedAt: { lt: now } } })
