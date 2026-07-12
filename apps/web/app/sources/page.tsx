@@ -49,6 +49,29 @@ export default async function SourcesPage() {
   ]);
 
   const statuses = getCandidateSourceStatuses();
+
+  // Rescue sprint — honest provider-state annotation: a source can be
+  // CONFIGURED (key present, mode 'live') yet blocked by a plan quota. The
+  // fetch-state/enrichment tables carry the real recent provider errors, so
+  // the badge never claims "live and working" when every call is failing.
+  const [quotaErrors, enrichErrors] = await Promise.all([
+    prisma.topPnlFetchState.count({
+      where: { status: 'provider_error', lastError: { contains: 'usage limit', mode: 'insensitive' } }
+    }),
+    prisma.tokenEnrichment.count({
+      where: { status: 'provider_error', lastError: { not: null } }
+    })
+  ]);
+  const birdeyeQuotaLimited = quotaErrors > 0;
+  for (const s of statuses) {
+    if (s.sourceName.startsWith('birdeye') && s.mode === 'live' && birdeyeQuotaLimited) {
+      s.note = `CONFIGURED BUT QUOTA-LIMITED: ${quotaErrors} recent calls blocked by the plan's compute-unit quota (retryable when it resets; fetch states persisted). ${enrichErrors} enrichment fetches also pending retry. ${s.note}`;
+    }
+    if (s.mode === 'mock') {
+      s.note = `MOCK/DEV-ONLY — never an active product source. ${s.note}`;
+    }
+  }
+
   // The `dune` status rows aren't backed by an ExternalWalletSource, so they're
   // rendered in their own subsection below rather than the main table.
   const duneStatuses = statuses.filter((s) => s.sourceName === 'dune');

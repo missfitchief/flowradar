@@ -9,47 +9,54 @@ interface NavItem {
   href: string;
 }
 
-// Order per Task 43 binding decision 2 (Wave 3.5 Phase D): Signal Feed
-// becomes the default landing page ('/'), the old Overview hot-table code is
-// merged into /tokens (now the single dense raw-table layer). Backtest +
-// Shadow (Task 42) remain reachable, placed after Alerts, before Settings.
-//
-// Task 36 (Wave 4.5): "Sources" (Source Health) is placed right after
-// Wallets — it's an ops/pipeline-health view over the same wallet-tracking
-// domain (candidate feeders that eventually become Wallet rows), so it reads
-// naturally as a sibling of Wallets rather than being buried next to Settings
-// (a general config page, not a wallet-pipeline concept).
-// Task 38 (Wave 4.6): "Overlap" (Multi-token Wallet Overlap Finder) sits
-// right after Wallet Graph — both are ad-hoc wallet-discovery TOOLS (run a
-// search, inspect results) rather than always-on dashboards, so they read
-// naturally as a pair, ahead of the passive Wallets leaderboard.
-// Working-loop milestone: "Candidates" (automatic token-candidate feed from
-// the runner-mining loop) sits right after Tokens — it is the same
-// token-table family, sourced from persisted shadow evidence.
-const NAV_ITEMS: NavItem[] = [
-  { label: 'Signal Feed', href: '/' },
-  { label: 'Tokens', href: '/tokens' },
-  { label: 'Candidates', href: '/candidates' },
+// Product-rescue sprint: the operator navigation is decision-first. The
+// primary section answers "what is interesting, why, and what happened in
+// comparable historical cases"; every raw/internal tool keeps working but
+// lives under Advanced instead of being presented as the main product.
+const PRIMARY_ITEMS: NavItem[] = [
+  { label: 'Active Setups', href: '/setups' },
+  { label: 'Historical Proof', href: '/proof' },
+  { label: 'Wallets / Entities', href: '/entities' },
+  { label: 'Capital Movements', href: '/capital' },
+  { label: 'Watching', href: '/watching' }
+];
+
+const ADVANCED_ITEMS: NavItem[] = [
+  { label: 'Signal Feed', href: '/feed' },
+  { label: 'Tokens (raw)', href: '/tokens' },
+  { label: 'Candidates (raw)', href: '/candidates' },
   { label: 'Money Flow', href: '/flow' },
   { label: 'Wallet Graph', href: '/graph' },
   { label: 'Overlap', href: '/overlap' },
-  { label: 'Wallets', href: '/wallets' },
+  { label: 'Wallets (raw)', href: '/wallets' },
   { label: 'Sources', href: '/sources' },
   { label: 'Social', href: '/social' },
   { label: 'Alerts', href: '/alerts' },
-  { label: 'Backtest', href: '/backtest' },
+  { label: 'Backtest (raw)', href: '/backtest' },
   { label: 'Shadow', href: '/shadow' },
-  { label: 'Settings', href: '/settings' },
+  { label: 'Settings', href: '/settings' }
 ];
 
-/**
- * `/` (Overview) only counts as active on an exact match; every other route
- * also matches its own sub-paths (e.g. `/tokens/abc123` highlights "Tokens")
- * so Task 9's token detail page still shows the right active nav item.
- */
 function isActive(pathname: string, href: string): boolean {
   if (href === '/') return pathname === '/';
   return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+function NavLink({ item, active }: { item: NavItem; active: boolean }) {
+  return (
+    <Link
+      href={item.href}
+      aria-current={active ? 'page' : undefined}
+      className={cn(
+        'rounded-md px-3 py-2 text-sm font-medium transition-colors',
+        active
+          ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+          : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'
+      )}
+    >
+      {item.label}
+    </Link>
+  );
 }
 
 export function SidebarNav() {
@@ -57,24 +64,15 @@ export function SidebarNav() {
 
   return (
     <nav className="flex flex-col gap-1 px-3" aria-label="Primary">
-      {NAV_ITEMS.map((item) => {
-        const active = isActive(pathname, item.href);
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            aria-current={active ? 'page' : undefined}
-            className={cn(
-              'rounded-md px-3 py-2 text-sm font-medium transition-colors',
-              active
-                ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
-            )}
-          >
-            {item.label}
-          </Link>
-        );
-      })}
+      {PRIMARY_ITEMS.map((item) => (
+        <NavLink key={item.href} item={item} active={isActive(pathname, item.href)} />
+      ))}
+      <div className="mt-4 mb-1 px-3 text-[11px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
+        Advanced
+      </div>
+      {ADVANCED_ITEMS.map((item) => (
+        <NavLink key={item.href} item={item} active={isActive(pathname, item.href)} />
+      ))}
     </nav>
   );
 }
