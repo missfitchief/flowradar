@@ -461,6 +461,13 @@ model WalletTokenTrade {
   ts                 DateTime
   priceUsd           Decimal     @db.Decimal(24, 12)
   marketCapAtTrade   Decimal     @db.Decimal(20, 4)
+  /// Honest backfilled valuation (rescue sprint): NULL == unavailable. Only
+  /// ever set on rows whose legacy amountUsd was 0-for-unpriced.
+  valuedUsd          Decimal?    @db.Decimal(24, 4)
+  /// Valuation hierarchy level used (e.g. 'birdeye_1d_prior_close',
+  /// 'prior_market_snapshot'). NULL == original ingest pricing.
+  valuationSource    String?
+  valuationConfidence Float?
   walletScoreAtTime  Float
   entityClusterId    String?
   provider           String
@@ -470,6 +477,7 @@ model WalletTokenTrade {
   entityCluster      EntityCluster? @relation(fields: [entityClusterId], references: [id])
 
   @@unique([chain, txHash, walletId, tokenId, action])
+  @@index([valuationSource])
   @@index([walletId])
   @@index([tokenId])
   @@index([entityClusterId])
@@ -2143,6 +2151,14 @@ model WalletDnaProfile {
   winRate                   Float?
   evUsdPerCompletedPosition Float?
   oneWinnerDependence       Float?
+  avgReturn                 Float?
+  medianReturn              Float?
+  totalRealizedPnlUsd       Decimal? @db.Decimal(24, 4)
+  repeatRunnerCount         Int?
+  repeatRunnerRate          Float?
+  medianEntryMcapUsd        Decimal? @db.Decimal(24, 4)
+  fastDumpRate              Float?
+  deadRugExposureRate       Float?
   outcomeMixJson            Json?
   dormancySummaryJson       Json?
   fundingSummaryJson        Json?
@@ -2306,4 +2322,71 @@ model TokenCandidateScore {
   @@index([state])
   @@index([score])
   @@map("token_candidate_scores")
+}
+
+/// Golden cohort (product-rescue sprint) — deterministic product-validation
+/// selection over the historical universe, with per-member selection
+/// receipts. Not a replacement for the full resumable universe.
+model GoldenCohortMember {
+  id                   String   @id @default(cuid())
+  chain                ChainId
+  /// token | wallet | control_token
+  kind                 String
+  key                  String
+  rank                 Int
+  selectionMetricsJson Json
+  reasonCodes          String[]
+  engineVersion        Int
+  selectedAt           DateTime
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@unique([chain, kind, key])
+  @@index([kind])
+  @@map("golden_cohort_members")
+}
+
+/// No-lookahead historical replay event (product-rescue sprint): what the
+/// candidate engine would have shown at eventTs using ONLY evidence at or
+/// before eventTs; the later outcome is recorded SEPARATELY and never feeds
+/// back into the at-event fields. SHADOW-ONLY.
+model ReplaySignalEvent {
+  id                          String    @id @default(cuid())
+  chain                       ChainId
+  mint                        String
+  /// runner | control
+  cohortKind                  String
+  eventTs                     DateTime
+  /// signal | no_signal
+  eventKind                   String
+  scoreAtEvent                Float
+  stateAtEvent                String
+  independentEntitiesAtEvent  Int       @default(0)
+  buyersAtEvent               Int       @default(0)
+  dormantReactivationsAtEvent Int       @default(0)
+  fundedPathsAtEvent          Int       @default(0)
+  kolContaminationAtEvent     Int       @default(0)
+  evidenceAsOfJson            Json
+  mcapAtSignalUsd             Decimal?  @db.Decimal(24, 4)
+  mcapH1Usd                   Decimal?  @db.Decimal(24, 4)
+  mcapH6Usd                   Decimal?  @db.Decimal(24, 4)
+  mcapH24Usd                  Decimal?  @db.Decimal(24, 4)
+  mcapD3Usd                   Decimal?  @db.Decimal(24, 4)
+  mcapD7Usd                   Decimal?  @db.Decimal(24, 4)
+  maxLaterMcapUsd             Decimal?  @db.Decimal(24, 4)
+  maxDrawdownPct              Float?
+  /// true_positive | false_positive | miss | true_negative
+  classification              String
+  outcomeJson                 Json
+  reasonCodes                 String[]
+  caveats                     String[]
+  engineVersion               Int
+  computedAt                  DateTime
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @updatedAt
+
+  @@unique([chain, mint, eventKind])
+  @@index([classification])
+  @@index([cohortKind])
+  @@map("replay_signal_events")
 }

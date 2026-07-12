@@ -52,6 +52,9 @@ export async function buildWalletDnaProfiles(
     limit?: number;
     /** Reconstruct missing behavior profiles (default true). */
     reconstructMissing?: boolean;
+    /** Force behavior re-reconstruction even when a profile exists — needed
+     *  after a valuation backfill changed the underlying trades. */
+    forceReconstruct?: boolean;
     maxTrades?: number;
     now?: Date;
   } = {}
@@ -59,6 +62,7 @@ export async function buildWalletDnaProfiles(
   const chain = opts.chain ?? 'SOLANA';
   const limit = opts.limit ?? 300;
   const reconstructMissing = opts.reconstructMissing !== false;
+  const forceReconstruct = opts.forceReconstruct === true;
   const now = opts.now ?? new Date();
 
   let wallets: string[];
@@ -105,11 +109,13 @@ export async function buildWalletDnaProfiles(
   for (const walletAddress of wallets) {
     try {
       // 1. Behavior profile (existing engine; reconstruct when missing).
-      let profileRow = await prisma.walletBehaviorProfile.findUnique({
-        where: { chain_walletAddress: { chain, walletAddress } },
-        select: { profileJson: true }
-      });
-      if (!profileRow && reconstructMissing) {
+      let profileRow = forceReconstruct
+        ? null
+        : await prisma.walletBehaviorProfile.findUnique({
+            where: { chain_walletAddress: { chain, walletAddress } },
+            select: { profileJson: true }
+          });
+      if (!profileRow && (reconstructMissing || forceReconstruct)) {
         await reconstructWalletBehavior(prisma, { chain, address: walletAddress }, {
           now,
           maxTrades: opts.maxTrades
@@ -156,12 +162,24 @@ export async function buildWalletDnaProfiles(
       let lossCount = 0;
       let evSum = 0;
       const positiveProxies: number[] = [];
+      const returns: number[] = [];
+      const entryMcaps: number[] = [];
+      const completedRunnerWins = new Set<string>();
+      const runnerMintsEntered = new Set<string>();
+      let deadRugEntered = 0;
       let runnersEntered = 0;
       const outcomeMix: Record<string, number> = {};
       for (const pos of positions) {
-        if (runnerMints.has(pos.tokenAddress)) runnersEntered += 1;
+        if (runnerMints.has(pos.tokenAddress)) {
+          runnersEntered += 1;
+          runnerMintsEntered.add(pos.tokenAddress);
+        }
         const outcome = outcomeOf.get(pos.tokenAddress) ?? 'unknown';
         outcomeMix[outcome] = (outcomeMix[outcome] ?? 0) + 1;
+        if (outcome === 'rug' || outcome === 'dead') deadRugEntered += 1;
+        if (pos.entryMcap !== null && Number.isFinite(pos.entryMcap) && pos.entryMcap > 0) {
+          entryMcaps.push(pos.entryMcap);
+        }
         const priced = pos.buyUsd > 0 && !tokensWithUnpricedLegs.has(pos.tokenAddress);
         if (!priced) {
           unpriced += 1; // fully-unpriced OR mixed-leg position: never W/L
@@ -175,9 +193,11 @@ export async function buildWalletDnaProfiles(
         completed += 1;
         const proxy = pos.sellUsd - pos.buyUsd;
         evSum += proxy;
+        returns.push(proxy / pos.buyUsd);
         if (proxy > 0) {
           winCount += 1;
           positiveProxies.push(proxy);
+          if (runnerMints.has(pos.tokenAddress)) completedRunnerWins.add(pos.tokenAddress);
         } else if (proxy < 0) {
           lossCount += 1;
         }
@@ -188,6 +208,20 @@ export async function buildWalletDnaProfiles(
       const positiveTotal = positiveProxies.reduce((a, b) => a + b, 0);
       const oneWinnerDependence =
         positiveProxies.length > 0 && positiveTotal > 0 ? Math.max(...positiveProxies) / positiveTotal : null;
+      const median = (v: number[]): number | null => {
+        if (v.length === 0) return null;
+        const s = [...v].sort((a, b) => a - b);
+        return s.length % 2 === 1 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
+      };
+      const avgReturn = returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : null;
+      const medianReturn = median(returns);
+      const totalRealizedPnlUsd = completed > 0 ? evSum : null;
+      // Repeat-runner: DISTINCT verified runner mints with a completed
+      // positive position; rate over distinct runner mints entered.
+      const repeatRunnerCount = completedRunnerWins.size;
+      const repeatRunnerRate = runnerMintsEntered.size > 0 ? repeatRunnerCount / runnerMintsEntered.size : null;
+      const medianEntryMcapUsd = median(entryMcaps);
+      const deadRugExposureRate = positions.length > 0 ? deadRugEntered / positions.length : null;
 
       // 3. Shadow-table summaries (bounded groupBys).
       const [dormancy, entity, funding, postEntry, repeatRows, discovery] = await Promise.all([
@@ -253,6 +287,21 @@ export async function buildWalletDnaProfiles(
         winRate,
         evUsdPerCompletedPosition: ev,
         oneWinnerDependence,
+        avgReturn,
+        medianReturn,
+        totalRealizedPnlUsd,
+        repeatRunnerCount,
+        repeatRunnerRate,
+        medianEntryMcapUsd,
+        fastDumpRate: (() => {
+          const total = postEntry.reduce((a, g) => a + g._count._all, 0);
+          if (total === 0) return null;
+          const fast = postEntry
+            .filter((g) => ['fast_flip', 'fast_dump', 'burst_exit'].includes(g.primaryClass))
+            .reduce((a, g) => a + g._count._all, 0);
+          return fast / total;
+        })(),
+        deadRugExposureRate,
         outcomeMixJson: outcomeMix as unknown as Prisma.InputJsonValue,
         dormancySummaryJson: {
           address: Object.fromEntries(dormancy.map((g) => [g.overallClass, g._count._all])),

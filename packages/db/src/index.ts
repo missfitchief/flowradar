@@ -54,3 +54,6 @@ export * from './runnermining/topPnl';
 export * from './runnermining/walletDna';
 export * from './runnermining/capitalOutflow';
 export * from './runnermining/tokenCandidates';
+export * from './runnermining/valuationBackfill';
+export * from './runnermining/goldenCohort';
+export * from './runnermining/replay';
