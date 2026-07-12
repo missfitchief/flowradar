@@ -130,9 +130,10 @@ async function main() {
       select: { maxCoveredDormantDays: true }
     })
   ]);
-  const dw = { d7: 0, d14: 0, d30: 0, d90: 0 };
+  const dw = { d7: 0, d14: 0, d30: 0, d90: 0, unknownDays: 0 };
   for (const o of dormWindows) {
-    const d = o.maxCoveredDormantDays ?? 0;
+    if (o.maxCoveredDormantDays === null) { dw.unknownDays += 1; continue; } // unknown is never bucketed as <7d
+    const d = o.maxCoveredDormantDays;
     if (d >= 90) dw.d90 += 1;
     else if (d >= 30) dw.d30 += 1;
     else if (d >= 14) dw.d14 += 1;

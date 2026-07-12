@@ -75,6 +75,12 @@ export default async function EntitiesPage() {
             </tbody>
           </table>
         </div>
+        <p className="mt-2 text-xs text-zinc-500">
+          Entity metrics aggregate per-address DNA rollups: “—” means not applicable / not derivable at entity level
+          (median return is intentionally omitted), “unknown” means no calculable value. One-winner dependence is an
+          address-rollup approximation over members with a known realized figure. Runner involvement is a DISTINCT
+          runner-mint count across members (linked wallets never double-count).
+        </p>
       </section>
 
       <section>

@@ -9,10 +9,11 @@ import { shortAddr } from '@/lib/rescue';
 export const dynamic = 'force-dynamic';
 
 export default async function HistoricalPage() {
+  const totalRunners = await prisma.tokenLifecycle.count({ where: { runnerClass: 'verified_above_10m' } });
   const runners = await prisma.tokenLifecycle.findMany({
     where: { runnerClass: 'verified_above_10m' },
     orderBy: { mint: 'asc' },
-    take: 400,
+    take: 2000,
     select: { mint: true }
   });
   const mints = runners.map((r) => r.mint);
@@ -28,7 +29,11 @@ export default async function HistoricalPage() {
       where: { chain: 'SOLANA', mint: { in: mints } },
       _count: { _all: true }
     }),
-    prisma.replaySignalEvent.findMany({ where: { chain: 'SOLANA', mint: { in: mints } }, select: { mint: true, classification: true } })
+    prisma.replaySignalEvent.findMany({
+      where: { chain: 'SOLANA', mint: { in: mints } },
+      orderBy: [{ mint: 'asc' }, { eventKind: 'asc' }],
+      select: { mint: true, eventKind: true, classification: true }
+    })
   ]);
   const enrichOf = new Map(enrichments.map((e) => [e.mint, e]));
   const symbolOf = new Map(tokens.map((t) => [t.address, t.symbol]));
@@ -39,7 +44,11 @@ export default async function HistoricalPage() {
     if (g.validation === 'locally_verified') c.verified += g._count._all;
     candsOf.set(g.mint, c);
   }
-  const replayOf = new Map(replayEvents.map((e) => [e.mint, e.classification]));
+  // Deterministic: a real signal outcome wins over a no_signal one for the mint.
+  const replayOf = new Map<string, string>();
+  for (const e of replayEvents) {
+    if (e.eventKind === 'signal' || !replayOf.has(e.mint)) replayOf.set(e.mint, e.classification);
+  }
 
   // Order by ATH desc (known first), then mint.
   const rows = mints
@@ -57,9 +66,10 @@ export default async function HistoricalPage() {
       <div>
         <h1 className="text-xl font-semibold">Historical Winners</h1>
         <p className="mt-1 max-w-3xl text-sm text-zinc-400">
-          Every verified historical $10M+ Solana token in the covered universe ({rows.length} tokens; {withCandidates} with
-          top-PnL wallet candidates extracted). Click any token for its top-PnL wallets, dormant/fresh entries, funding
-          paths and whether the same entities are active again.
+          All {totalRunners} verified historical $10M+ Solana tokens in the covered universe
+          {rows.length < totalRunners ? ` (${rows.length} loaded)` : ''}; {withCandidates} have top-PnL wallet
+          candidates extracted. Click any token for its top-PnL wallets, dormant/fresh entries, funding paths and
+          whether the same entities are active again.
         </p>
       </div>
 
@@ -77,7 +87,7 @@ export default async function HistoricalPage() {
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-800/60">
-            {rows.slice(0, 350).map((r) => (
+            {rows.map((r) => (
               <tr key={r.mint} className="hover:bg-zinc-900/40">
                 <td className="px-3 py-2 whitespace-nowrap">
                   <Link href={`/token/${r.mint}`} className="text-sky-400 hover:underline">
@@ -97,7 +107,6 @@ export default async function HistoricalPage() {
           </tbody>
         </table>
       </div>
-      {rows.length > 350 && <p className="text-xs text-zinc-500">Showing top 350 of {rows.length} by ATH.</p>}
     </div>
   );
 }

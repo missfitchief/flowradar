@@ -97,6 +97,69 @@ describe.skipIf(!dbReachable)('buildEntityGraph', () => {
     expect(await prisma.entityDnaProfile.count({ where: { entityKey: funderEntity! } })).toBe(1);
   });
 
+  it('same-token co-buyers with NO linking evidence stay separate entities', async () => {
+    // Two wallets that both "bought the same token" — modeled as two DNA rows
+    // sharing a runner mint via behavior profiles — must NOT merge without a
+    // funding/relationship/repeat link.
+    const a = await seedDna('COBA', { completed: 1, wins: 1, pnl: 100 });
+    const b = await seedDna('COBB', { completed: 1, wins: 1, pnl: 100 });
+    const r = await buildEntityGraph(prisma, { chain: 'SOLANA' });
+    expect(r.errors).toBe(0);
+    const ea = await prisma.entityDnaProfile.findUniqueOrThrow({ where: { chain_entityKey: { chain: 'SOLANA', entityKey: a } } });
+    const eb = await prisma.entityDnaProfile.findUniqueOrThrow({ where: { chain_entityKey: { chain: 'SOLANA', entityKey: b } } });
+    expect(ea.memberCount).toBe(1);
+    expect(eb.memberCount).toBe(1);
+    expect(ea.entityKey).not.toBe(eb.entityKey);
+  });
+
+  it('ten side wallets funded by one funder collapse into ONE entity', async () => {
+    const funder = await seedDna('TENF', { completed: 2, wins: 1, losses: 1, pnl: 500 });
+    for (let i = 0; i < 10; i++) {
+      await prisma.receiverEnrollment.create({
+        data: {
+          chain: 'SOLANA', receiverAddress: addr(`SW${i}`), receiverClass: 'fresh_receiver',
+          sourceEntityKeys: [funder], sourceWallets: [funder], evidenceTiers: ['direct_transfer'],
+          firstReceiptTs: T0, deploymentsJson: [], reasonCodes: [], receiptsJson: {}, caveats: [], engineVersion: 1
+        }
+      });
+    }
+    const r = await buildEntityGraph(prisma, { chain: 'SOLANA' });
+    expect(r.errors).toBe(0);
+    const roleRow = await prisma.walletRoleAssignment.findFirstOrThrow({
+      where: { walletAddress: addr('SW0'), role: 'fresh_funded_receiver' }
+    });
+    const entity = await prisma.entityDnaProfile.findUniqueOrThrow({
+      where: { chain_entityKey: { chain: 'SOLANA', entityKey: roleRow.entityKey! } }
+    });
+    expect(entity.memberCount).toBe(11); // funder + 10 side wallets = ONE entity
+    // The funder's DNA is not multiplied by the 10 linked wallets.
+    expect(entity.completedPositions).toBe(2);
+    expect(Number(entity.totalRealizedPnlUsd)).toBe(500);
+    // No other multi-wallet entity was created for the side wallets.
+    const multi = await prisma.entityDnaProfile.count({ where: { entityKey: { startsWith: PREFIX }, memberCount: { gt: 1 } } });
+    expect(multi).toBe(1);
+  });
+
+  it('stale entity/role rows from a prior run are reconciled away', async () => {
+    // First run: a lone receiver+funder entity exists.
+    const funder = await seedDna('STLF', { completed: 1, wins: 1, pnl: 10 });
+    await prisma.receiverEnrollment.create({
+      data: {
+        chain: 'SOLANA', receiverAddress: addr('STLR'), receiverClass: 'fresh_receiver',
+        sourceEntityKeys: [funder], sourceWallets: [funder], evidenceTiers: ['direct_transfer'],
+        firstReceiptTs: T0, deploymentsJson: [], reasonCodes: [], receiptsJson: {}, caveats: [], engineVersion: 1
+      }
+    });
+    await buildEntityGraph(prisma, { chain: 'SOLANA' });
+    const before = await prisma.walletRoleAssignment.count({ where: { walletAddress: addr('STLR') } });
+    expect(before).toBeGreaterThan(0);
+    // Evidence disappears; rerun must remove the now-unsupported rows.
+    await prisma.receiverEnrollment.deleteMany({ where: { receiverAddress: addr('STLR') } });
+    const r2 = await buildEntityGraph(prisma, { chain: 'SOLANA' });
+    expect(r2.staleRolesRemoved).toBeGreaterThan(0);
+    expect(await prisma.walletRoleAssignment.count({ where: { walletAddress: addr('STLR') } })).toBe(0);
+  });
+
   it('operator roots get the operator_root role and mark their entity', async () => {
     const rootAddr = addr('RQQT');
     const w = await prisma.wallet.create({

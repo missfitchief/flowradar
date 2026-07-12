@@ -25,6 +25,8 @@ export interface EntityGraphReport {
   entitiesWritten: number;
   multiWalletEntities: number;
   rootEntities: number;
+  staleRolesRemoved: number;
+  staleEntitiesRemoved: number;
   errors: number;
   errorReceipts: WalletErrorReceipt[];
 }
@@ -63,6 +65,8 @@ export async function buildEntityGraph(
     entitiesWritten: 0,
     multiWalletEntities: 0,
     rootEntities: 0,
+    staleRolesRemoved: 0,
+    staleEntitiesRemoved: 0,
     errors: 0,
     errorReceipts: []
   };
@@ -98,7 +102,9 @@ export async function buildEntityGraph(
       select: { entityKey: true, memberWallets: true }
     }),
     prisma.lineageRoot.findMany({
-      take: 500,
+      where: { wallet: { chain } },
+      orderBy: { walletId: 'asc' },
+      take: 5000,
       select: { label: true, wallet: { select: { address: true, chain: true } } }
     }),
     prisma.walletDnaProfile.findMany({
@@ -107,7 +113,17 @@ export async function buildEntityGraph(
       take: 5000
     })
   ]);
-  const rootAddrs = new Set(roots.filter((r) => r.wallet.chain === chain).map((r) => r.wallet.address));
+  const rootAddrs = new Set(roots.map((r) => r.wallet.address));
+  // Truncation flags — a capped evidence table can silently split a
+  // component; surfaced on every entity row rather than hidden.
+  const truncation = {
+    outflows: outflows.length >= 10_000,
+    receivers: receivers.length >= 5000,
+    fundedPaths: fundedPaths.length >= 10_000,
+    repeatEntities: repeatEntities.length >= 5000,
+    dnaRows: dnaRows.length >= 5000
+  };
+  const anyTruncation = Object.values(truncation).some(Boolean);
 
   // ---- Union-find over SUFFICIENT links only ------------------------------
   const dsu = new Dsu();
@@ -302,6 +318,39 @@ export async function buildEntityGraph(
 
   // ---- ENTITY DNA ----------------------------------------------------------
   const dnaOf = new Map(dnaRows.map((d) => [d.walletAddress, d]));
+
+  // Per-wallet runner-mint sets for TRUE entity-adjusted dedup: distinct
+  // verified-$10M+ mints ENTERED and WON, read from each member's behavior
+  // profile (bounded — only DNA-covered wallets). Ten linked wallets that all
+  // traded the same runner union to ONE mint, not ten.
+  const runnerMints = new Set(
+    (
+      await prisma.tokenLifecycle.findMany({ where: { runnerClass: 'verified_above_10m' }, select: { mint: true } })
+    ).map((r) => r.mint)
+  );
+  const enteredRunnersOf = new Map<string, Set<string>>();
+  const wonRunnersOf = new Map<string, Set<string>>();
+  const behaviorProfiles = await prisma.walletBehaviorProfile.findMany({
+    where: { chain, walletAddress: { in: dnaRows.map((d) => d.walletAddress) } },
+    select: { walletAddress: true, profileJson: true }
+  });
+  for (const bp of behaviorProfiles) {
+    const positions =
+      ((bp.profileJson as { local?: { tokenPositions?: {
+        tokenAddress: string; buyUsd: number; sellUsd: number; exitRatio: number | null; fullExitSec: number | null; firstBuyTs: string | null;
+      }[] } } | null)?.local?.tokenPositions ?? []);
+    const entered = new Set<string>();
+    const won = new Set<string>();
+    for (const p of positions) {
+      if (!runnerMints.has(p.tokenAddress) || p.firstBuyTs === null) continue;
+      entered.add(p.tokenAddress);
+      const completed = p.exitRatio !== null && p.exitRatio >= 0.95 && p.fullExitSec !== null;
+      if (completed && p.buyUsd > 0 && p.sellUsd - p.buyUsd > 0) won.add(p.tokenAddress);
+    }
+    enteredRunnersOf.set(bp.walletAddress, entered);
+    wonRunnersOf.set(bp.walletAddress, won);
+  }
+
   const components = new Map<string, string[]>();
   for (const k of dsu.keys()) {
     const root = dsu.find(k);
@@ -320,33 +369,51 @@ export async function buildEntityGraph(
       if (memberDna.length === 0 && rootMember === null && members.length < 2) continue;
 
       const sum = (f: (d: (typeof memberDna)[number]) => number) => memberDna.reduce((a, d) => a + f(d), 0);
-      const completed = sum((d) => d.completedPositions);
       const wins = sum((d) => d.winCount);
       const losses = sum((d) => d.lossCount);
       const unresolved = sum((d) => d.openPositions + d.unpricedPositions);
-      const realized = memberDna.reduce<number | null>((a, d) => {
-        if (d.totalRealizedPnlUsd === null) return a;
-        return (a ?? 0) + Number(d.totalRealizedPnlUsd);
-      }, null);
-      const returns = memberDna.flatMap((d) => (d.avgReturn !== null && d.completedPositions > 0 ? [d.avgReturn] : []));
-      const med = (v: number[]) => {
-        if (v.length === 0) return null;
-        const s = [...v].sort((x, y) => x - y);
-        return s.length % 2 === 1 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
-      };
-      // One-winner dependence at ENTITY level: max member positive realized
-      // over total positive realized (approximation from address rollups).
-      const positives = memberDna
-        .map((d) => (d.totalRealizedPnlUsd !== null ? Math.max(0, Number(d.totalRealizedPnlUsd)) : 0))
-        .filter((x) => x > 0);
+
+      // TRUE entity-adjusted runner involvement/repeat: DISTINCT runner mints
+      // across members (union), never a sum of linked wallets.
+      const enteredRunnerMints = new Set<string>();
+      const wonRunnerMints = new Set<string>();
+      for (const m of members) {
+        for (const mint of enteredRunnersOf.get(m) ?? []) enteredRunnerMints.add(mint);
+        for (const mint of wonRunnersOf.get(m) ?? []) wonRunnerMints.add(mint);
+      }
+      // Some members may lack a behavior profile (no dedup data) — flag it.
+      const membersMissingRunnerData = members.filter((m) => dnaOf.has(m) && !enteredRunnersOf.has(m)).length;
+
+      // Realized/EV: ONLY over members with a KNOWN realized figure; the
+      // denominator is those members' completed positions (never mix a known
+      // numerator with an unknown member's positions). Incompleteness flagged.
+      const realizedMembers = memberDna.filter((d) => d.totalRealizedPnlUsd !== null);
+      const realized = realizedMembers.length > 0
+        ? realizedMembers.reduce((a, d) => a + Number(d.totalRealizedPnlUsd), 0)
+        : null;
+      const completedRealized = realizedMembers.reduce((a, d) => a + d.completedPositions, 0);
+      const realizedIncomplete = realizedMembers.length < memberDna.length;
+      // completedPositions for W/L are pure counts (never null) — safe to sum.
+      const completed = sum((d) => d.completedPositions);
+
+      // Pooled average return WEIGHTED by completed positions (avgReturn is
+      // itself a per-wallet mean, so avgReturn*completed = that wallet's return
+      // sum). Median cannot be honestly derived from per-wallet averages — NULL.
+      const retMembers = memberDna.filter((d) => d.avgReturn !== null && d.completedPositions > 0);
+      const retWeight = retMembers.reduce((a, d) => a + d.completedPositions, 0);
+      const avgReturn = retWeight > 0 ? retMembers.reduce((a, d) => a + (d.avgReturn as number) * d.completedPositions, 0) / retWeight : null;
+
+      // One-winner dependence: max member positive realized over total positive
+      // realized, computed ONLY over members with KNOWN realized PnL (an
+      // unknown member can never be silently treated as zero). Flagged when
+      // any member's PnL is unknown, since the true denominator may be larger.
+      const positives = realizedMembers.map((d) => Math.max(0, Number(d.totalRealizedPnlUsd))).filter((x) => x > 0);
       const posTotal = positives.reduce((a, b) => a + b, 0);
       const oneWinner = positives.length > 0 && posTotal > 0 ? Math.max(...positives) / posTotal : null;
 
       const memberReceivers = members.map((m) => receiverByAddr.get(m)).filter((r): r is NonNullable<typeof r> => r !== undefined);
-      const staged = memberReceivers.reduce<number | null>((a, r) => {
-        if (r.totalKnownInflowUsd === null) return a;
-        return (a ?? 0) + Number(r.totalKnownInflowUsd);
-      }, null);
+      const stagedKnown = memberReceivers.filter((r) => r.totalKnownInflowUsd !== null);
+      const staged = stagedKnown.length > 0 ? stagedKnown.reduce((a, r) => a + Number(r.totalKnownInflowUsd), 0) : null;
 
       const dormantReact = memberDna.reduce((a, d) => {
         const s = (d.dormancySummaryJson ?? {}) as { address?: Record<string, number> };
@@ -368,17 +435,17 @@ export async function buildEntityGraph(
         linkEvidenceJson: Object.fromEntries(
           members.slice(0, 25).map((m) => [m, linkEvidence.get(m) ?? []])
         ) as unknown as Prisma.InputJsonValue,
-        runnersInvolved: sum((d) => d.runnersEntered),
+        runnersInvolved: enteredRunnerMints.size, // DISTINCT mints, entity-adjusted
         completedPositions: completed,
         winCount: wins,
         lossCount: losses,
         unresolvedPositions: unresolved,
         winRate: completed > 0 ? wins / completed : null,
-        evUsdPerCompletedPosition: completed > 0 && realized !== null ? realized / completed : null,
-        avgReturn: returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : null,
-        medianReturn: med(returns),
+        evUsdPerCompletedPosition: completedRealized > 0 && realized !== null ? realized / completedRealized : null,
+        avgReturn,
+        medianReturn: null, // not honestly derivable from per-wallet averages
         totalRealizedPnlUsd: realized,
-        repeatRunnerCount: memberDna.reduce<number | null>((a, d) => (d.repeatRunnerCount === null ? a : (a ?? 0) + d.repeatRunnerCount), null),
+        repeatRunnerCount: membersMissingRunnerData > 0 && wonRunnerMints.size === 0 ? null : wonRunnerMints.size,
         oneWinnerDependence: oneWinner,
         dormantReactivations: dormantReact,
         fundedEntries: funded,
@@ -390,15 +457,25 @@ export async function buildEntityGraph(
         reasonCodes: [
           `members:${members.length}`,
           `members_with_dna:${memberDna.length}`,
+          `distinct_runners:${enteredRunnerMints.size}`,
+          ...(realizedIncomplete ? ['realized_pnl_incomplete_some_members_unknown'] : []),
           ...(rootMember ? ['contains_operator_root'] : [])
         ],
         receiptsJson: {
           linkBasis: 'receiver_funding + probable/strong relationship tiers + repeat-candidate membership',
-          sameTokenBuysNeverLink: true
+          sameTokenBuysNeverLink: true,
+          runnersInvolvedBasis: 'distinct_runner_mints_union_across_members',
+          repeatRunnerBasis: 'distinct_won_runner_mints_union_across_members',
+          realizedPnlMembersKnown: realizedMembers.length,
+          realizedPnlMembersTotal: memberDna.length,
+          membersMissingRunnerData,
+          inputTruncation: truncation
         } as unknown as Prisma.InputJsonValue,
         caveats: [
           'entity grouping is probabilistic linkage — never an identity claim',
-          'entity metrics aggregate ADDRESS DNA rollups — approximation is labeled, per-position entity math requires deeper reconstruction',
+          'entity metrics aggregate ADDRESS DNA rollups; median return is not derivable from per-wallet averages and is left null; one-winner dependence uses known-realized members only',
+          ...(realizedIncomplete ? ['realized PnL / EV cover only members with a known realized figure — the true entity total may be larger'] : []),
+          ...(anyTruncation ? ['an evidence input hit its row cap — a component may be under-linked; counts are a lower bound'] : []),
           'observation_only: no votes, no eligibility, no promotion'
         ],
         engineVersion: ENTITY_GRAPH_ENGINE_VERSION,
@@ -416,6 +493,20 @@ export async function buildEntityGraph(
       report.errors += 1;
       if (report.errorReceipts.length < ERROR_RECEIPTS_MAX) report.errorReceipts.push(toErrorReceipt(entityKey, err));
     }
+  }
+
+  // ---- Stale-row reconciliation -------------------------------------------
+  // Every role/entity written this pass was stamped computedAt = now; any row
+  // with an earlier computedAt is from a prior run whose evidence disappeared
+  // (or whose entity merged into a different key) and must not linger — else
+  // linked wallets could reappear as independent entities.
+  if (report.errors === 0) {
+    const [staleRoles, staleEntities] = await Promise.all([
+      prisma.walletRoleAssignment.deleteMany({ where: { chain, computedAt: { lt: now } } }),
+      prisma.entityDnaProfile.deleteMany({ where: { chain, computedAt: { lt: now } } })
+    ]);
+    report.staleRolesRemoved = staleRoles.count;
+    report.staleEntitiesRemoved = staleEntities.count;
   }
   return report;
 }

@@ -35,10 +35,21 @@ export default async function EntityDetailPage({ params }: { params: Promise<{ a
   const enrollment = await prisma.receiverEnrollment.findUnique({
     where: { chain_receiverAddress: { chain: 'SOLANA', receiverAddress: address } }
   });
-  const entityRow = await prisma.entityDnaProfile.findUnique({
-    where: { chain_entityKey: { chain: 'SOLANA', entityKey: address } }
+  // Roles are loaded early so a role-only address (e.g. an operator root with
+  // no local DNA) still resolves instead of 404-ing, and so its entity panel
+  // can be found via the role's entityKey.
+  const roleRows = await prisma.walletRoleAssignment.findMany({
+    where: { chain: 'SOLANA', walletAddress: address },
+    orderBy: { confidence: 'desc' },
+    select: { role: true, evidenceTier: true, confidence: true, reasonCodes: true, entityKey: true }
   });
-  if (!dna && !behavior && !enrollment && !entityRow) notFound();
+  const entityKeyForAddr = roleRows[0]?.entityKey ?? address;
+  const entityRow =
+    (await prisma.entityDnaProfile.findUnique({ where: { chain_entityKey: { chain: 'SOLANA', entityKey: address } } })) ??
+    (entityKeyForAddr !== address
+      ? await prisma.entityDnaProfile.findUnique({ where: { chain_entityKey: { chain: 'SOLANA', entityKey: entityKeyForAddr } } })
+      : null);
+  if (!dna && !behavior && !enrollment && !entityRow && roleRows.length === 0) notFound();
 
   const profile = (behavior?.profileJson ?? null) as unknown as {
     local?: { tokenPositions?: TokenPosition[] };
@@ -66,12 +77,7 @@ export default async function EntityDetailPage({ params }: { params: Promise<{ a
       : []
   );
 
-  const [roleRows, dormancyEvents, outflows, inflowsAsReceiver, topPnl, lifecycles] = await Promise.all([
-    prisma.walletRoleAssignment.findMany({
-      where: { chain: 'SOLANA', walletAddress: address },
-      orderBy: { confidence: 'desc' },
-      select: { role: true, evidenceTier: true, confidence: true, reasonCodes: true, entityKey: true }
-    }),
+  const [dormancyEvents, outflows, inflowsAsReceiver, topPnl, lifecycles] = await Promise.all([
     prisma.addressDormancyObservation.findMany({
       where: { chain: 'SOLANA', walletAddress: address, overallClass: 'covered_dormant' },
       orderBy: { eventTs: 'asc' },
