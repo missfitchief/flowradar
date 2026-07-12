@@ -49,3 +49,4 @@ export * from './dormancy/addressDormancy';
 export * from './dormancy/entityDormancy';
 export * from './dormancy/fundingPaths';
 export * from './postentry/postEntry';
+export * from './runnermining/repeatCandidates';
