@@ -18,6 +18,7 @@ import { toErrorReceipt, ERROR_RECEIPTS_MAX } from '../dormancy/activity';
 import type { WalletErrorReceipt } from '../dormancy/activity';
 
 export const ENTITY_GRAPH_ENGINE_VERSION = 1;
+const UNPRICED_LEG_CAP = 200_000;
 
 export interface EntityGraphReport {
   rolesWritten: number;
@@ -120,10 +121,13 @@ export async function buildEntityGraph(
     outflows: outflows.length >= 10_000,
     receivers: receivers.length >= 5000,
     fundedPaths: fundedPaths.length >= 10_000,
+    sideWalletObs: sideWalletObs.length >= 5000,
     repeatEntities: repeatEntities.length >= 5000,
-    dnaRows: dnaRows.length >= 5000
+    roots: roots.length >= 5000,
+    dnaRows: dnaRows.length >= 5000,
+    unpricedLegs: false // set below once the unpriced-leg query has run
   };
-  const anyTruncation = Object.values(truncation).some(Boolean);
+  const anyTruncation0 = () => Object.values(truncation).some(Boolean);
 
   // ---- Union-find over SUFFICIENT links only ------------------------------
   const dsu = new Dsu();
@@ -341,29 +345,42 @@ export async function buildEntityGraph(
     }),
     // Trade-level mixed-leg detection (same rule the DNA builder uses): a
     // token with ANY unpriced BUY/SELL leg has an unknown cost basis — it can
-    // never be counted as a WON runner.
+    // never be counted as a WON runner. Deterministically ordered so that,
+    // if the cap is hit, only the LAST partially-loaded wallet is uncertain.
     prisma.walletTokenTrade.findMany({
       where: { chain, walletId: { in: dnaWalletRows.map((w) => w.id) }, action: { in: ['BUY', 'SELL'] }, amountUsd: 0 },
+      orderBy: [{ walletId: 'asc' }, { tokenId: 'asc' }],
       select: { walletId: true, token: { select: { address: true } } },
       distinct: ['walletId', 'tokenId'],
-      take: 50_000
+      take: UNPRICED_LEG_CAP + 1
     })
   ]);
   const addrOfWalletId = new Map(dnaWalletRows.map((w) => [w.id, w.address]));
+  const unpricedTruncated = unpricedLegRows.length > UNPRICED_LEG_CAP;
+  truncation.unpricedLegs = unpricedTruncated;
+  const usableUnpriced = unpricedLegRows.slice(0, UNPRICED_LEG_CAP);
+  // Under truncation the LAST walletId in the loaded window may be missing
+  // rows — its unpriced set is incomplete, so it is win-INELIGIBLE (unknown
+  // basis) rather than wrongly counted as a winner.
+  const boundaryWalletId = unpricedTruncated ? usableUnpriced[usableUnpriced.length - 1]?.walletId ?? null : null;
   const unpricedTokensOf = new Map<string, Set<string>>();
-  for (const t of unpricedLegRows) {
+  for (const t of usableUnpriced) {
     const a = addrOfWalletId.get(t.walletId);
     if (!a) continue;
     const s = unpricedTokensOf.get(a) ?? new Set<string>();
     s.add(t.token.address);
     unpricedTokensOf.set(a, s);
   }
+  const boundaryAddr = boundaryWalletId ? addrOfWalletId.get(boundaryWalletId) ?? null : null;
   for (const bp of behaviorProfiles) {
     const positions =
       ((bp.profileJson as { local?: { tokenPositions?: {
         tokenAddress: string; buyUsd: number; sellUsd: number; exitRatio: number | null; fullExitSec: number | null; firstBuyTs: string | null;
       }[] } } | null)?.local?.tokenPositions ?? []);
     const unpriced = unpricedTokensOf.get(bp.walletAddress) ?? new Set<string>();
+    // A wallet whose unpriced set may be incomplete (the truncation boundary)
+    // cannot have any win asserted — cost basis is unknown.
+    const winEligible = bp.walletAddress !== boundaryAddr;
     const entered = new Set<string>();
     const won = new Set<string>();
     for (const p of positions) {
@@ -371,11 +388,12 @@ export async function buildEntityGraph(
       entered.add(p.tokenAddress); // entering is a fact regardless of pricing
       const completed = p.exitRatio !== null && p.exitRatio >= 0.95 && p.fullExitSec !== null;
       const priced = p.buyUsd > 0 && !unpriced.has(p.tokenAddress); // mixed-leg -> unknown basis, never a win
-      if (completed && priced && p.sellUsd - p.buyUsd > 0) won.add(p.tokenAddress);
+      if (winEligible && completed && priced && p.sellUsd - p.buyUsd > 0) won.add(p.tokenAddress);
     }
     enteredRunnersOf.set(bp.walletAddress, entered);
     wonRunnersOf.set(bp.walletAddress, won);
   }
+  const anyTruncation = anyTruncation0();
 
   const components = new Map<string, string[]>();
   for (const k of dsu.keys()) {
