@@ -353,7 +353,7 @@ export async function buildTokenCandidateScores(
         prisma.postEntryBehavior.findMany({
           where: { chain, tokenAddress: mint, walletAddress: { in: cleanBuyers } },
           orderBy: { walletAddress: 'asc' },
-          select: { primaryClass: true }
+          select: { primaryClass: true, walletAddress: true }
         })
       ]);
       const behaviorMix: Record<string, number> = {};
@@ -361,8 +361,14 @@ export async function buildTokenCandidateScores(
       const distributionBehaviorCount = postEntry.filter((pe) =>
         DISTRIBUTION_CLASSES.includes(pe.primaryClass)
       ).length;
+      // Durable behavior is POSITIVE evidence — priced buyers only (the
+      // distribution/negative counts above intentionally span all clean
+      // buyers so bad behavior is never discarded for being unpriced).
+      const pricedSet = new Set(pricedBuyers);
       const durableBehaviorCount = postEntry.filter(
-        (pe) => pe.primaryClass === 'durable_hold' || pe.primaryClass === 'still_holding'
+        (pe) =>
+          (pe.primaryClass === 'durable_hold' || pe.primaryClass === 'still_holding') &&
+          pricedSet.has(pe.walletAddress)
       ).length;
 
       // Crowd: non-cohort distinct buyers of the same token.
