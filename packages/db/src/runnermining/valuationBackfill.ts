@@ -116,9 +116,11 @@ export async function backfillTradeValuations(
         .sort((a, b) => a.t - b.t);
       const supply = (enrichment?.supplyJson as { supply?: number } | null)?.supply ?? null;
 
-      // Snapshots for this token (bounded; sorted asc for binary search).
+      // Snapshots for this token (bounded; sorted asc for cursor walk).
+      // REAL provider observations only — synthetic seed continuations must
+      // never price a trade (fabricated prices are not evidence).
       const snapshots = await prisma.tokenMarketSnapshot.findMany({
-        where: { tokenId: token.id },
+        where: { tokenId: token.id, source: { not: { contains: 'synthetic' } } },
         orderBy: [{ ts: 'asc' }, { id: 'asc' }],
         take: 50_000,
         select: { ts: true, priceUsd: true, marketCapUsd: true }
@@ -169,23 +171,35 @@ export async function backfillTradeValuations(
         }
 
         const amountToken = Number(trade.amountToken);
-        if (!Number.isFinite(amountToken) || amountToken <= 0) {
+        const valued = amountToken * price;
+        // Overflow/sanity guard: amountUsd is Decimal(20,4) — a value that
+        // cannot fit (or a non-finite product) is UNPRICEABLE, never written.
+        if (!Number.isFinite(amountToken) || amountToken <= 0 || !Number.isFinite(valued) || valued >= 1e15) {
           report.unpriceable += 1;
           continue;
         }
-        const valued = amountToken * price;
-        const fillMcap = Number(trade.marketCapAtTrade) <= 0 && mcap !== null;
-        await prisma.walletTokenTrade.update({
-          where: { id: trade.id },
-          data: {
-            amountUsd: valued,
-            valuedUsd: valued,
-            valuationSource: source,
-            valuationConfidence: confidence,
-            ...(Number(trade.priceUsd) <= 0 ? { priceUsd: price } : {}),
-            ...(fillMcap ? { marketCapAtTrade: mcap! } : {})
+        const fillMcap = Number(trade.marketCapAtTrade) <= 0 && mcap !== null && mcap < 1e15;
+        try {
+          await prisma.walletTokenTrade.update({
+            where: { id: trade.id },
+            data: {
+              amountUsd: valued,
+              valuedUsd: valued,
+              valuationSource: source,
+              valuationConfidence: confidence,
+              ...(Number(trade.priceUsd) <= 0 ? { priceUsd: price } : {}),
+              ...(fillMcap ? { marketCapAtTrade: mcap! } : {})
+            }
+          });
+        } catch (err) {
+          // Per-TRADE isolation: one failed write never skips the token's
+          // remaining trades.
+          report.errors += 1;
+          if (report.errorReceipts.length < ERROR_RECEIPTS_MAX) {
+            report.errorReceipts.push(toErrorReceipt(`${mint}:${trade.id}`, err));
           }
-        });
+          continue;
+        }
         report.backfilled += 1;
         report.bySource[source] = (report.bySource[source] ?? 0) + 1;
         if (fillMcap) report.mcapFilled += 1;

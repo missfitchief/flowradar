@@ -54,18 +54,23 @@ export default async function SourcesPage() {
   // CONFIGURED (key present, mode 'live') yet blocked by a plan quota. The
   // fetch-state/enrichment tables carry the real recent provider errors, so
   // the badge never claims "live and working" when every call is failing.
+  const recencyCutoff = new Date(Date.now() - 7 * 86_400_000);
   const [quotaErrors, enrichErrors] = await Promise.all([
     prisma.topPnlFetchState.count({
-      where: { status: 'provider_error', lastError: { contains: 'usage limit', mode: 'insensitive' } }
+      where: {
+        status: 'provider_error',
+        lastError: { contains: 'usage limit', mode: 'insensitive' },
+        updatedAt: { gte: recencyCutoff }
+      }
     }),
     prisma.tokenEnrichment.count({
-      where: { status: 'provider_error', lastError: { not: null } }
+      where: { status: 'provider_error', lastError: { not: null }, updatedAt: { gte: recencyCutoff } }
     })
   ]);
   const birdeyeQuotaLimited = quotaErrors > 0;
   for (const s of statuses) {
     if (s.sourceName.startsWith('birdeye') && s.mode === 'live' && birdeyeQuotaLimited) {
-      s.note = `CONFIGURED BUT QUOTA-LIMITED: ${quotaErrors} recent calls blocked by the plan's compute-unit quota (retryable when it resets; fetch states persisted). ${enrichErrors} enrichment fetches also pending retry. ${s.note}`;
+      s.note = `CONFIGURED BUT QUOTA-LIMITED: ${quotaErrors} calls in the last 7 days blocked by the plan's compute-unit quota (retryable when it resets; fetch states persisted). ${enrichErrors} enrichment fetches also pending retry. ${s.note}`;
     }
     if (s.mode === 'mock') {
       s.note = `MOCK/DEV-ONLY — never an active product source. ${s.note}`;

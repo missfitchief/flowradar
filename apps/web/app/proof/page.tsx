@@ -79,11 +79,11 @@ export default async function ProofPage() {
               </div>
               <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-sm md:grid-cols-4">
                 <div>
-                  <span className="text-zinc-400">At signal: </span>
+                  <span className="text-zinc-400">{e.eventKind === 'signal' ? 'At signal: ' : 'At best evaluation: '}</span>
                   {e.mcapAtSignalUsd === null ? 'mcap unknown' : fmtUsd(Number(e.mcapAtSignalUsd))}
                 </div>
                 <div>
-                  <span className="text-zinc-400">Peak after: </span>
+                  <span className="text-zinc-400">{e.eventKind === 'signal' ? 'Peak after: ' : 'Peak afterwards: '}</span>
                   {e.maxLaterMcapUsd === null ? 'not covered' : fmtUsd(Number(e.maxLaterMcapUsd))}
                   {mult ? <span className="ml-1 text-emerald-400">({mult})</span> : null}
                 </div>

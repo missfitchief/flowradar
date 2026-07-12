@@ -43,6 +43,26 @@ export default async function EntityDetailPage({ params }: { params: Promise<{ a
   } | null;
   const positions = (profile?.local?.tokenPositions ?? []).filter((p) => p.firstBuyTs !== null || p.receivedNotBought);
 
+  // Trade-level honesty (same rule as the DNA builder): a token with ANY
+  // unpriced BUY/SELL leg has an unknown cost basis — its result is never
+  // rendered as a concrete win/loss number.
+  const walletRow = await prisma.wallet.findUnique({
+    where: { address_chain: { address, chain: 'SOLANA' } },
+    select: { id: true }
+  });
+  const tokensWithUnpricedLegs = new Set<string>(
+    walletRow
+      ? (
+          await prisma.walletTokenTrade.findMany({
+            where: { walletId: walletRow.id, chain: 'SOLANA', action: { in: ['BUY', 'SELL'] }, amountUsd: 0 },
+            select: { token: { select: { address: true } } },
+            distinct: ['tokenId'],
+            take: 5000
+          })
+        ).map((t) => t.token.address)
+      : []
+  );
+
   const [dormancyEvents, outflows, inflowsAsReceiver, topPnl, lifecycles] = await Promise.all([
     prisma.addressDormancyObservation.findMany({
       where: { chain: 'SOLANA', walletAddress: address, overallClass: 'covered_dormant' },
@@ -106,7 +126,7 @@ export default async function EntityDetailPage({ params }: { params: Promise<{ a
             </div>
           </div>
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
-            <div className="text-lg font-semibold">{dna.repeatRunnerCount ?? 0}</div>
+            <div className="text-lg font-semibold">{dna.repeatRunnerCount ?? 'unknown'}</div>
             <div className="text-xs text-zinc-400">
               verified runners won · one-winner dependence{' '}
               {dna.oneWinnerDependence === null ? 'n/a' : fmtPct(dna.oneWinnerDependence)}
@@ -152,7 +172,7 @@ export default async function EntityDetailPage({ params }: { params: Promise<{ a
                           ? 'dead'
                           : 'unresolved';
                   const completed = p.exitRatio !== null && p.exitRatio >= 0.95 && p.fullExitSec !== null;
-                  const priced = p.buyUsd > 0;
+                  const priced = p.buyUsd > 0 && !tokensWithUnpricedLegs.has(p.tokenAddress);
                   const proxy = p.sellUsd - p.buyUsd;
                   return (
                     <tr key={p.tokenAddress} className="border-t border-zinc-800/60">

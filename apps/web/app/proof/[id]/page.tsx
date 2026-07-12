@@ -96,7 +96,7 @@ export default async function ProofCasePage({ params }: { params: Promise<{ id: 
               <tr>
                 <th className="py-1 pr-6">Window</th>
                 <th className="py-1 pr-6">Market cap</th>
-                <th className="py-1">vs signal</th>
+                <th className="py-1">{e.eventKind === 'signal' ? 'vs signal' : 'vs evaluation point'}</th>
               </tr>
             </thead>
             <tbody>
@@ -111,7 +111,7 @@ export default async function ProofCasePage({ params }: { params: Promise<{ id: 
                 );
               })}
               <tr className="border-t border-zinc-800/60 font-medium">
-                <td className="py-1.5 pr-6">Peak after signal</td>
+                <td className="py-1.5 pr-6">{e.eventKind === 'signal' ? 'Peak after signal' : 'Peak after the evaluation point'}</td>
                 <td className="py-1.5 pr-6">
                   {e.maxLaterMcapUsd === null ? <span className="text-zinc-500">not covered</span> : fmtUsd(Number(e.maxLaterMcapUsd))}
                 </td>
@@ -120,7 +120,7 @@ export default async function ProofCasePage({ params }: { params: Promise<{ id: 
                 </td>
               </tr>
               <tr className="border-t border-zinc-800/60">
-                <td className="py-1.5 pr-6">Max drawdown after signal</td>
+                <td className="py-1.5 pr-6">{e.eventKind === 'signal' ? 'Max drawdown after signal' : 'Max drawdown after the evaluation point'}</td>
                 <td className="py-1.5 pr-6" colSpan={2}>
                   {e.maxDrawdownPct === null ? <span className="text-zinc-500">not covered</span> : `${e.maxDrawdownPct.toFixed(1)}%`}
                 </td>

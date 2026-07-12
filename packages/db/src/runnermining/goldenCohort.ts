@@ -27,13 +27,15 @@ export async function buildGoldenCohort(
   const controlCount = opts.controlCount ?? 20;
   const now = opts.now ?? new Date();
 
-  // Deterministic rebuild: the cohort is a pure function of current coverage.
-  const wiped = (await prisma.goldenCohortMember.deleteMany({ where: { chain } })).count;
+  // Deterministic rebuild — computed FIRST, then swapped in atomically so a
+  // mid-build failure can never leave a partial/empty cohort.
+  const pending: Prisma.GoldenCohortMemberCreateManyInput[] = [];
 
   // --- Tokens: verified runners ranked by honest local+provider coverage ---
   const runners = await prisma.tokenLifecycle.findMany({
     where: { runnerClass: 'verified_above_10m' },
     orderBy: { mint: 'asc' },
+    take: 2000,
     select: { mint: true }
   });
   const runnerMints = runners.map((r) => r.mint);
@@ -81,8 +83,7 @@ export async function buildGoldenCohort(
   );
   const selectedTokens = tokenMetrics.slice(0, tokenCount);
   for (const [i, t] of selectedTokens.entries()) {
-    await prisma.goldenCohortMember.create({
-      data: {
+    pending.push({
         chain,
         kind: 'token',
         key: t.mint,
@@ -91,8 +92,7 @@ export async function buildGoldenCohort(
         reasonCodes: ['verified_above_10m', 'enriched_price_series', `priced_trades:${t.pricedTrades}`, `total_trades:${t.totalTrades}`],
         engineVersion: GOLDEN_COHORT_ENGINE_VERSION,
         selectedAt: now
-      }
-    });
+      });
   }
 
   // --- Wallets: local-evidence discovered wallets ranked by priced coverage --
@@ -100,7 +100,8 @@ export async function buildGoldenCohort(
     where: { chain, validation: { notIn: ['provider_only', 'invalid'] } },
     orderBy: { walletAddress: 'asc' },
     select: { walletAddress: true },
-    distinct: ['walletAddress']
+    distinct: ['walletAddress'],
+    take: 2000
   });
   const walletMetrics: { address: string; pricedTrades: number; totalTrades: number; pricedSells: number }[] = [];
   for (const d of discovered) {
@@ -121,8 +122,7 @@ export async function buildGoldenCohort(
   );
   const selectedWallets = walletMetrics.slice(0, walletCount);
   for (const [i, w] of selectedWallets.entries()) {
-    await prisma.goldenCohortMember.create({
-      data: {
+    pending.push({
         chain,
         kind: 'wallet',
         key: w.address,
@@ -131,14 +131,14 @@ export async function buildGoldenCohort(
         reasonCodes: ['local_top_pnl_evidence', `priced_trades:${w.pricedTrades}`, `priced_sells:${w.pricedSells}`],
         engineVersion: GOLDEN_COHORT_ENGINE_VERSION,
         selectedAt: now
-      }
-    });
+      });
   }
 
   // --- Controls: matched controls of the selected tokens, with local trades --
   const matches = await prisma.cohortMatch.findMany({
     where: { runnerMint: { in: selectedTokens.map((t) => t.mint) } },
-    orderBy: { runnerMint: 'asc' },
+    orderBy: [{ runnerMint: 'asc' }, { controlMint: 'asc' }],
+    take: 2000,
     select: { runnerMint: true, controlMint: true, tier: true }
   });
   let controlRank = 0;
@@ -154,8 +154,7 @@ export async function buildGoldenCohort(
     if (total === 0) continue;
     seenControls.add(m.controlMint);
     controlRank += 1;
-    await prisma.goldenCohortMember.create({
-      data: {
+    pending.push({
         chain,
         kind: 'control_token',
         key: m.controlMint,
@@ -164,9 +163,13 @@ export async function buildGoldenCohort(
         reasonCodes: ['matched_control_of_selected_runner', `tier:${m.tier}`],
         engineVersion: GOLDEN_COHORT_ENGINE_VERSION,
         selectedAt: now
-      }
-    });
+      });
   }
 
-  return { tokens: selectedTokens.length, wallets: selectedWallets.length, controls: controlRank, wiped };
+  // Atomic swap: wipe + insert in ONE transaction.
+  const [wipedRes] = await prisma.$transaction([
+    prisma.goldenCohortMember.deleteMany({ where: { chain } }),
+    prisma.goldenCohortMember.createMany({ data: pending })
+  ]);
+  return { tokens: selectedTokens.length, wallets: selectedWallets.length, controls: controlRank, wiped: wipedRes.count };
 }

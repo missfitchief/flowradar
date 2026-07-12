@@ -38,6 +38,7 @@ const KOL_STATUSES = ['public_kol', 'public_promoter', 'copytrader'] as const;
 const SIGNAL_STATES: CandidateState[] = ['STEALTH_ACCUMULATION', 'EARLY_INDEPENDENT_CONFIRMATION'];
 
 const BASE_CAVEATS = [
+  'anti-circularity: wallets whose only discovery evidence is the replayed token are EXCLUDED from its buyer universe; residual ambiguity (qualification is full-history, not a historical snapshot) remains and is acknowledged here',
   'entity linkage and KOL status are current-state mappings (no historical wallet-status snapshots exist) — an approximation, receipted',
   'post-entry behavior is post-T by definition and is EXCLUDED from at-event evidence (distribution risk cannot fire in replay v1)',
   'price series granularity is bounded by 1D candles plus local snapshots — short windows are null where not covered, never interpolated'
@@ -58,20 +59,41 @@ export interface ReplayBatchReport {
   errorReceipts: WalletErrorReceipt[];
 }
 
-function mcapAtOrBefore(series: SeriesPoint[], tsMs: number): number | null {
-  let best: number | null = null;
+/** Last observation at/before tsMs, but only if it is FRESH ENOUGH
+ *  (maxAgeMs) — a months-old candle is not "the market cap at signal". */
+function mcapAtOrBefore(series: SeriesPoint[], tsMs: number, maxAgeMs: number): number | null {
+  let best: SeriesPoint | null = null;
   for (const p of series) {
-    if (p.tsMs <= tsMs) best = p.mcapUsd;
+    if (p.tsMs <= tsMs) best = p;
     else break;
   }
-  return best;
+  if (best === null || tsMs - best.tsMs > maxAgeMs) return null;
+  return best.mcapUsd;
 }
 
-function firstAtOrAfter(series: SeriesPoint[], tsMs: number): number | null {
+/** First observation inside [target, target + tolerance] — an observation far
+ *  past the window must NOT masquerade as that window's value (null instead,
+ *  never fabricated). */
+function firstInWindow(series: SeriesPoint[], targetMs: number, toleranceMs: number): number | null {
   for (const p of series) {
-    if (p.tsMs >= tsMs) return p.mcapUsd;
+    if (p.tsMs >= targetMs) {
+      return p.tsMs <= targetMs + toleranceMs ? p.mcapUsd : null;
+    }
   }
   return null;
+}
+
+/** TRUE maximum drawdown after the signal: worst peak-to-trough decline over
+ *  the later series (running-peak scan seeded at the signal baseline). */
+function maxDrawdownPctAfter(later: SeriesPoint[], baseline: number | null): number | null {
+  if (later.length === 0) return null;
+  let peak = baseline !== null && baseline > 0 ? baseline : later[0].mcapUsd;
+  let worst = 0;
+  for (const p of later) {
+    if (p.mcapUsd > peak) peak = p.mcapUsd;
+    else if (peak > 0) worst = Math.min(worst, (p.mcapUsd - peak) / peak);
+  }
+  return worst * 100;
 }
 
 export async function runNoLookaheadReplay(
@@ -91,7 +113,14 @@ export async function runNoLookaheadReplay(
   // Buyer universe: golden-cohort wallets UNION every wallet with LOCAL
   // top-PnL evidence (the qualified discovery universe) — maximizes honest
   // replay coverage without ever touching provider-only wallets.
-  const [goldenWallets, discoveredWallets] = await Promise.all([
+  //
+  // ANTI-CIRCULARITY (binding): a wallet discovered BECAUSE of token X must
+  // not count as "qualified" when replaying X itself — that would leak the
+  // outcome into the signal. Per replayed mint, only wallets with local
+  // evidence on at least one OTHER mint stay in that mint's buyer universe.
+  // Residual approximation (qualification is full-history, not a historical
+  // snapshot) is receipted on every event.
+  const [goldenWallets, discoveryRows] = await Promise.all([
     prisma.goldenCohortMember.findMany({
       where: { chain, kind: 'wallet' },
       orderBy: { rank: 'asc' },
@@ -99,13 +128,19 @@ export async function runNoLookaheadReplay(
     }),
     prisma.tokenTopPnlCandidate.findMany({
       where: { chain, validation: { notIn: ['provider_only', 'invalid'] } },
-      orderBy: { walletAddress: 'asc' },
-      select: { walletAddress: true },
-      distinct: ['walletAddress']
+      orderBy: [{ walletAddress: 'asc' }, { mint: 'asc' }],
+      take: 20_000,
+      select: { walletAddress: true, mint: true }
     })
   ]);
+  const evidenceMintsOf = new Map<string, Set<string>>();
+  for (const r of discoveryRows) {
+    const set = evidenceMintsOf.get(r.walletAddress) ?? new Set<string>();
+    set.add(r.mint);
+    evidenceMintsOf.set(r.walletAddress, set);
+  }
   const cohortWallets = [
-    ...new Set([...goldenWallets.map((w) => w.key), ...discoveredWallets.map((w) => w.walletAddress)])
+    ...new Set([...goldenWallets.map((w) => w.key), ...evidenceMintsOf.keys()])
   ].sort();
 
   const walletRows = await prisma.wallet.findMany({
@@ -133,6 +168,14 @@ export async function runNoLookaheadReplay(
     const mint = member.key;
     const cohortKind = member.kind === 'token' ? 'runner' : 'control';
     try {
+      // ANTI-CIRCULARITY: exclude wallets whose ONLY local evidence is this
+      // very mint — their qualification would be the outcome leaking back.
+      const eligibleWallets = cohortWallets.filter((w) => {
+        const ev = evidenceMintsOf.get(w);
+        if (!ev) return true; // no discovery evidence ties this wallet to the mint
+        return [...ev].some((m) => m !== mint);
+      });
+      const eligibleIds = walletRows.filter((w) => eligibleWallets.includes(w.address)).map((w) => w.id);
       const token = await prisma.token.findUnique({
         where: { chain_address: { chain, address: mint } },
         select: { id: true }
@@ -155,8 +198,10 @@ export async function runNoLookaheadReplay(
           }
         }
       }
+      // REAL provider observations only — synthetic seed continuations must
+      // never enter the outcome series (fabricated prices are not proof).
       const snapshots = await prisma.tokenMarketSnapshot.findMany({
-        where: { tokenId: token.id },
+        where: { tokenId: token.id, source: { not: { contains: 'synthetic' } } },
         orderBy: [{ ts: 'asc' }, { id: 'asc' }],
         take: 50_000,
         select: { ts: true, marketCapUsd: true }
@@ -169,7 +214,7 @@ export async function runNoLookaheadReplay(
 
       // --- Chronological priced buys: cohort + non-cohort cursors -----------
       const cohortBuys = await prisma.walletTokenTrade.findMany({
-        where: { tokenId: token.id, chain, action: 'BUY', walletId: { in: cohortIds }, amountUsd: { gt: 0 } },
+        where: { tokenId: token.id, chain, action: 'BUY', walletId: { in: eligibleIds }, amountUsd: { gt: 0 } },
         orderBy: [{ ts: 'asc' }, { id: 'asc' }],
         take: 5000,
         select: { walletId: true, ts: true, amountUsd: true }
@@ -184,11 +229,11 @@ export async function runNoLookaheadReplay(
       // Pre-fetch anchored evidence for this mint (filtered by <= T later).
       const [dormantObs, fundedPaths] = await Promise.all([
         prisma.addressDormancyObservation.findMany({
-          where: { chain, anchorKey: mint, walletAddress: { in: cohortWallets }, overallClass: 'covered_dormant' },
+          where: { chain, anchorKey: mint, walletAddress: { in: eligibleWallets }, overallClass: 'covered_dormant' },
           select: { walletAddress: true, eventTs: true }
         }),
         prisma.fundingReactivationPath.findMany({
-          where: { chain, anchorKey: mint, walletAddress: { in: cohortWallets }, status: 'funded' },
+          where: { chain, anchorKey: mint, walletAddress: { in: eligibleWallets }, status: 'funded' },
           select: { walletAddress: true, eventTs: true }
         })
       ]);
@@ -290,7 +335,7 @@ export async function runNoLookaheadReplay(
         // IMPOSSIBLE from unpriced evidence, so it is an honest no_signal
         // (never skipped, never priced by fabrication).
         const unpricedFirst = await prisma.walletTokenTrade.findFirst({
-          where: { tokenId: token.id, chain, action: 'BUY', walletId: { in: cohortIds }, amountUsd: { lte: 0 } },
+          where: { tokenId: token.id, chain, action: 'BUY', walletId: { in: eligibleIds }, amountUsd: { lte: 0 } },
           orderBy: [{ ts: 'asc' }, { id: 'asc' }],
           select: { ts: true }
         });
@@ -317,20 +362,20 @@ export async function runNoLookaheadReplay(
       const tMs = chosen.ts.getTime();
 
       // --- Outcome (recorded separately; never feeds at-event fields) -------
-      const mcapAtSignal = mcapAtOrBefore(series, tMs);
+      // At-signal mcap must be a FRESH prior observation (<= 48h, the same
+      // staleness bound the valuation backfill uses); each later window
+      // accepts only an observation within ONE window-length past its target
+      // — otherwise the field stays null (uncovered, never fabricated).
+      const mcapAtSignal = mcapAtOrBefore(series, tMs, 48 * 3_600_000);
       const later = series.filter((p) => p.tsMs > tMs);
       const maxLater = later.length > 0 ? Math.max(...later.map((p) => p.mcapUsd)) : null;
-      const minLater = later.length > 0 ? Math.min(...later.map((p) => p.mcapUsd)) : null;
-      const drawdown =
-        mcapAtSignal !== null && minLater !== null && mcapAtSignal > 0
-          ? Math.min(0, (minLater - mcapAtSignal) / mcapAtSignal) * 100
-          : null;
+      const drawdown = maxDrawdownPctAfter(later, mcapAtSignal);
       const windows = {
-        h1: firstAtOrAfter(series, tMs + 3_600_000),
-        h6: firstAtOrAfter(series, tMs + 6 * 3_600_000),
-        h24: firstAtOrAfter(series, tMs + 24 * 3_600_000),
-        d3: firstAtOrAfter(series, tMs + 3 * 86_400_000),
-        d7: firstAtOrAfter(series, tMs + 7 * 86_400_000)
+        h1: firstInWindow(series, tMs + 3_600_000, 3_600_000),
+        h6: firstInWindow(series, tMs + 6 * 3_600_000, 6 * 3_600_000),
+        h24: firstInWindow(series, tMs + 24 * 3_600_000, 24 * 3_600_000),
+        d3: firstInWindow(series, tMs + 3 * 86_400_000, 3 * 86_400_000),
+        d7: firstInWindow(series, tMs + 7 * 86_400_000, 7 * 86_400_000)
       };
 
       const classification =
