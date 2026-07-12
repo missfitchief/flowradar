@@ -325,7 +325,9 @@ export async function buildTokenCandidateScores(
       const linkedAddressCount = cleanBuyers.filter(
         (a) => receiverClassOf.get(a) === 'linked_side_wallet'
       ).length;
-      const receiverDeployments = cleanBuyers.filter((a) => receiverFirstReceipt.has(a)).length;
+      // PRICED receivers only — an unpriced-only post-receipt buy is never
+      // score evidence (consistent with every other positive metric).
+      const receiverDeployments = pricedBuyers.filter((a) => receiverFirstReceipt.has(a)).length;
 
       // Dormancy / funding / alt-wallet / behavior evidence anchored at THIS
       // mint — CLEAN buyers only (KOL evidence never boosts).
