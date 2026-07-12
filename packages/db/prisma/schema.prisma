@@ -2038,3 +2038,272 @@ model DormantRunnerCandidate {
   @@index([pattern])
   @@map("dormant_runner_candidates")
 }
+
+/// Top-PnL discovery (runner-mining scope correction) — one candidate row per
+/// (mint, wallet, source). Provider-claimed figures are DISCOVERY EVIDENCE
+/// ONLY (never votes, never eligibility, never local truth); local fields are
+/// bounded local reconstruction; validation compares the two honestly.
+/// SHADOW-ONLY analytics.
+model TokenTopPnlCandidate {
+  id                      String    @id @default(cuid())
+  chain                   ChainId
+  mint                    String
+  walletAddress           String
+  /// 'local_reconstruction' | 'birdeye_top_traders'
+  source                  String
+  /// Provider list position (1-based) or local rank by realized proxy.
+  providerRank            Int?
+  claimedRealizedPnlUsd   Decimal?  @db.Decimal(24, 4)
+  claimedUnrealizedPnlUsd Decimal?  @db.Decimal(24, 4)
+  claimedTotalPnlUsd      Decimal?  @db.Decimal(24, 4)
+  claimedBoughtUsd        Decimal?  @db.Decimal(24, 4)
+  claimedSoldUsd          Decimal?  @db.Decimal(24, 4)
+  /// Provider does not report remaining value — stays NULL (never derived).
+  claimedRemainingUsd     Decimal?  @db.Decimal(24, 4)
+  /// Only when the provider supplies enough to derive it honestly; else NULL.
+  claimedRoi              Float?
+  claimedTradeCount       Int?
+  providerTags            String[]
+  /// Provider window (24h max — a PRESENT-window view, never historical).
+  providerTimeFrame       String?
+  /// Verbatim provider item (receipt).
+  providerJson            Json?
+  localBuyCount           Int       @default(0)
+  localSellCount          Int       @default(0)
+  /// Sums of PRICED trades only (unpriced never fabricated as $0).
+  localBoughtUsd          Decimal?  @db.Decimal(24, 4)
+  localSoldUsd            Decimal?  @db.Decimal(24, 4)
+  /// localSoldUsd - localBoughtUsd (rough realized proxy, priced legs only).
+  localRealizedProxyUsd   Decimal?  @db.Decimal(24, 4)
+  localFirstBuyTs         DateTime?
+  localFirstSellTs        DateTime?
+  localLastSellTs         DateTime?
+  localUnpricedTrades     Int       @default(0)
+  /// locally_verified | partially_verified | provider_only | conflicting |
+  /// incomplete | invalid
+  validation              String
+  /// local_full | local_partial | none
+  coverage                String
+  confidence              Float
+  reasonCodes             String[]
+  receiptsJson            Json
+  caveats                 String[]
+  engineVersion           Int
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@unique([chain, mint, walletAddress, source])
+  @@index([mint])
+  @@index([walletAddress])
+  @@index([validation])
+  @@map("token_top_pnl_candidates")
+}
+
+/// Per-mint provider fetch state for the top-PnL discovery pass — resumable
+/// (fetched mints are skipped) + budgeted, mirroring token_enrichments.
+model TopPnlFetchState {
+  id         String    @id @default(cuid())
+  mint       String
+  provider   String    @default("birdeye_top_traders")
+  /// fetched | empty | provider_error
+  status     String
+  itemCount  Int       @default(0)
+  retryCount Int       @default(0)
+  lastError  String?
+  fetchedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([mint, provider])
+  @@index([status])
+  @@map("top_pnl_fetch_states")
+}
+
+/// Wallet DNA (runner-mining scope correction) — one OBSERVATION-ONLY row per
+/// discovered wallet: complete cross-token history (winners AND losers),
+/// WR/EV over COMPLETED positions only (explicit denominators; open and
+/// unpriced positions never count as wins/losses), one-winner dependence
+/// exposed, dormancy/funding/post-entry summaries joined from the T7-T12
+/// shadow tables. Coverage-adjusted confidence. NEVER feeds FlowScore/
+/// signals/eligibility; wallets stay observation_only.
+model WalletDnaProfile {
+  id                        String   @id @default(cuid())
+  chain                     ChainId
+  walletAddress             String
+  /// Constant 'observation_only' — DNA rows grant nothing.
+  status                    String   @default("observation_only")
+  tokensEntered             Int      @default(0)
+  runnersEntered            Int      @default(0)
+  completedPositions        Int      @default(0)
+  openPositions             Int      @default(0)
+  unpricedPositions         Int      @default(0)
+  winCount                  Int      @default(0)
+  lossCount                 Int      @default(0)
+  /// NULL when completedPositions == 0 — never a fabricated 0/0.
+  winRate                   Float?
+  evUsdPerCompletedPosition Float?
+  oneWinnerDependence       Float?
+  outcomeMixJson            Json?
+  dormancySummaryJson       Json?
+  fundingSummaryJson        Json?
+  postEntryMixJson          Json?
+  negativeEvidenceJson      Json?
+  /// Which mints/sources discovered this wallet (receipt).
+  discoveryJson             Json?
+  /// full | partial | minimal
+  coverage                  String
+  confidence                Float
+  reasonCodes               String[]
+  receiptsJson              Json
+  caveats                   String[]
+  engineVersion             Int
+  computedAt                DateTime
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  @@unique([chain, walletAddress])
+  @@index([coverage])
+  @@map("wallet_dna_profiles")
+}
+
+/// Capital outflow path (working-loop milestone) — where capital LEAVES a
+/// qualified (DNA-discovered) wallet: direct transfers, bounded multi-hop
+/// transfers, bridge exits, router/service exits and CEX deposits. Evidence
+/// tiers are ORDERED: direct_transfer > multi_hop_transfer > bridge_inference
+/// > cex_correlation — a CEX deposit NEVER attributes a downstream receiver.
+/// SHADOW-ONLY analytics; observation_only always.
+model CapitalOutflowPath {
+  id                     String    @id @default(cuid())
+  chain                  ChainId
+  /// Qualified source wallet (wallet_dna_profiles cohort).
+  sourceWallet           String
+  /// Entity key of the source (repeat_runner_candidates adjustment; the
+  /// wallet's own address when no entity row covers it).
+  sourceEntityKey        String
+  destinationAddress     String
+  /// wallet | bridge | cex | service
+  destinationType        String
+  /// direct_transfer | multi_hop_transfer | bridge_inference | cex_correlation
+  evidenceTier           String
+  hops                   Int
+  transferCount          Int       @default(0)
+  /// Sum of KNOWN (valued > dust) USD across counted legs — never a claimed
+  /// total; unknown-value legs are counted separately.
+  knownValueUsd          Decimal?  @db.Decimal(24, 4)
+  unknownValueLegs       Int       @default(0)
+  firstTransferTs        DateTime
+  lastTransferTs         DateTime
+  bridgeProtocol         String?
+  /// Pre-existing (pre-first-transfer) source<->receiver relationship tier.
+  receiverRelationshipTier String?
+  /// fresh_receiver | dormant_receiver | active_receiver | service | unknown
+  receiverClassAtReceipt String
+  pathJson               Json
+  reasonCodes            String[]
+  receiptsJson           Json
+  caveats                String[]
+  engineVersion          Int
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  @@unique([chain, sourceWallet, destinationAddress, evidenceTier])
+  @@index([destinationAddress])
+  @@index([sourceEntityKey])
+  @@index([evidenceTier])
+  @@map("capital_outflow_paths")
+}
+
+/// Receiver enrollment (working-loop milestone) — a wallet that RECEIVED
+/// meaningful capital from a qualified entity via transfer evidence
+/// (direct/multi-hop ONLY — bridge/CEX tiers never enroll receivers), kept
+/// strictly observation_only, with its post-receipt token deployments
+/// detected from local trades. PILOT/SHADOW-ONLY: never touches the live
+/// monitoring machinery, never grants eligibility.
+model ReceiverEnrollment {
+  id                    String   @id @default(cuid())
+  chain                 ChainId
+  receiverAddress       String
+  /// Constant 'observation_only'.
+  status                String   @default("observation_only")
+  /// fresh_receiver | dormant_reactivated | linked_side_wallet |
+  /// active_receiver | unknown
+  receiverClass         String
+  /// Qualified source entities that funded this receiver (bounded).
+  sourceEntityKeys      String[]
+  sourceWallets         String[]
+  evidenceTiers         String[]
+  firstReceiptTs        DateTime
+  totalKnownInflowUsd   Decimal? @db.Decimal(24, 4)
+  unknownValueLegs      Int      @default(0)
+  /// Post-receipt token BUY deployments: [{mint, firstBuyTs, buyCount,
+  /// boughtKnownUsd|null, unpricedBuys}] — bounded, stable order.
+  deploymentsJson       Json
+  deployedTokenCount    Int      @default(0)
+  reasonCodes           String[]
+  receiptsJson          Json
+  caveats               String[]
+  engineVersion         Int
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([chain, receiverAddress])
+  @@index([receiverClass])
+  @@map("receiver_enrollments")
+}
+
+/// Automatic token-candidate row (working-loop milestone) — one row per
+/// candidate mint discovered from qualified-entity + enrolled-receiver buys.
+/// The state vocabulary REUSES StealthState semantics but is derived from
+/// MINING evidence (stateBasis 'mining_derived'); when the live stealth
+/// engine has a persisted snapshot it is recorded SIDE BY SIDE (never
+/// overridden, never fabricated). The score is a SHADOW ranking (documented
+/// deterministic weights) — NOT a FlowScore, NEVER feeds signals/eligibility.
+model TokenCandidateScore {
+  id                     String    @id @default(cuid())
+  chain                  ChainId
+  mint                   String
+  /// Latest locally observed market cap (TokenMarketSnapshot) — NULL when
+  /// never observed (never fabricated).
+  currentMcapUsd         Decimal?  @db.Decimal(20, 4)
+  currentMcapTs          DateTime?
+  qualifiedEntityCount   Int       @default(0)
+  /// Entity-adjusted count of INDEPENDENT qualified entities buying (linked
+  /// wallets/receivers collapse into their source entity).
+  independentEntityCount Int       @default(0)
+  qualifiedBuyerCount    Int       @default(0)
+  linkedAddressCount     Int       @default(0)
+  receiverDeployments    Int       @default(0)
+  dormantReactivations   Int       @default(0)
+  fundedPathCount        Int       @default(0)
+  altWalletEvidenceCount Int       @default(0)
+  nonCohortBuyerCount    Int       @default(0)
+  kolContamination       Int       @default(0)
+  /// Post-entry behavior mix of qualified buyers ON THIS MINT.
+  behaviorMixJson        Json?
+  /// WATCHING | STEALTH_ACCUMULATION | EARLY_INDEPENDENT_CONFIRMATION |
+  /// PUBLIC_KOL_ARRIVAL | CROWD_EXPANSION | DISTRIBUTION_RISK | INVALIDATED
+  state                  String
+  /// 'mining_derived' — the only basis this builder writes.
+  stateBasis             String
+  /// Latest persisted StealthSnapshot state for the token (side-by-side
+  /// evidence; NULL when the stealth engine never evaluated it).
+  stealthEngineState     String?
+  stealthEngineBucketTs  DateTime?
+  /// SHADOW ranking 0-100 (deterministic documented weights) — not FlowScore.
+  score                  Float
+  confidence             Float
+  buyersJson             Json
+  fundingPathsJson       Json?
+  reasonCodes            String[]
+  receiptsJson           Json
+  caveats                String[]
+  engineVersion          Int
+  computedAt             DateTime
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  @@unique([chain, mint])
+  @@index([state])
+  @@index([score])
+  @@map("token_candidate_scores")
+}

@@ -57,10 +57,26 @@ export interface TokenTopTrader {
   pnlUsd?: number;
   winRate?: number;
   tradeCount?: number;
+  // Optional PROVIDER-CLAIMED detail fields (runner-mining top-PnL discovery,
+  // additive — existing consumers unaffected). Claims, never local truth.
+  realizedPnlUsd?: number | null;
+  unrealizedPnlUsd?: number | null;
+  totalPnlUsd?: number | null;
+  volumeBuyUsd?: number | null;
+  volumeSellUsd?: number | null;
+  tradeBuy?: number | null;
+  tradeSell?: number | null;
+  tags?: string[];
+  /** Verbatim provider item — receipt for auditing the claim. */
+  raw?: unknown;
 }
 
 export interface GetTopTradersOpts {
   limit?: number;
+  /** Doc-verified sort_by values (birdeye): volume | trade | total_pnl | unrealized_pnl | realized_pnl | volume_usd. */
+  sortBy?: 'volume' | 'trade' | 'total_pnl' | 'unrealized_pnl' | 'realized_pnl' | 'volume_usd';
+  /** Doc-verified time_frame values (birdeye caps at 24h — a PRESENT-window view, never historical). */
+  timeFrame?: '30m' | '1h' | '2h' | '4h' | '6h' | '8h' | '12h' | '24h';
 }
 
 export interface TokenTopTradersProvider {
