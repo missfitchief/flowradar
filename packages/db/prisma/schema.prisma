@@ -1876,3 +1876,165 @@ model EntityDormancyObservation {
   @@index([chain, walletAddress])
   @@map("entity_dormancy_observations")
 }
+
+/// Dormancy Task 9 — bounded strictly-pre-event funding/reactivation path per
+/// anchor event (backward BFS over VALUED money-flow edges, depth <=3, nodes
+/// <=50, service nodes are path TERMINALS, never expanded). Valuation stays
+/// honest: unknown-value funding is reported, never treated as evidence.
+/// SHADOW-ONLY analytics: never read by FlowScore/signals/eligibility.
+model FundingReactivationPath {
+  id                           String    @id @default(cuid())
+  chain                        ChainId
+  walletAddress                String
+  eventKind                    String
+  anchorKey                    String
+  eventTs                      DateTime
+  /// funded | unknown_value_funding_only | no_meaningful_pre_event_funding |
+  /// no_transfer_history
+  status                       String
+  /// Nearest VALUED (>dust) pre-event inbound — the reactivation funding.
+  directFunderAddress          String?
+  directFundingTs              DateTime?
+  directFundingAsset           String?
+  /// HONEST valuation — NULL == unknown (never 0-for-unknown).
+  directFundingValuedUsd       Decimal?  @db.Decimal(20, 4)
+  directFundingTxHash          String?
+  /// Earliest VALUED pre-event inbound in local history (first funder).
+  firstFunderAddress           String?
+  firstFundingTs               DateTime?
+  firstFundingTxHash           String?
+  /// eventTs - directFundingTs, seconds.
+  fundingToEventDelaySec       Int?
+  pathDepth                    Int       @default(0)
+  nodesExplored                Int       @default(0)
+  pathTruncated                Boolean   @default(false)
+  /// Bounded hop list: {hop, address, fundedAddress, ts, txHash, asset, valuedUsd, serviceNode}.
+  pathJson                     Json
+  /// possible | probable | strong (relationship-contract bands) — funder link.
+  funderRelationshipTier       String?
+  funderRelationshipConfidence Float?
+  /// Prior VALUED fundings from the SAME direct funder to this wallet, pre-event.
+  repeatFundingCount           Int       @default(0)
+  reasonCodes                  String[]
+  receiptsJson                 Json
+  caveats                      String[]
+  engineVersion                Int
+  createdAt                    DateTime  @default(now())
+  updatedAt                    DateTime  @updatedAt
+
+  @@unique([chain, walletAddress, eventKind, anchorKey])
+  @@index([status])
+  @@index([directFunderAddress])
+  @@map("funding_reactivation_paths")
+}
+
+/// Dormancy Task 10 — post-entry behavior per (wallet, token entry), derived
+/// from the observed entry FORWARD (existing tokenPositions + receipts engine
+/// + token-scoped outbound transfers). A transfer is NEVER a sale without
+/// evidence: outbound token flows are labeled linked/service/unknown, not
+/// exits. SHADOW-ONLY analytics.
+model PostEntryBehavior {
+  id                     String   @id @default(cuid())
+  chain                  ChainId
+  walletAddress          String
+  tokenAddress           String
+  entryTs                DateTime
+  /// durable_hold | partial_exit | full_exit | fast_flip | fast_dump |
+  /// burst_exit | staged_distribution | transfer_to_linked |
+  /// transfer_to_service | still_holding | unknown
+  primaryClass           String
+  /// Every applicable label (a fast flip is ALSO a full exit, etc.).
+  labels                 String[]
+  buyCount               Int      @default(0)
+  sellCount              Int      @default(0)
+  exitRatio              Float?
+  timeToFirstSellSec     Int?
+  fullExitSec            Int?
+  outboundTokenTransfers Int      @default(0)
+  outboundToLinked       Int      @default(0)
+  outboundToService      Int      @default(0)
+  outboundUnknown        Int      @default(0)
+  confidence             Float
+  /// False when the local view was truncated/unpriced — honesty-degraded.
+  dataComplete           Boolean  @default(false)
+  reasonCodes            String[]
+  receiptsJson           Json
+  caveats                String[]
+  engineVersion          Int
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@unique([chain, walletAddress, tokenAddress])
+  @@index([primaryClass])
+  @@index([chain, walletAddress])
+  @@map("post_entry_behaviors")
+}
+
+/// Dormancy Task 11 — repeat-runner candidate ranking per ENTITY
+/// (entity-adjusted: probable/strong-linked wallets never count as
+/// independent repeats). Small-N honesty: insufficient_evidence rows are the
+/// expected common case. OBSERVATION-ONLY: never votes, never eligibility.
+model RepeatRunnerCandidate {
+  id                     String   @id @default(cuid())
+  chain                  ChainId
+  /// Deterministic entity key = lexicographically-smallest member wallet.
+  entityKey              String
+  memberWallets          String[]
+  /// True when >1 member was merged via probable/strong links.
+  entityAdjusted         Boolean  @default(false)
+  /// candidate | insufficient_evidence | excluded_negative_evidence
+  status                 String
+  runnersEntered         Int      @default(0)
+  distinctRunnersEntered Int      @default(0)
+  controlsEntered        Int      @default(0)
+  otherTokensEntered     Int      @default(0)
+  /// Share of runner entries on the single top token (1.0 == one-winner).
+  oneWinnerDependence    Float?
+  behaviorQualityJson    Json?
+  negativeEvidenceJson   Json?
+  /// Observation-only ranking score (capped, receipted) — NEVER a promotion.
+  score                  Float?
+  scoreBasis             String[]
+  reasonCodes            String[]
+  receiptsJson           Json
+  caveats                String[]
+  engineVersion          Int
+  computedAt             DateTime
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@unique([chain, entityKey])
+  @@index([status])
+  @@map("repeat_runner_candidates")
+}
+
+/// Dormancy Task 12 — dormant-runner pattern per ENTITY (joins T7/T8 dormancy
+/// observations with T11 exposure). A pattern is NEVER claimed from one
+/// event. OBSERVATION-ONLY: never votes, never eligibility.
+model DormantRunnerCandidate {
+  id                         String   @id @default(cuid())
+  chain                      ChainId
+  entityKey                  String
+  memberWallets              String[]
+  /// repeated_independent_dormant | side_wallet_activation_pattern |
+  /// fresh_funding_pattern | one_off | insufficient_evidence
+  pattern                    String
+  dormantEntryEvents         Int      @default(0)
+  sideWalletActivationEvents Int      @default(0)
+  freshFundingEvents         Int      @default(0)
+  distinctRunnerTokens       Int      @default(0)
+  /// Bounded event list: {wallet, token, eventTs, addressClass, entityClass}.
+  eventsJson                 Json
+  confidence                 Float
+  reasonCodes                String[]
+  receiptsJson               Json
+  caveats                    String[]
+  engineVersion              Int
+  computedAt                 DateTime
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  @@unique([chain, entityKey])
+  @@index([pattern])
+  @@map("dormant_runner_candidates")
+}

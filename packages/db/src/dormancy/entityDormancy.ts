@@ -326,12 +326,14 @@ export interface EntityDormancyBatchReport {
  * Relationship-contract confidence bands (WalletRelationship doc: possible
  * <50, probable 50-79, strong >=80) — NOT cluster confidenceBand, whose
  * boundaries differ (a direct_funding at 60 must band probable here).
+ * Exported for the Task 9 funding-path builder (same contract).
  */
-function tierOfConfidence(conf: number): LinkTier {
+export function relationshipTierOfConfidence(conf: number): LinkTier {
   if (conf >= 80) return 'strong';
   if (conf >= 50) return 'probable';
   return 'possible';
 }
+const tierOfConfidence = relationshipTierOfConfidence;
 
 const TIER_RANK: Record<LinkTier, number> = { possible: 0, probable: 1, strong: 2 };
 const FUNDING_KINDS = new Set(['first_funder', 'direct_funding']);

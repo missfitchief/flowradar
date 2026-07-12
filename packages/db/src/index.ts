@@ -47,3 +47,4 @@ export * from './risk/runTokenRiskRefresh';
 export * from './dormancy/activity';
 export * from './dormancy/addressDormancy';
 export * from './dormancy/entityDormancy';
+export * from './dormancy/fundingPaths';
