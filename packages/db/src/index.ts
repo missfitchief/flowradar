@@ -45,3 +45,4 @@ export * from './runnermining/enrich';
 export * from './risk/tokenRiskCache';
 export * from './risk/runTokenRiskRefresh';
 export * from './dormancy/activity';
+export * from './dormancy/addressDormancy';

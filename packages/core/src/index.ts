@@ -52,6 +52,7 @@ export * from './stealth/index';
 export * from './runnermining/index';
 export * from './risk/freshness';
 export * from './dormancy/meaningfulActivity';
+export * from './dormancy/dormancy';
 
 // Graph module: the unused sketch GraphNode/GraphEdge/RawGraphEdge that used
 // to live in ./types (never implemented or consumed — confirmed by repo-wide
