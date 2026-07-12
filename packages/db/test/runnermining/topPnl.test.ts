@@ -122,6 +122,15 @@ describe('validateProviderClaim (pure)', () => {
     expect(validateProviderClaim({ ...base, malformed: true }).validation).toBe('invalid');
     expect(validateProviderClaim({ ...base, claimedRealizedPnlUsd: null }).validation).toBe('partially_verified');
   });
+  it('incomparable provider windows can never verify NOR conflict', () => {
+    const r = validateProviderClaim({ ...base, windowsComparable: false });
+    expect(r.validation).toBe('partially_verified');
+    expect(r.reasonCodes).toContain('provider_window_not_comparable_to_local_history');
+    // Even a wild sign conflict is NOT 'conflicting' across incomparable windows.
+    expect(
+      validateProviderClaim({ ...base, localRealizedProxyUsd: -500, windowsComparable: false }).validation
+    ).toBe('partially_verified');
+  });
 });
 
 describe.skipIf(!dbReachable)('buildTokenTopPnlCandidates (discovery builder)', () => {
@@ -186,7 +195,10 @@ describe.skipIf(!dbReachable)('buildTokenTopPnlCandidates (discovery builder)', 
         }
       }
     });
-    expect(verified.validation).toBe('locally_verified');
+    // Birdeye's 24h present window is never comparable against the
+    // all-history local view — the claim caps at partially_verified.
+    expect(verified.validation).toBe('partially_verified');
+    expect(verified.reasonCodes).toContain('provider_window_not_comparable_to_local_history');
     expect(verified.providerRank).toBe(1);
     expect(Number(verified.claimedRealizedPnlUsd)).toBe(95);
     expect(verified.providerTimeFrame).toBe('24h');

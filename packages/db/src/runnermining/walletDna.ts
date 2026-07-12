@@ -127,6 +127,27 @@ export async function buildWalletDnaProfiles(
       const positions = (profile?.local?.tokenPositions ?? []).filter((tp) => tp.firstBuyTs !== null);
       const truncated = profile?.localViewTruncated === true;
 
+      // Trade-level honesty check: position aggregates hide MIXED
+      // priced/unpriced legs (buyUsd > 0 can coexist with unknown-value
+      // legs, silently corrupting cost basis). Any token with at least one
+      // unpriced BUY/SELL leg is excluded from W/L and counted as unpriced.
+      const walletRow = await prisma.wallet.findUnique({
+        where: { address_chain: { address: walletAddress, chain } },
+        select: { id: true }
+      });
+      const tokensWithUnpricedLegs = new Set<string>(
+        walletRow
+          ? (
+              await prisma.walletTokenTrade.findMany({
+                where: { walletId: walletRow.id, chain, action: { in: ['BUY', 'SELL'] }, amountUsd: 0 },
+                select: { token: { select: { address: true } } },
+                distinct: ['tokenId'],
+                take: 5000
+              })
+            ).map((t) => t.token.address)
+          : []
+      );
+
       // 2. Completed-position W/L + EV (explicit denominators; USD proxy).
       let completed = 0;
       let open = 0;
@@ -141,9 +162,9 @@ export async function buildWalletDnaProfiles(
         if (runnerMints.has(pos.tokenAddress)) runnersEntered += 1;
         const outcome = outcomeOf.get(pos.tokenAddress) ?? 'unknown';
         outcomeMix[outcome] = (outcomeMix[outcome] ?? 0) + 1;
-        const priced = pos.buyUsd > 0;
+        const priced = pos.buyUsd > 0 && !tokensWithUnpricedLegs.has(pos.tokenAddress);
         if (!priced) {
-          unpriced += 1;
+          unpriced += 1; // fully-unpriced OR mixed-leg position: never W/L
           continue;
         }
         const fullyExited = pos.exitRatio !== null && pos.exitRatio >= 0.95 && pos.fullExitSec !== null;

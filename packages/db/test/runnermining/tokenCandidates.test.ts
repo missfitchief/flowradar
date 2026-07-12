@@ -183,9 +183,10 @@ describe.skipIf(!dbReachable)('buildTokenCandidateScores', () => {
     });
     expect(row.kolContamination).toBe(1);
     expect(row.state).toBe('PUBLIC_KOL_ARRIVAL');
-    // w1 + its receiver = ONE entity; kol = another.
-    expect(row.independentEntityCount).toBe(2);
+    // w1 + its receiver = ONE entity; the KOL buyer is EXCLUDED from every
+    // positive metric (contamination only) — so 1 independent entity.
+    expect(row.independentEntityCount).toBe(1);
     expect(row.receiverDeployments).toBe(1);
-    expect(row.qualifiedBuyerCount).toBe(3);
+    expect(row.qualifiedBuyerCount).toBe(2); // KOL never counts as qualified
   });
 });

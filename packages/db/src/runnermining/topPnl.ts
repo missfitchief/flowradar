@@ -66,6 +66,12 @@ export function validateProviderClaim(input: {
   localUnpriced: boolean;
   localTruncated: boolean;
   malformed: boolean;
+  /** False when the provider's window cannot honestly be compared against
+   *  the local (all-history) view — e.g. Birdeye's 24h present window vs a
+   *  historical position. Magnitude/sign comparison is then SKIPPED: the
+   *  claim can never be locally verified NOR labeled conflicting from an
+   *  incomparable window. Defaults to true (comparable). */
+  windowsComparable?: boolean;
 }): { validation: TopPnlValidation; confidence: number; reasonCodes: string[] } {
   if (input.malformed) {
     return { validation: 'invalid', confidence: 5, reasonCodes: ['malformed_provider_item'] };
@@ -80,6 +86,13 @@ export function validateProviderClaim(input: {
       reasonCodes: [
         input.localTruncated ? 'local_view_truncated' : 'local_valuation_incomplete'
       ]
+    };
+  }
+  if (input.windowsComparable === false) {
+    return {
+      validation: 'partially_verified',
+      confidence: 40,
+      reasonCodes: ['provider_window_not_comparable_to_local_history']
     };
   }
   if (input.claimedRealizedPnlUsd === null) {
@@ -119,6 +132,9 @@ export interface TopPnlBatchReport {
     mintsSkippedResume: number;
     mintsEmpty: number;
     mintsErrored: number;
+    /** Provider items skipped because they carry no usable wallet address —
+     *  isolated per ITEM (the mint's remaining items still process). */
+    malformedItemsSkipped: number;
     budgetExhausted: boolean;
   };
 }
@@ -175,9 +191,11 @@ async function localViews(
     }
   }
   for (const v of byWallet.values()) {
-    // Realized proxy ONLY when every leg on both sides was priced — a mixed
-    // view could fabricate PnL from partial sums.
-    if (v.unpricedTrades === 0 && v.boughtUsd !== null && v.buyCount > 0) {
+    // Realized proxy ONLY when every leg on both sides was priced AND at
+    // least one sell exists — a buy-only (still-holding) position has NO
+    // realized outcome, and treating it as (0 - cost) would fabricate a
+    // realized loss from open inventory.
+    if (v.unpricedTrades === 0 && v.boughtUsd !== null && v.buyCount > 0 && v.sellCount > 0) {
       v.realizedProxyUsd = (v.soldUsd ?? 0) - v.boughtUsd;
     }
   }
@@ -243,6 +261,7 @@ export async function buildTokenTopPnlCandidates(
       mintsSkippedResume: 0,
       mintsEmpty: 0,
       mintsErrored: 0,
+      malformedItemsSkipped: 0,
       budgetExhausted: false
     }
   };
@@ -284,7 +303,9 @@ export async function buildTokenTopPnlCandidates(
           } else {
             validation = 'incomplete';
             confidence = 35;
-            reasons.push(v && v.unpricedTrades > 0 ? 'unpriced_local_trades' : 'bounded_local_view');
+            if (v && v.unpricedTrades > 0) reasons.push('unpriced_local_trades');
+            else if (v && v.sellCount === 0 && v.buyCount > 0) reasons.push('position_open_no_local_sells');
+            else reasons.push('bounded_local_view');
             caveats.push('local valuation/coverage incomplete — realized proxy withheld rather than fabricated');
           }
         } else {
@@ -301,7 +322,10 @@ export async function buildTokenTopPnlCandidates(
             hasLocalTrades: v !== null,
             localUnpriced: (v?.unpricedTrades ?? 0) > 0,
             localTruncated,
-            malformed
+            malformed,
+            // Birdeye top_traders is a 24h PRESENT window — never honestly
+            // comparable against the all-history local view.
+            windowsComparable: false
           });
           validation = verdict.validation;
           confidence = verdict.confidence;
@@ -408,6 +432,13 @@ export async function buildTokenTopPnlCandidates(
             });
             for (let i = 0; i < items.length; i++) {
               const item = items[i];
+              // Per-ITEM isolation: an item with no usable wallet address has
+              // no upsert key — skip it (counted) instead of aborting the
+              // mint's remaining items.
+              if (typeof item.walletAddress !== 'string' || item.walletAddress.length === 0) {
+                report.provider.malformedItemsSkipped += 1;
+                continue;
+              }
               const v = byWallet.get(item.walletAddress) ?? null;
               await upsertRow(item.walletAddress, 'birdeye_top_traders', i + 1, item, v);
             }

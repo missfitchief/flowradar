@@ -122,11 +122,17 @@ export async function buildCapitalOutflowPaths(
   if (opts.walletAddresses) {
     sources = [...new Set(opts.walletAddresses)].sort().slice(0, limit);
   } else {
-    const rows = await prisma.walletDnaProfile.findMany({
-      where: { chain },
+    // QUALIFIED cohort = wallets with LOCAL top-PnL evidence only. Wallets
+    // known solely from provider claims (provider_only/invalid) NEVER become
+    // qualified sources — provider claims are discovery evidence, not
+    // standing (Wallet DNA rows alone don't qualify either: DNA is
+    // observation, this is the qualification boundary).
+    const rows = await prisma.tokenTopPnlCandidate.findMany({
+      where: { chain, validation: { notIn: ['provider_only', 'invalid'] } },
       orderBy: { walletAddress: 'asc' },
-      take: limit,
-      select: { walletAddress: true }
+      select: { walletAddress: true },
+      distinct: ['walletAddress'],
+      take: limit
     });
     sources = rows.map((r) => r.walletAddress);
   }
@@ -252,6 +258,9 @@ export async function buildCapitalOutflowPaths(
       let frontier: Frontier[] = [{ address: sourceWallet, hop: 0, arrivalTs: opts.sinceTs ?? new Date(0) }];
       let nodesExplored = 0;
       let truncated = false;
+      // Unknown-value outbound transfers seen at ANY walk node — counted for
+      // honest receipts (unknown is reported, never traced as movement).
+      let walkUnknownValueLegs = 0;
       while (frontier.length > 0) {
         const next: Frontier[] = [];
         for (const node of frontier) {
@@ -261,6 +270,15 @@ export async function buildCapitalOutflowPaths(
           }
           nodesExplored += 1;
           if (node.hop >= maxDepth) continue;
+          walkUnknownValueLegs += await prisma.moneyFlowEdge.count({
+            where: {
+              sourceAddress: node.address,
+              sourceChain: chain,
+              ts: node.hop === 0 ? (sinceFilter ?? { gt: new Date(0) }) : { gt: node.arrivalTs },
+              actionType: 'transfer',
+              valuedUsd: null
+            }
+          });
           const childCap = node.hop === 0 ? maxChildrenFirstHop : maxChildren;
           // Capital can only continue AFTER it arrived at this node. Only
           // VALUED (> dust) outflow-relevant legs are movement evidence —
@@ -343,18 +361,6 @@ export async function buildCapitalOutflowPaths(
         }
         frontier = next;
       }
-
-      // Honest reporting: unknown-value outbound transfers exist but are
-      // NEVER traced as capital movement (unknown is not evidence).
-      const unknownValueOutbound = await prisma.moneyFlowEdge.count({
-        where: {
-          sourceAddress: sourceWallet,
-          sourceChain: chain,
-          ...(opts.sinceTs ? { ts: { gte: opts.sinceTs } } : {}),
-          actionType: 'transfer',
-          valuedUsd: null
-        }
-      });
 
       // Persist aggregates.
       const sourceWalletRow = await prisma.wallet.findUnique({
@@ -464,7 +470,7 @@ export async function buildCapitalOutflowPaths(
             maxChildrenFirstHop,
             nodesExplored,
             walkTruncated: truncated,
-            unknownValueOutboundNotTraced: unknownValueOutbound,
+            unknownValueOutboundNotTraced: walkUnknownValueLegs,
             sinceTs: opts.sinceTs?.toISOString() ?? null
           } as unknown as Prisma.InputJsonValue,
           caveats,
@@ -581,28 +587,34 @@ export async function buildReceiverEnrollments(
     processed += 1;
     report.receiversConsidered += 1;
     try {
-      const firstReceiptTs = rPaths.reduce(
-        (min, p) => (p.firstTransferTs < min ? p.firstTransferTs : min),
-        rPaths[0].firstTransferTs
+      // NO LOOKAHEAD: the enrollment's class describes the receiver AT ITS
+      // FIRST receipt — so only the EARLIEST path's at-receipt classification
+      // (and its strictly-pre-receipt relationship tier) may be used. Later
+      // receipts' classifications are recorded as receipts, never promoted.
+      const sorted = [...rPaths].sort(
+        (a, b) => a.firstTransferTs.getTime() - b.firstTransferTs.getTime() || (a.sourceWallet < b.sourceWallet ? -1 : 1)
       );
+      const earliest = sorted[0];
+      const firstReceiptTs = earliest.firstTransferTs;
       const known = rPaths.reduce<number | null>((acc, p) => {
         if (p.knownValueUsd === null) return acc;
         return (acc ?? 0) + Number(p.knownValueUsd);
       }, null);
       const unknownLegs = rPaths.reduce((acc, p) => acc + p.unknownValueLegs, 0);
 
-      // Receiver class: linked evidence dominates, then the strongest
-      // at-receipt classification observed across paths.
       let receiverClass = 'unknown';
-      if (rPaths.some((p) => p.receiverRelationshipTier === 'probable' || p.receiverRelationshipTier === 'strong')) {
+      if (earliest.receiverRelationshipTier === 'probable' || earliest.receiverRelationshipTier === 'strong') {
         receiverClass = 'linked_side_wallet';
-      } else if (rPaths.some((p) => p.receiverClassAtReceipt === 'fresh_receiver')) {
+      } else if (earliest.receiverClassAtReceipt === 'fresh_receiver') {
         receiverClass = 'fresh_receiver';
-      } else if (rPaths.some((p) => p.receiverClassAtReceipt === 'dormant_receiver')) {
+      } else if (earliest.receiverClassAtReceipt === 'dormant_receiver') {
         receiverClass = 'dormant_reactivated';
-      } else if (rPaths.some((p) => p.receiverClassAtReceipt === 'active_receiver')) {
+      } else if (earliest.receiverClassAtReceipt === 'active_receiver') {
         receiverClass = 'active_receiver';
       }
+      const laterReceiptClasses = sorted
+        .slice(1)
+        .map((p) => ({ ts: p.firstTransferTs.toISOString(), classAtThatReceipt: p.receiverClassAtReceipt }));
 
       // Post-receipt deployments (BUY trades strictly after first receipt).
       const walletRow = await prisma.wallet.findUnique({
@@ -674,6 +686,8 @@ export async function buildReceiverEnrollments(
         receiptsJson: {
           pathCount: rPaths.length,
           transferTiersOnly: true,
+          classificationBasis: 'earliest_receipt_only',
+          laterReceiptClasses: laterReceiptClasses.slice(0, 10),
           maxDeployments,
           maxTrades
         } as unknown as Prisma.InputJsonValue,

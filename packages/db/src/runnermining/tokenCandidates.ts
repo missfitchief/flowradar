@@ -141,14 +141,18 @@ export async function buildTokenCandidateScores(
   const maxMcapUsd = opts.maxMcapUsd ?? 500_000_000;
   const now = opts.now ?? new Date();
 
-  // --- Cohort: qualified DNA wallets + enrolled receivers ------------------
+  // --- Cohort: QUALIFIED wallets + enrolled receivers ----------------------
+  // Qualified = wallets with LOCAL top-PnL evidence (validation never
+  // provider_only/invalid). Provider claims are discovery evidence only —
+  // they NEVER grant qualified standing; Wallet DNA rows alone don't either.
   const dnaWallets = opts.walletAddresses
     ? [...new Set(opts.walletAddresses)].sort()
     : (
-        await prisma.walletDnaProfile.findMany({
-          where: { chain },
+        await prisma.tokenTopPnlCandidate.findMany({
+          where: { chain, validation: { notIn: ['provider_only', 'invalid'] } },
           orderBy: { walletAddress: 'asc' },
-          select: { walletAddress: true }
+          select: { walletAddress: true },
+          distinct: ['walletAddress']
         })
       ).map((w) => w.walletAddress);
   const receivers = await prisma.receiverEnrollment.findMany({
@@ -159,24 +163,50 @@ export async function buildTokenCandidateScores(
         : {})
     },
     orderBy: { receiverAddress: 'asc' },
-    select: { receiverAddress: true, sourceEntityKeys: true, receiverClass: true, deploymentsJson: true }
+    select: { receiverAddress: true, sourceEntityKeys: true, receiverClass: true, firstReceiptTs: true }
   });
 
   const entityOf = await entityKeysFor(prisma, chain, dnaWallets);
-  // Receivers collapse into their (first, stable-sorted) source entity —
-  // a receiver and its funder must NEVER count as two independent entities.
-  const receiverEntity = new Map<string, string>();
+  // ENTITY ADJUSTMENT via union-find: a receiver is linked to EVERY source
+  // entity that funded it (not an arbitrary first one) — a receiver funded
+  // by A and B collapses {receiver, A, B} into ONE component, so the
+  // receiver plus any of its funders can never count as independent.
+  const dsu = new Map<string, string>();
+  const find = (k: string): string => {
+    let r = k;
+    while (dsu.get(r) !== undefined && dsu.get(r) !== r) r = dsu.get(r)!;
+    dsu.set(k, r);
+    return r;
+  };
+  const union = (a: string, b: string) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) dsu.set(ra < rb ? rb : ra, ra < rb ? ra : rb); // smaller key wins — deterministic
+  };
+  const ensure = (k: string) => {
+    if (!dsu.has(k)) dsu.set(k, k);
+  };
+  const receiverFirstReceipt = new Map<string, Date>();
   const receiverClassOf = new Map<string, string>();
+  for (const w of dnaWallets) ensure(entityOf.get(w) ?? w);
   for (const r of receivers) {
-    receiverEntity.set(r.receiverAddress, [...r.sourceEntityKeys].sort()[0] ?? r.receiverAddress);
+    ensure(r.receiverAddress);
+    receiverFirstReceipt.set(r.receiverAddress, r.firstReceiptTs);
     receiverClassOf.set(r.receiverAddress, r.receiverClass);
+    for (const src of r.sourceEntityKeys) {
+      ensure(src);
+      union(r.receiverAddress, src);
+    }
   }
-  const cohortAddresses = [...new Set([...dnaWallets, ...receiverEntity.keys()])].sort();
+  const cohortAddresses = [...new Set([...dnaWallets, ...receiverFirstReceipt.keys()])].sort();
   if (cohortAddresses.length === 0) {
     return { mintsConsidered: 0, mintsWritten: 0, skippedLargeCap: 0, byState: {}, errors: 0, errorReceipts: [] };
   }
-  const entityKeyOf = (addr: string): string =>
-    receiverEntity.get(addr) ?? entityOf.get(addr) ?? addr;
+  const entityKeyOf = (addr: string): string => {
+    const base = receiverFirstReceipt.has(addr) ? addr : (entityOf.get(addr) ?? addr);
+    ensure(base);
+    return find(base);
+  };
 
   const walletRows = await prisma.wallet.findMany({
     where: { chain, address: { in: cohortAddresses } },
@@ -196,25 +226,44 @@ export async function buildTokenCandidateScores(
       })
     ).map((r) => r.mint)
   );
+  // A buy EVENT is on-chain fact; only its USD value may be unknown
+  // (amountUsd stores 0 for unpriced). Unpriced buys may DISCOVER a
+  // candidate but can never mint accumulation states: buyers whose evidence
+  // on a mint is entirely unpriced are tracked separately and the state
+  // machine only sees PRICED-evidence buyers.
   const cohortBuys = await prisma.walletTokenTrade.findMany({
     where: { chain, action: 'BUY', walletId: { in: cohortIds } },
     orderBy: [{ ts: 'asc' }, { id: 'asc' }],
-    select: { walletId: true, ts: true, tokenId: true, token: { select: { address: true } } }
+    select: { walletId: true, ts: true, amountUsd: true, tokenId: true, token: { select: { address: true } } }
   });
   const mintTokenId = new Map<string, string>();
-  const buyersByMint = new Map<string, Map<string, Date>>(); // mint -> buyer address -> first buy ts
+  // mint -> buyer address -> { first buy ts, any priced buy seen }
+  const buyersByMint = new Map<string, Map<string, { firstBuyTs: Date; priced: boolean }>>();
+  let preReceiptBuysSkipped = 0;
+  let unpricedCohortBuys = 0;
   for (const b of cohortBuys) {
     const mint = b.token.address;
     if (runnerMints.has(mint)) continue;
-    mintTokenId.set(mint, b.tokenId);
     const buyer = addressOfId.get(b.walletId);
     if (!buyer) continue;
+    // A receiver's PRE-receipt buys are its own history — they were never
+    // funded by the qualified entity and must not surface candidates.
+    const receiptTs = receiverFirstReceipt.get(buyer);
+    if (receiptTs !== undefined && b.ts.getTime() <= receiptTs.getTime()) {
+      preReceiptBuysSkipped += 1;
+      continue;
+    }
+    const priced = Number(b.amountUsd) > 0;
+    if (!priced) unpricedCohortBuys += 1;
+    mintTokenId.set(mint, b.tokenId);
     let m = buyersByMint.get(mint);
     if (!m) {
       m = new Map();
       buyersByMint.set(mint, m);
     }
-    if (!m.has(buyer)) m.set(buyer, b.ts);
+    const cur = m.get(buyer);
+    if (!cur) m.set(buyer, { firstBuyTs: b.ts, priced });
+    else if (priced && !cur.priced) cur.priced = true;
   }
 
   const mints = [...buyersByMint.keys()].sort().slice(0, limit);
@@ -248,38 +297,59 @@ export async function buildTokenCandidateScores(
         continue;
       }
 
-      // Entity adjustment.
-      const entityKeys = new Set(buyerAddresses.map((a) => entityKeyOf(a)));
-      const independentEntityCount = entityKeys.size;
-      const linkedAddressCount = buyerAddresses.filter(
-        (a) => receiverClassOf.get(a) === 'linked_side_wallet'
-      ).length;
-      const receiverDeployments = buyerAddresses.filter((a) => receiverEntity.has(a)).length;
-
-      // KOL contamination (Wallet.status of buyers).
-      const kolContamination = buyerAddresses.filter((a) => {
+      // KOL/copytrader partition FIRST: KOL-status buyers feed ONLY the
+      // contamination counter and its penalty — they are excluded from every
+      // positive metric (entities, dormancy, funding, deployments, behavior)
+      // so KOL presence can never raise the ranking.
+      const kolBuyers = buyerAddresses.filter((a) => {
         const row = walletRows.find((w) => w.address === a);
         return row !== undefined && (KOL_STATUSES as readonly string[]).includes(row.status);
-      }).length;
+      });
+      const kolContamination = kolBuyers.length;
+      const cleanBuyers = buyerAddresses.filter((a) => !kolBuyers.includes(a));
+      if (cleanBuyers.length === 0) {
+        // Discovered ONLY through KOL-status cohort members: no qualified
+        // evidence exists — never a candidate (stale rows refreshed away).
+        await prisma.tokenCandidateScore.deleteMany({ where: { chain, mint } });
+        continue;
+      }
+      // Unknown-value honesty: only buyers with at least one PRICED buy feed
+      // the state machine and positive metrics; unpriced-only buyers are
+      // reported (and keep the candidate visible) but cap it at WATCHING.
+      const pricedBuyers = cleanBuyers.filter((a) => buyers.get(a)?.priced === true);
+      const unpricedOnlyBuyers = cleanBuyers.length - pricedBuyers.length;
 
-      // Dormancy / funding / alt-wallet / behavior evidence anchored at THIS mint.
+      // Entity adjustment (union-find components over PRICED clean buyers).
+      const entityKeys = new Set(pricedBuyers.map((a) => entityKeyOf(a)));
+      const independentEntityCount = entityKeys.size;
+      const linkedAddressCount = cleanBuyers.filter(
+        (a) => receiverClassOf.get(a) === 'linked_side_wallet'
+      ).length;
+      const receiverDeployments = cleanBuyers.filter((a) => receiverFirstReceipt.has(a)).length;
+
+      // Dormancy / funding / alt-wallet / behavior evidence anchored at THIS
+      // mint — CLEAN buyers only (KOL evidence never boosts).
+      // Score-positive evidence (dormancy/funding/alt-wallet) is restricted
+      // to PRICED buyers — unknown-value evidence never raises the ranking.
+      // Post-entry behavior spans ALL clean buyers: negative evidence
+      // (distribution) must never be discarded because a buy was unpriced.
       const [dormant, funded, altWallet, postEntry] = await Promise.all([
         prisma.addressDormancyObservation.count({
-          where: { chain, anchorKey: mint, walletAddress: { in: buyerAddresses }, overallClass: 'covered_dormant' }
+          where: { chain, anchorKey: mint, walletAddress: { in: pricedBuyers }, overallClass: 'covered_dormant' }
         }),
         prisma.fundingReactivationPath.count({
-          where: { chain, anchorKey: mint, walletAddress: { in: buyerAddresses }, status: 'funded' }
+          where: { chain, anchorKey: mint, walletAddress: { in: pricedBuyers }, status: 'funded' }
         }),
         prisma.entityDormancyObservation.count({
           where: {
             chain,
             anchorKey: mint,
-            walletAddress: { in: buyerAddresses },
+            walletAddress: { in: pricedBuyers },
             entityClass: { in: ['probable_side_wallet_reactivation', 'fresh_funded_by_active_entity'] }
           }
         }),
         prisma.postEntryBehavior.findMany({
-          where: { chain, tokenAddress: mint, walletAddress: { in: buyerAddresses } },
+          where: { chain, tokenAddress: mint, walletAddress: { in: cleanBuyers } },
           orderBy: { walletAddress: 'asc' },
           select: { primaryClass: true }
         })
@@ -294,8 +364,10 @@ export async function buildTokenCandidateScores(
       ).length;
 
       // Crowd: non-cohort distinct buyers of the same token.
+      // PRICED non-cohort buys only — unknown-value trades never evidence
+      // crowd expansion either.
       const nonCohort = await prisma.walletTokenTrade.findMany({
-        where: { chain, action: 'BUY', tokenId, walletId: { notIn: cohortIds } },
+        where: { chain, action: 'BUY', tokenId, walletId: { notIn: cohortIds }, amountUsd: { gt: 0 } },
         select: { walletId: true },
         distinct: ['walletId'],
         take: 1000
@@ -314,10 +386,13 @@ export async function buildTokenCandidateScores(
         qualifiedWithPostEntry: postEntry.length,
         distributionBehaviorCount,
         kolContamination,
-        cohortBuyers: buyerAddresses.length,
+        cohortBuyers: pricedBuyers.length,
         nonCohortBuyers: nonCohort.length,
         independentEntityCount
       });
+      if (unpricedOnlyBuyers > 0) {
+        stateReasons.push(`unpriced_only_buyers_excluded_from_state:${unpricedOnlyBuyers}`);
+      }
       const score = candidateScore({
         independentEntityCount,
         dormantReactivations: dormant,
@@ -341,7 +416,7 @@ export async function buildTokenCandidateScores(
 
       // Funding paths receipt (bounded).
       const fundingPaths = await prisma.fundingReactivationPath.findMany({
-        where: { chain, anchorKey: mint, walletAddress: { in: buyerAddresses }, status: 'funded' },
+        where: { chain, anchorKey: mint, walletAddress: { in: cleanBuyers }, status: 'funded' },
         orderBy: { walletAddress: 'asc' },
         take: 10,
         select: { walletAddress: true, directFunderAddress: true, fundingToEventDelaySec: true, funderRelationshipTier: true }
@@ -352,11 +427,17 @@ export async function buildTokenCandidateScores(
       if (postEntry.length === 0) confidence -= 15;
       if (snapshot === null) confidence -= 15;
       if (dormant + altWallet + funded === 0) confidence -= 10;
+      if (unpricedOnlyBuyers > 0) confidence -= 10; // unknown value lowers, never raises
       if (independentEntityCount >= 2) confidence += 10;
       confidence = Math.max(5, Math.min(90, confidence));
 
       const caveats = [...BASE_CAVEATS];
       if (snapshot === null) caveats.push('no locally observed market snapshot — current mcap unknown (never fabricated)');
+      if (unpricedOnlyBuyers > 0) {
+        caveats.push(
+          `${unpricedOnlyBuyers} buyer(s) have only unpriced buys on this mint — excluded from states/score, never treated as accumulation`
+        );
+      }
       if (nonCohort.length >= 1000) caveats.push('non-cohort buyer count capped at 1000');
       if (buyers.size > maxBuyers) caveats.push(`cohort buyers capped at ${maxBuyers}`);
 
@@ -367,7 +448,7 @@ export async function buildTokenCandidateScores(
         currentMcapTs: snapshot?.ts ?? null,
         qualifiedEntityCount: entityKeys.size,
         independentEntityCount,
-        qualifiedBuyerCount: buyerAddresses.length,
+        qualifiedBuyerCount: cleanBuyers.length,
         linkedAddressCount,
         receiverDeployments,
         dormantReactivations: dormant,
@@ -385,13 +466,24 @@ export async function buildTokenCandidateScores(
         buyersJson: buyerAddresses.slice(0, 50).map((a) => ({
           address: a,
           entityKey: entityKeyOf(a),
-          firstBuyTs: buyers.get(a)?.toISOString() ?? null,
-          via: receiverEntity.has(a) ? 'enrolled_receiver' : 'qualified_wallet'
+          firstBuyTs: buyers.get(a)?.firstBuyTs.toISOString() ?? null,
+          pricedEvidence: buyers.get(a)?.priced === true,
+          via: kolBuyers.includes(a)
+            ? 'kol_or_copytrader'
+            : receiverFirstReceipt.has(a)
+              ? 'enrolled_receiver'
+              : 'qualified_wallet'
         })) as unknown as Prisma.InputJsonValue,
         fundingPathsJson: fundingPaths as unknown as Prisma.InputJsonValue,
         reasonCodes: stateReasons,
         receiptsJson: {
           scoreWeights: 'independent<=40, dormant<=20, funded<=10, receiverDeploy<=15, durableShare<=15, kol-30, distribution-40',
+          positiveMetricsFromCleanBuyersOnly: true,
+          entityAdjustment: 'union_find_over_all_receiver_source_entities',
+          stateEvidenceFromPricedBuyersOnly: true,
+          unpricedOnlyBuyersThisMint: unpricedOnlyBuyers,
+          unpricedCohortBuysTotal: unpricedCohortBuys,
+          receiverPreReceiptBuysSkipped: preReceiptBuysSkipped,
           maxBuyersPerMint: maxBuyers,
           runnerMintsExcluded: true,
           maxMcapUsdCeiling: maxMcapUsd
