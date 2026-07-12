@@ -9,23 +9,78 @@ import { shortAddr, fmtPct } from '@/lib/rescue';
 export const dynamic = 'force-dynamic';
 
 export default async function EntitiesPage() {
-  const rows = await prisma.walletDnaProfile.findMany({
-    orderBy: [{ completedPositions: 'desc' }, { walletAddress: 'asc' }],
-    take: 100
-  });
+  const [entities, rows] = await Promise.all([
+    prisma.entityDnaProfile.findMany({
+      orderBy: [{ memberCount: 'desc' }, { completedPositions: 'desc' }, { entityKey: 'asc' }],
+      take: 60
+    }),
+    prisma.walletDnaProfile.findMany({
+      orderBy: [{ completedPositions: 'desc' }, { walletAddress: 'asc' }],
+      take: 100
+    })
+  ]);
   const withWR = rows.filter((r) => r.winRate !== null).length;
+  const multiWallet = entities.filter((e) => e.memberCount > 1);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div>
-        <h1 className="text-xl font-semibold">Wallets / Entities</h1>
+        <h1 className="text-xl font-semibold">Entities</h1>
         <p className="mt-1 max-w-3xl text-sm text-zinc-400">
-          Every wallet discovered from historical $10M+ runner top-PnL evidence, with its measurable quality:
-          win rate and expectancy over COMPLETED positions only (open, transferred and unpriceable positions
-          never count as wins or losses). {withWR} of {rows.length} wallets currently have calculable WR.
+          ENTITY DNA aggregates only sufficiently-linked wallets (receiver funding, probable/strong on-chain
+          relationships, repeat-candidate clusters, operator roots) — ten linked side wallets count as ONE entity,
+          never ten independent wallets. Below the entity table is the per-ADDRESS DNA leaderboard.
         </p>
       </div>
 
+      <section>
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-400">
+          Entity DNA (entity-adjusted) · {multiWallet.length} multi-wallet · {entities.filter((e) => e.rootWallet).length} contain an operator root
+        </h2>
+        <div className="overflow-x-auto rounded-xl border border-zinc-800">
+          <table className="w-full text-left text-sm">
+            <thead className="border-b border-zinc-800 bg-zinc-900/70 text-xs text-zinc-400">
+              <tr>
+                <th className="px-3 py-2">Entity</th>
+                <th className="px-3 py-2 text-right">Wallets</th>
+                <th className="px-3 py-2 text-right">Runners</th>
+                <th className="px-3 py-2 text-right">Completed</th>
+                <th className="px-3 py-2 text-right">Win rate</th>
+                <th className="px-3 py-2 text-right">EV / pos</th>
+                <th className="px-3 py-2 text-right">Realized PnL</th>
+                <th className="px-3 py-2 text-right">One-winner dep.</th>
+                <th className="px-3 py-2 text-right">Staged capital</th>
+                <th className="px-3 py-2">Root</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/60">
+              {entities.map((e) => (
+                <tr key={e.id} className="hover:bg-zinc-900/40">
+                  <td className="px-3 py-2">
+                    <Link href={`/entity/${e.rootWallet ?? e.memberWallets[0] ?? e.entityKey}`} className="font-mono text-xs text-sky-400 hover:underline">
+                      {shortAddr(e.entityKey)}
+                    </Link>
+                  </td>
+                  <td className="px-3 py-2 text-right">{e.memberCount}</td>
+                  <td className="px-3 py-2 text-right">{e.runnersInvolved}</td>
+                  <td className="px-3 py-2 text-right">{e.completedPositions}</td>
+                  <td className="px-3 py-2 text-right">{e.winRate === null ? <span className="text-zinc-500">unknown</span> : fmtPct(e.winRate)}</td>
+                  <td className="px-3 py-2 text-right">{e.evUsdPerCompletedPosition === null ? '—' : fmtUsd(Number(e.evUsdPerCompletedPosition))}</td>
+                  <td className="px-3 py-2 text-right">{e.totalRealizedPnlUsd === null ? '—' : fmtUsd(Number(e.totalRealizedPnlUsd))}</td>
+                  <td className="px-3 py-2 text-right">{e.oneWinnerDependence === null ? '—' : fmtPct(e.oneWinnerDependence)}</td>
+                  <td className="px-3 py-2 text-right">{e.stagedCapitalUsd === null ? '—' : fmtUsd(Number(e.stagedCapitalUsd))}</td>
+                  <td className="px-3 py-2 text-xs">{e.rootWallet ? 'operator root' : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-zinc-400">
+        Address DNA · {withWR} of {rows.length} wallets with calculable win rate
+      </h2>
       <div className="overflow-x-auto rounded-xl border border-zinc-800">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-zinc-800 bg-zinc-900/70 text-xs text-zinc-400">
@@ -68,10 +123,11 @@ export default async function EntitiesPage() {
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-zinc-500">
+      <p className="mt-2 text-xs text-zinc-500">
         “Prior runners” = distinct verified $10M+ tokens this wallet completed a profitable position on.
         High one-winner dependence means the wallet&apos;s realized profit comes mostly from a single trade.
       </p>
+      </section>
     </div>
   );
 }

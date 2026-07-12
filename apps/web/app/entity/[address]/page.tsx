@@ -35,7 +35,10 @@ export default async function EntityDetailPage({ params }: { params: Promise<{ a
   const enrollment = await prisma.receiverEnrollment.findUnique({
     where: { chain_receiverAddress: { chain: 'SOLANA', receiverAddress: address } }
   });
-  if (!dna && !behavior && !enrollment) notFound();
+  const entityRow = await prisma.entityDnaProfile.findUnique({
+    where: { chain_entityKey: { chain: 'SOLANA', entityKey: address } }
+  });
+  if (!dna && !behavior && !enrollment && !entityRow) notFound();
 
   const profile = (behavior?.profileJson ?? null) as unknown as {
     local?: { tokenPositions?: TokenPosition[] };
@@ -63,7 +66,12 @@ export default async function EntityDetailPage({ params }: { params: Promise<{ a
       : []
   );
 
-  const [dormancyEvents, outflows, inflowsAsReceiver, topPnl, lifecycles] = await Promise.all([
+  const [roleRows, dormancyEvents, outflows, inflowsAsReceiver, topPnl, lifecycles] = await Promise.all([
+    prisma.walletRoleAssignment.findMany({
+      where: { chain: 'SOLANA', walletAddress: address },
+      orderBy: { confidence: 'desc' },
+      select: { role: true, evidenceTier: true, confidence: true, reasonCodes: true, entityKey: true }
+    }),
     prisma.addressDormancyObservation.findMany({
       where: { chain: 'SOLANA', walletAddress: address, overallClass: 'covered_dormant' },
       orderBy: { eventTs: 'asc' },
@@ -106,6 +114,28 @@ export default async function EntityDetailPage({ params }: { params: Promise<{ a
           Status: observation-only{enrollment ? ` · enrolled receiver (${enrollment.receiverClass.replaceAll('_', ' ')})` : ''}.
           {profile?.localViewTruncated && ' Coverage warning: the local trade view is TRUNCATED — metrics understate activity.'}
         </p>
+        {roleRows.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {roleRows.map((r) => (
+              <span
+                key={r.role}
+                className="rounded bg-zinc-800 px-2 py-1 text-xs"
+                title={`${r.evidenceTier.replaceAll('_', ' ')} · ${r.reasonCodes.join(', ')}`}
+              >
+                {r.role.replaceAll('_', ' ')} <span className="text-zinc-500">({Math.round(r.confidence)})</span>
+              </span>
+            ))}
+          </div>
+        )}
+        {roleRows[0]?.entityKey && roleRows[0].entityKey !== address && (
+          <p className="mt-1 text-xs text-zinc-500">
+            Part of entity{' '}
+            <Link href={`/entity/${roleRows[0].entityKey}`} className="font-mono text-sky-400 hover:underline">
+              {shortAddr(roleRows[0].entityKey)}
+            </Link>{' '}
+            — probabilistic on-chain linkage, never an identity claim.
+          </p>
+        )}
       </div>
 
       {dna && (
@@ -274,6 +304,27 @@ export default async function EntityDetailPage({ params }: { params: Promise<{ a
                 className="rounded bg-zinc-800 px-2 py-1 font-mono text-xs text-sky-400 hover:underline"
               >
                 {shortAddr(p.tokenAddress)}
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {entityRow && entityRow.memberCount > 1 && (
+        <section className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 text-sm">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
+            Entity ({entityRow.memberCount} linked wallets)
+          </h2>
+          <p className="mt-1 text-xs text-zinc-500">
+            Entity-adjusted quality — win rate {entityRow.winRate === null ? 'unknown' : fmtPct(entityRow.winRate)},{' '}
+            {entityRow.completedPositions} completed, realized{' '}
+            {entityRow.totalRealizedPnlUsd === null ? 'unknown' : fmtUsd(Number(entityRow.totalRealizedPnlUsd))}. Linked
+            wallets count once, not {entityRow.memberCount} times.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {entityRow.memberWallets.slice(0, 30).map((m) => (
+              <Link key={m} href={`/entity/${m}`} className="rounded bg-zinc-800 px-2 py-1 font-mono text-xs text-sky-400 hover:underline">
+                {shortAddr(m)}
               </Link>
             ))}
           </div>

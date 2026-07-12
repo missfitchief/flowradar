@@ -14,14 +14,15 @@ interface NavItem {
 // comparable historical cases"; every raw/internal tool keeps working but
 // lives under Advanced instead of being presented as the main product.
 const PRIMARY_ITEMS: NavItem[] = [
-  { label: 'Active Setups', href: '/setups' },
-  { label: 'Historical Proof', href: '/proof' },
-  { label: 'Wallets / Entities', href: '/entities' },
-  { label: 'Capital Movements', href: '/capital' },
+  { label: 'Live Opportunities', href: '/setups' },
+  { label: 'Capital Staging', href: '/capital' },
+  { label: 'Entities', href: '/entities' },
+  { label: 'Historical Winners', href: '/historical' },
   { label: 'Watching', href: '/watching' }
 ];
 
 const ADVANCED_ITEMS: NavItem[] = [
+  { label: 'Historical Proof (replay)', href: '/proof' },
   { label: 'Signal Feed', href: '/feed' },
   { label: 'Tokens (raw)', href: '/tokens' },
   { label: 'Candidates (raw)', href: '/candidates' },

@@ -140,7 +140,7 @@ export default async function SetupsPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-xl font-semibold">Active Setups</h1>
+        <h1 className="text-xl font-semibold">Live Opportunities</h1>
         <p className="mt-1 max-w-3xl text-sm text-zinc-400">
           Tokens where independently-acting qualified wallets (mined from historical $10M+ runners) are
           accumulating right now, in this database&apos;s observation window. Analytics only — nothing here is
