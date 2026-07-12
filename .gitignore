@@ -13,3 +13,6 @@ coverage/
 db-backups/
 runs/
 .superpowers-ledger.md
+
+# runner liveness file (session-local, never committed)
+data/runner-mining/AGENT_HEARTBEAT.txt

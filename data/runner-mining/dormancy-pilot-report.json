@@ -1,0 +1,101 @@
+{
+  "ts": "2026-07-12T01:02:27.128Z",
+  "cohort": {
+    "source": "wallet_behavior_profiles (SOLANA)",
+    "wallets": 22
+  },
+  "task6": {
+    "batch": {
+      "walletsConsidered": 22,
+      "walletsProcessed": 22,
+      "errors": 0,
+      "errorReceipts": [],
+      "rowsWritten": 56492,
+      "stalePurged": 0,
+      "byClass": {
+        "unknown_counterparty": 17585,
+        "unknown_value": 27051,
+        "service_interaction": 11579,
+        "meaningful_transfer": 184,
+        "dust": 89,
+        "non_economic": 4
+      },
+      "meaningfulCount": 184,
+      "walletsWithTruncation": 9
+    },
+    "dbByClass": {
+      "dust": 89,
+      "meaningful_transfer": 184,
+      "non_economic": 4,
+      "service_interaction": 11579,
+      "unknown_counterparty": 17585,
+      "unknown_value": 27051
+    },
+    "unknownValueRows": 27051,
+    "coverageWarnings": {
+      "walletsWithTruncation": 9,
+      "note": "truncated wallets cannot mint covered-dormant claims downstream (verified by the Task 7 completeness check)"
+    }
+  },
+  "task7": {
+    "batch": {
+      "walletsConsidered": 22,
+      "walletsProcessed": 22,
+      "errors": 0,
+      "errorReceipts": [],
+      "entriesConsidered": 448,
+      "entriesSkippedByCap": 0,
+      "observationsWritten": 448,
+      "byOverallClass": {
+        "unknown": 436,
+        "active": 7,
+        "apparently_dormant_incomplete_history": 5
+      },
+      "walletsIncompleteClassification": 9
+    },
+    "dbByOverallClass": {
+      "active": 7,
+      "apparently_dormant_incomplete_history": 5,
+      "unknown": 436
+    },
+    "unknowns": 436,
+    "incompleteHistory": 5,
+    "coverageWarnings": {
+      "walletsIncompleteClassification": 9
+    }
+  },
+  "task8": {
+    "batch": {
+      "observationsConsidered": 448,
+      "observationsWritten": 448,
+      "walletsProcessed": 22,
+      "errors": 0,
+      "errorReceipts": [],
+      "byEntityClass": {
+        "insufficient_evidence": 438,
+        "active_entity": 10
+      },
+      "serviceNodesExcludedTotal": 89,
+      "linksConsideredTotal": 187
+    },
+    "dbByEntityClass": {
+      "active_entity": 10,
+      "insufficient_evidence": 438
+    },
+    "insufficientEvidence": 438
+  },
+  "idempotency": {
+    "before": {
+      "activity": 13525,
+      "address": 45,
+      "entity": 45
+    },
+    "after": {
+      "activity": 13525,
+      "address": 45,
+      "entity": 45
+    },
+    "identical": true
+  },
+  "caveat": "observation-only shadow analytics over the 22-wallet pilot cohort; unknown/incomplete classes are honest states, never zeros"
+}
