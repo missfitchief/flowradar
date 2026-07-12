@@ -38,7 +38,7 @@ const KOL_STATUSES = ['public_kol', 'public_promoter', 'copytrader'] as const;
 const SIGNAL_STATES: CandidateState[] = ['STEALTH_ACCUMULATION', 'EARLY_INDEPENDENT_CONFIRMATION'];
 
 const BASE_CAVEATS = [
-  'as-of-T qualification: a wallet joins the qualified walk only from max(first buy, earliest OTHER-mint evidence timestamp); wallets whose only evidence is the replayed token (or whose other-mint evidence is untimestamped) are excluded from qualification but still counted as crowd; externally-seeded cohort wallets without discovery rows are treated as always-qualified',
+  'as-of-T qualification: a wallet joins the qualified walk only from max(its first buy, max(other-mint evidence timestamp, that mint\'s PROVABLE $10M crossing)); pre-qualification and never-qualified buyers count as crowd, never vanish; externally-seeded cohort wallets without discovery rows are treated as always-qualified',
   'entity linkage and KOL status are current-state mappings (no historical wallet-status snapshots exist) — an approximation, receipted',
   'post-entry behavior is post-T by definition and is EXCLUDED from at-event evidence (distribution risk cannot fire in replay v1)',
   'price series granularity is bounded by 1D candles plus local snapshots — short windows are null where not covered, never interpolated'
@@ -149,6 +149,33 @@ export async function runNoLookaheadReplay(
     ...new Set([...goldenWallets.map((w) => w.key), ...evidenceOf.keys()])
   ].sort();
 
+  // OUTCOME-TIME gating: evidence on mint B only qualifies a wallet once B
+  // had PROVABLY crossed $10M — before that moment nobody could have known B
+  // was a runner, so the discovery row itself is future information. The
+  // crossing is computed from B's enrichment candles (candle-END semantics);
+  // evidence mints without a computable crossing NEVER qualify.
+  const evidenceMints = [...new Set([...evidenceOf.values()].flat().map((e) => e.mint))].sort();
+  const provenMsOf = new Map<string, number>();
+  if (evidenceMints.length > 0) {
+    const enrichRows = await prisma.tokenEnrichment.findMany({
+      where: { mint: { in: evidenceMints }, status: 'enriched' },
+      select: { mint: true, candlesJson: true, supplyJson: true }
+    });
+    for (const row of enrichRows) {
+      const supply = (row.supplyJson as { supply?: number } | null)?.supply ?? null;
+      if (supply === null || !Number.isFinite(supply) || supply <= 0) continue;
+      const candles = (Array.isArray(row.candlesJson) ? (row.candlesJson as { t: number; h: number }[]) : [])
+        .filter((c) => Number.isFinite(c.h) && c.h > 0)
+        .sort((a, b) => a.t - b.t);
+      for (const c of candles) {
+        if (c.h * supply >= 10_000_000) {
+          provenMsOf.set(row.mint, (c.t + 86_400) * 1000); // knowable at candle END
+          break;
+        }
+      }
+    }
+  }
+
   const walletRows = await prisma.wallet.findMany({
     where: { chain, address: { in: cohortWallets } },
     select: { id: true, address: true, status: true }
@@ -188,7 +215,12 @@ export async function runNoLookaheadReplay(
           qualifiedFromMs.set(w, 0);
           continue;
         }
-        const others = ev.filter((e) => e.mint !== mint && e.tsMs !== null).map((e) => e.tsMs as number);
+        // Qualification moment per other-mint evidence = max(the wallet's own
+        // evidence timestamp, the moment that mint PROVABLY crossed $10M) —
+        // neither the trade nor the runner outcome may lie in the future.
+        const others = ev
+          .filter((e) => e.mint !== mint && e.tsMs !== null && provenMsOf.has(e.mint))
+          .map((e) => Math.max(e.tsMs as number, provenMsOf.get(e.mint) as number));
         if (others.length > 0) qualifiedFromMs.set(w, Math.min(...others));
       }
       const eligibleWallets = cohortWallets.filter((w) => qualifiedFromMs.has(w));
@@ -281,14 +313,23 @@ export async function runNoLookaheadReplay(
       // cannot be counted as qualified accumulation at that earlier time.
       const seenBuyers = new Set<string>();
       const buyerJoinEvents: { ts: Date; buyer: string }[] = [];
+      const firstBuyMsOf = new Map<string, number>();
       for (const b of cohortBuys) {
         const buyer = addressOfId.get(b.walletId);
         if (!buyer || seenBuyers.has(buyer)) continue;
         seenBuyers.add(buyer);
+        firstBuyMsOf.set(buyer, b.ts.getTime());
         const qualMs = qualifiedFromMs.get(buyer) ?? 0;
         buyerJoinEvents.push({ ts: b.ts.getTime() >= qualMs ? b.ts : new Date(qualMs), buyer });
       }
       buyerJoinEvents.sort((a, b) => a.ts.getTime() - b.ts.getTime());
+      // A NOT-YET-qualified buyer that has already bought is observable
+      // buying pressure — it counts as CROWD until its qualification moment.
+      const pendingAt = (tMs: number): number =>
+        [...firstBuyMsOf.entries()].filter(([buyer, firstMs]) => {
+          const qualMs = qualifiedFromMs.get(buyer) ?? 0;
+          return firstMs <= tMs && Math.max(firstMs, qualMs) > tMs;
+        }).length;
 
       interface EvalPoint {
         ts: Date;
@@ -316,6 +357,7 @@ export async function runNoLookaheadReplay(
           nonCohortSeen.add(nonCohortBuys[nonCohortIdx].walletId);
           nonCohortIdx += 1;
         }
+        const crowdAtT = nonCohortSeen.size + pendingAt(tMs);
         const clean = buyersSoFar.filter((a) => !kolSet.has(a));
         const kol = buyersSoFar.length - clean.length;
         const entities = new Set(clean.map((a) => entityOf.get(a) ?? a)).size;
@@ -331,7 +373,7 @@ export async function runNoLookaheadReplay(
           distributionBehaviorCount: 0,
           kolContamination: kol,
           cohortBuyers: clean.length,
-          nonCohortBuyers: nonCohortSeen.size,
+          nonCohortBuyers: crowdAtT,
           independentEntityCount: entities
         });
         const score = candidateScore({
@@ -353,7 +395,7 @@ export async function runNoLookaheadReplay(
           dormant,
           funded,
           kol,
-          crowd: nonCohortSeen.size,
+          crowd: crowdAtT,
           buyersList: [...buyersSoFar].slice(0, 25),
           reasons: reasonCodes
         };
