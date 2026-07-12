@@ -23,9 +23,13 @@ interface NavItem {
 // right after Wallet Graph — both are ad-hoc wallet-discovery TOOLS (run a
 // search, inspect results) rather than always-on dashboards, so they read
 // naturally as a pair, ahead of the passive Wallets leaderboard.
+// Working-loop milestone: "Candidates" (automatic token-candidate feed from
+// the runner-mining loop) sits right after Tokens — it is the same
+// token-table family, sourced from persisted shadow evidence.
 const NAV_ITEMS: NavItem[] = [
   { label: 'Signal Feed', href: '/' },
   { label: 'Tokens', href: '/tokens' },
+  { label: 'Candidates', href: '/candidates' },
   { label: 'Money Flow', href: '/flow' },
   { label: 'Wallet Graph', href: '/graph' },
   { label: 'Overlap', href: '/overlap' },
