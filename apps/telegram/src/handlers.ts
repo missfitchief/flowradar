@@ -259,15 +259,15 @@ async function runWalletWorkflow(
   for (const [index, message] of messages.entries()) { if (index) await telegramPace(); await api.sendMessage(chatId, message.text, message.keyboard); }
 }
 
-function renderWalletCapitalMessages(summary: WalletCapitalSummary): Array<{ text: string; keyboard: InlineKeyboard }> {
+export function renderWalletCapitalMessages(summary: WalletCapitalSummary): Array<{ text: string; keyboard: InlineKeyboard }> {
   const group = (title: string, rows: WalletCapitalRelation[], limit: number, compact?: 'role' | 'token') => ({ title, total: rows.length, rows: prioritizeRelations(rows).slice(0, limit), compact });
   const groups: Array<{ title: string; total: number; rows: WalletCapitalRelation[]; compact?: 'role' | 'token' }> = [
-    group('Direct receivers', summary.relations.filter((row) => row.route === 'direct_transfer'), 100),
-    group('Bridge destinations', summary.relations.filter((row) => row.route === 'exact_bridge' || row.route === 'bridge_inference'), 100),
-    group('Multi-hop receivers', summary.relations.filter((row) => row.route === 'multi_hop_transfer'), 40),
-    group('Probable alt/execution wallets', summary.relations.filter((row) => /execution|side|profit_collection/.test(row.role)), 10, 'role'),
-    group('Possible CEX-linked wallets', summary.relations.filter((row) => row.route === 'cex_correlation'), 50),
-    group('Token deployments', summary.relations.filter((row) => row.tokens.length > 0), 20, 'token')
+    group('Direct receivers', summary.relations.filter((row) => row.route === 'direct_transfer'), 500),
+    group('Bridge destinations', summary.relations.filter((row) => row.route === 'exact_bridge' || row.route === 'bridge_inference'), 500),
+    group('Multi-hop receivers', summary.relations.filter((row) => row.route === 'multi_hop_transfer'), 500),
+    group('Probable alt/execution wallets', summary.relations.filter((row) => /execution|side|profit_collection/.test(row.role)), 500, 'role'),
+    group('Possible CEX-linked wallets', summary.relations.filter((row) => row.route === 'cex_correlation'), 500),
+    group('Token deployments', summary.relations.filter((row) => row.tokens.length > 0), 500, 'token')
   ];
   const messages: Array<{ text: string; keyboard: InlineKeyboard }> = [];
   let first = true;
