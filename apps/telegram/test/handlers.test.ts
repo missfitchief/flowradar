@@ -70,13 +70,16 @@ describe('Telegram command handlers', () => {
     expect(text).toContain('<b>WALLET INVESTIGATION</b>');
     expect(text).toContain(`<code>${ADDRESS}</code>`);
     expect(text).not.toContain('Wallet DNA');
-    expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual(['Capital paths', 'Cluster wallets', 'Token deployments', 'Evidence', 'Refresh', 'Watch cluster']);
+    expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual([
+      'Najvažnije putanje', 'Token deployments', 'Alt / execution walleti', 'Bridges', 'Ceo cluster', 'Advanced / svi rezultati'
+    ]);
+    expect(keyboard?.inline_keyboard.flat().some((button) => button.text === 'Refresh')).toBe(false);
   });
 
   it.each([
-    ['/flow', 'paths', 'CAPITAL PATHS'],
-    ['/bridges', 'bridges', 'VERIFIED BRIDGE PATHS'],
-    ['/entity', 'cluster', 'CLUSTER WALLETS']
+    ['/flow', 'priority', 'NAJVAŽNIJE PUTANJE'],
+    ['/bridges', 'bridges', 'BRIDGES'],
+    ['/entity', 'cluster', 'CEO CLUSTER']
   ])('uses the same canonical investigation for %s', async (command, view, heading) => {
     const api = apiMock();
     const service = {
@@ -89,31 +92,32 @@ describe('Telegram command handlers', () => {
     expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain(heading);
   });
 
-  it('paginates persisted paths with full copyable addresses and explorer links without rescanning', async () => {
+  it('paginates at most five persisted priority paths with full addresses and explorer links without rescanning', async () => {
     const api = apiMock();
     const service = {
       clearPendingSession: vi.fn(), getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'wallet', stateJson: { target: ADDRESS, investigationId: 'investigation1', investigationView: 'summary', page: 1, pageSize: 5 } }),
       updateSession: vi.fn(), loadWalletInvestigation: vi.fn().mockResolvedValue(investigation())
     } as unknown as OperatorService;
-    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 4, callback_query: { id: 'cb-paths', from: { id: 123 }, data: 'v1|invest|session1|paths', message: { message_id: 4, chat: { id: 123, type: 'private' }, text: 'summary' } } });
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 4, callback_query: { id: 'cb-paths', from: { id: 123 }, data: 'v1|invest|session1|priority', message: { message_id: 4, chat: { id: 123, type: 'private' }, text: 'summary' } } });
     const [, , text, keyboard] = vi.mocked(api.editMessage).mock.calls[0]!;
     expect(service.loadWalletInvestigation).toHaveBeenCalledWith('investigation1');
     expect(text).toContain(`<code>${ADDRESS}</code>`);
     expect(text).toContain(`<code>${RECEIVER}</code>`);
     expect(text).toContain('TOKEN DEPLOYMENT');
-    expect(keyboard?.inline_keyboard.flat().find((button) => button.copy_text?.text === RECEIVER)?.copy_text).toEqual({ text: RECEIVER });
     expect(keyboard?.inline_keyboard.flat().find((button) => button.url === `https://solscan.io/account/${RECEIVER}`)?.url).toBe(`https://solscan.io/account/${RECEIVER}`);
+    expect(text?.match(/<b>\d+\. /g)?.length ?? 0).toBeLessThanOrEqual(5);
   });
 
-  it('refreshes only when the Refresh button is used', async () => {
+  it('turns a stale Refresh callback into a persisted summary refresh without starting a scan', async () => {
     const api = apiMock();
     const service = {
       clearPendingSession: vi.fn(), getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'wallet', stateJson: { target: ADDRESS, investigationId: 'investigation1', investigationView: 'summary', page: 1, pageSize: 5 } }),
-      investigateWallet: vi.fn().mockResolvedValue(investigation()), updateSession: vi.fn()
+      loadWalletInvestigation: vi.fn().mockResolvedValue(investigation()), investigateWallet: vi.fn(), updateSession: vi.fn()
     } as unknown as OperatorService;
-    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 5, callback_query: { id: 'cb-refresh', from: { id: 123 }, data: 'v1|refresh|session1|run', message: { message_id: 5, chat: { id: 123, type: 'private' }, text: 'summary' } } });
-    expect(service.investigateWallet).toHaveBeenCalledWith(ADDRESS, { refresh: true, maxDepth: 4 });
-    expect(api.answerCallbackQuery).toHaveBeenCalledWith('cb-refresh', 'Refreshing investigation');
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 5, callback_query: { id: 'cb-refresh', from: { id: 123 }, data: 'v1|refresh|session1|run', message: { message_id: 5, chat: { id: 123, type: 'private' }, text: 'old summary' } } });
+    expect(service.loadWalletInvestigation).toHaveBeenCalledWith('investigation1');
+    expect(service.investigateWallet).not.toHaveBeenCalled();
+    expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain('WALLET INVESTIGATION');
   });
 
   it('clears pending state on /cancel and Back', async () => {

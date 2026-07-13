@@ -2,6 +2,10 @@ import type { InlineKeyboard, TelegramApi, TelegramUpdate } from './types';
 
 const BASE = 'https://api.telegram.org';
 
+export function isTelegramRecipientUnavailable(error: unknown) {
+  return error instanceof Error && /bot was blocked by the user|user is deactivated|chat not found/i.test(error.message);
+}
+
 export function createTelegramApi(token: string, fetchImpl: typeof fetch = fetch): TelegramApi {
   if (!token.trim()) throw new Error('TELEGRAM_BOT_TOKEN is required');
   const call = async <T>(method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> => {

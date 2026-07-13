@@ -1,4 +1,5 @@
 import { OperatorService } from '@flowradar/db';
+import { isTelegramRecipientUnavailable } from './api';
 import { TELEGRAM_COMMANDS, createUpdateHandler } from './handlers';
 import type { TelegramApi } from './types';
 
@@ -40,7 +41,7 @@ export async function runLongPolling(options: { service: OperatorService; api: T
   }
 }
 
-async function dispatchWatchAlerts(service: OperatorService, api: TelegramApi) {
+export async function dispatchWatchAlerts(service: OperatorService, api: TelegramApi) {
   await service.materializeWatchAlerts();
   for (const alert of await service.pendingWatchAlerts(100)) {
     try {
@@ -48,7 +49,11 @@ async function dispatchWatchAlerts(service: OperatorService, api: TelegramApi) {
       const text = `<b>FlowRadar · ${escape(String(alert.alertType))}</b>\n${Object.entries(payload).map(([key, value]) => `${escape(key)}: ${escape(String(value ?? 'n/a'))}`).join('\n')}`;
       await api.sendMessage(alert.watch.chatId, text);
       await service.markWatchAlert(alert.id);
-    } catch (error) { await service.markWatchAlert(alert.id, error instanceof Error ? error.message : String(error)); }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isTelegramRecipientUnavailable(error)) await service.stopTelegramDelivery(alert.watch.chatId, message);
+      else await service.markWatchAlert(alert.id, message);
+    }
   }
 }
 

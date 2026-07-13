@@ -673,6 +673,18 @@ export class OperatorService {
 
   async pendingWatchAlerts(limit = 100) { return this.prisma.operatorWatchAlert.findMany({ where: { status: { in: ['pending', 'retryable'] } }, include: { watch: true }, orderBy: { createdAt: 'asc' }, take: Math.max(1, Math.min(limit, 1_000)) }); }
   async markWatchAlert(id: string, error?: string) { await this.prisma.operatorWatchAlert.update({ where: { id }, data: error ? { status: 'retryable', lastError: error.slice(0, 1_000) } : { status: 'sent', sentAt: new Date(), lastError: null } }); }
+  async stopTelegramDelivery(chatId: string, error: string) {
+    const watches = await this.prisma.operatorWatch.findMany({ where: { chatId }, select: { id: true } });
+    if (!watches.length) return;
+    const watchIds = watches.map((watch) => watch.id);
+    await this.prisma.$transaction([
+      this.prisma.operatorWatch.updateMany({ where: { id: { in: watchIds }, active: true }, data: { active: false } }),
+      this.prisma.operatorWatchAlert.updateMany({
+        where: { watchId: { in: watchIds }, status: { in: ['pending', 'retryable'] } },
+        data: { status: 'failed', lastError: error.slice(0, 1_000) }
+      })
+    ]);
+  }
 
   private async resolveTarget(input: string) {
     const trimmed = input.trim();

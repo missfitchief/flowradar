@@ -9,6 +9,13 @@ import {
   type WalletInvestigationResult
 } from '@flowradar/db';
 import { isAuthorized } from './auth';
+import {
+  buildInvestigationPresentation,
+  type InvestigationPresentation,
+  type PresentedClusterMember,
+  type PresentedFinding,
+  type PresentedRelationGroup
+} from './investigationPresentation';
 import { callback, exportKeyboard, h, navKeyboard, renderProfitable, short } from './render';
 import type { InlineKeyboard, TelegramApi, TelegramCallbackQuery, TelegramMessage, TelegramUpdate } from './types';
 
@@ -166,9 +173,9 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
       return;
     }
     if (parsed.action === 'refresh') {
-      await api.answerCallbackQuery(query.id, 'Refreshing investigation');
-      const investigation = await service.investigateWallet(required(state), { refresh: true, maxDepth: 4 });
-      state.investigationId = investigation.id;
+      await api.answerCallbackQuery(query.id, 'Prikaz osvežen');
+      const investigation = await service.loadWalletInvestigation(state.investigationId ?? required(state));
+      if (!investigation) throw new Error('Investigation is no longer available.');
       state.investigationView = 'summary';
       state.page = 1;
       await service.updateSession(session.id, userId, chatId, state);
@@ -178,6 +185,15 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
     }
     if (parsed.action === 'invest') {
       state.investigationView = investigationView(parsed.value);
+      state.investigationItem = undefined;
+      state.page = 1;
+    } else if (parsed.action === 'evidence') {
+      state.investigationView = 'evidence';
+      state.investigationItem = parsed.value;
+      state.page = 1;
+    } else if (parsed.action === 'receivers') {
+      state.investigationView = 'receivers';
+      state.investigationItem = parsed.value;
       state.page = 1;
     } else if (parsed.action === 'page') state.page = Math.max(1, Number(parsed.value) || 1);
     else if (parsed.action === 'sort') state.sort = parsed.value as ProfitableSort;
@@ -259,6 +275,253 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
 }
 
 export function renderInvestigation(investigation: WalletInvestigationResult, state: OperatorSessionState, sessionId: string) {
+  const presentation = buildInvestigationPresentation(investigation);
+  const view = state.investigationView ?? 'summary';
+  const page = state.page || 1;
+  if (view === 'summary') return renderOperatorSummary(investigation, presentation, sessionId);
+  if (view === 'priority' || view === 'paths') return renderFindingPage('NAJVAŽNIJE PUTANJE', presentation.priorityFindings, page, sessionId, 'p');
+  if (view === 'deployments') return renderFindingPage('TOKEN DEPLOYMENTS', presentation.deploymentFindings, page, sessionId, 'd');
+  if (view === 'bridges') return renderFindingPage('BRIDGES', presentation.bridgeFindings, page, sessionId, 'b');
+  if (view === 'alts') return renderOperatorAltWallets(presentation, page, sessionId);
+  if (view === 'cluster') return renderOperatorCluster(presentation, page, sessionId);
+  if (view === 'advanced') return renderAdvanced(presentation, page, sessionId);
+  if (view === 'receivers') return renderGroupReceivers(presentation, state.investigationItem, page, sessionId);
+  return renderOperatorEvidence(presentation, state.investigationItem, sessionId);
+}
+
+function renderOperatorSummary(value: WalletInvestigationResult, presentation: InvestigationPresentation, sessionId: string) {
+  const chains = value.activityChains.length ? value.activityChains.map(chainLabel).join(', ') : 'nema potvrđene aktivnosti';
+  const highlights = presentation.priorityFindings.slice(0, 3);
+  const findings = highlights.length
+    ? ['<b>Najvažniji nalazi:</b>', ...highlights.map((finding, index) => renderSummaryFinding(finding, index + 1))]
+    : [
+        '<b>Nisu pronađene high-priority putanje.</b>',
+        `- Ukupno relacija analizirano: ${presentation.totalRelations}`,
+        `- Noise/infrastructure: ${presentation.noiseInfrastructure}`,
+        `- Low priority: ${presentation.lowPriorityRelations}`,
+        `- Coverage kompletna: ${presentation.completeCoverageChains}/${value.coverage.length} chainova`
+      ];
+  const text = [
+    '<b>WALLET INVESTIGATION</b>',
+    '',
+    '<b>Root:</b>',
+    `<code>${h(value.rootAddress)}</code>`,
+    '',
+    '<b>Chains:</b>',
+    h(chains),
+    '',
+    '<b>Rezultati:</b>',
+    `- High-priority capital paths: ${presentation.highPriorityCount}`,
+    `- Direct receivers: ${presentation.directReceivers}`,
+    `- Exact bridge destinations: ${presentation.exactBridgeDestinations}`,
+    `- Probable alt/execution wallets: ${presentation.probableAltExecutionWallets}`,
+    `- Token deployments: ${presentation.tokenDeployments}`,
+    `- Profit rotations: ${presentation.profitRotations}`,
+    `- Low-priority/noise hidden: ${presentation.hiddenRelations}`,
+    '',
+    ...findings
+  ].join('\n');
+  return {
+    text,
+    keyboard: { inline_keyboard: [
+      [{ text: 'Najvažnije putanje', callback_data: callback('invest', sessionId, 'priority') }],
+      [{ text: 'Token deployments', callback_data: callback('invest', sessionId, 'deployments') }],
+      [{ text: 'Alt / execution walleti', callback_data: callback('invest', sessionId, 'alts') }],
+      [{ text: 'Bridges', callback_data: callback('invest', sessionId, 'bridges') }],
+      [{ text: 'Ceo cluster', callback_data: callback('invest', sessionId, 'cluster') }],
+      [{ text: 'Advanced / svi rezultati', callback_data: callback('invest', sessionId, 'advanced') }]
+    ] }
+  };
+}
+
+function renderSummaryFinding(finding: PresentedFinding, rank: number) {
+  const token = finding.tokenAddress ? ` · ${h(finding.tokenSymbol ?? short(finding.tokenAddress))}` : '';
+  return `${rank}. <b>${h(finding.label)}</b> · ${formatAmount(finding.amountUsd, finding.amountToken, finding.assetSymbol)}${token}\n<code>${h(finding.receiverAddress)}</code>`;
+}
+
+function renderFindingPage(title: string, rows: PresentedFinding[], page: number, sessionId: string, prefix: string) {
+  const { items, hasNext } = pageRows(rows, page, 5);
+  const text = [
+    `<b>${title}</b> · strana ${page} · ${rows.length} ukupno`,
+    ...(items.length
+      ? items.map((finding, index) => renderOperatorFinding(finding, (page - 1) * 5 + index + 1))
+      : ['Nisu pronađene high-priority putanje.'])
+  ].join('\n\n');
+  const buttons = items.flatMap((finding, index) => operatorFindingButtons(finding, sessionId, `${prefix}:${(page - 1) * 5 + index}`));
+  return { text, keyboard: operatorListKeyboard(sessionId, page, hasNext, buttons) };
+}
+
+function renderOperatorFinding(finding: PresentedFinding, rank: number) {
+  const lines = [
+    `${rank}. <b>${h(finding.label)}</b>`,
+    '',
+    '<b>Source:</b>',
+    `<code>${h(finding.sourceAddress)}</code>`,
+    '',
+    '<b>Receiver:</b>',
+    `<code>${h(finding.receiverAddress)}</code>`,
+    '',
+    `Amount: ${formatAmount(finding.amountUsd, finding.amountToken, finding.assetSymbol)}`,
+    `Receiver role: ${h(finding.receiverRole.replaceAll('_', ' '))}`,
+    finding.tokenAddress ? `Bought: ${h(finding.tokenSymbol ?? 'TOKEN')} · <code>${h(finding.tokenAddress)}</code>` : null,
+    finding.fundingToBuyDelaySec == null ? null : `Funding → buy: ${duration(finding.fundingToBuyDelaySec)}`,
+    `Confidence: ${Math.round(finding.confidence * 100)}%`
+  ].filter((line): line is string => line !== null);
+  return lines.join('\n');
+}
+
+function operatorFindingButtons(finding: PresentedFinding, sessionId: string, selector: string): InlineKeyboard['inline_keyboard'] {
+  const row: InlineKeyboard['inline_keyboard'][number] = [];
+  if (finding.sourceTxHash) row.push({ text: 'Source tx', url: transactionExplorer(finding.sourceChain, finding.sourceTxHash) });
+  row.push({ text: 'Receiver', url: walletExplorer(finding.receiverChain, finding.receiverAddress) });
+  if (finding.tokenAddress) row.push({ text: 'Token', url: tokenExplorer(finding.receiverChain, finding.tokenAddress) });
+  row.push({ text: 'Evidence', callback_data: callback('evidence', sessionId, selector) });
+  return [row];
+}
+
+function renderOperatorAltWallets(presentation: InvestigationPresentation, page: number, sessionId: string) {
+  return renderClusterPage('ALT / EXECUTION WALLETI', presentation.altWallets, page, sessionId);
+}
+
+function renderOperatorCluster(presentation: InvestigationPresentation, page: number, sessionId: string) {
+  const counts = new Map<string, number>();
+  for (const row of presentation.clusterMembers) counts.set(row.section, (counts.get(row.section) ?? 0) + 1);
+  return renderClusterPage([
+    'CEO CLUSTER',
+    `Strong: ${counts.get('Confirmed/strong relationships') ?? 0} · Probable alt/execution: ${counts.get('Probable alt/execution wallets') ?? 0}`,
+    `Possible: ${counts.get('Possible relationships') ?? 0} · Infrastructure excluded: ${counts.get('Infrastructure excluded') ?? 0}`
+  ].join('\n'), presentation.clusterMembers, page, sessionId);
+}
+
+function renderClusterPage(title: string, rows: PresentedClusterMember[], page: number, sessionId: string) {
+  const { items, hasNext } = pageRows(rows, page, 5);
+  const text = [
+    `<b>${title}</b> · strana ${page} · ${rows.length} ukupno`,
+    ...(items.length ? items.map((row, index) => renderPresentedClusterMember(row, (page - 1) * 5 + index + 1)) : ['Nema walleta u ovoj kategoriji.'])
+  ].join('\n\n');
+  return { text, keyboard: operatorListKeyboard(sessionId, page, hasNext, items.map(({ member }) => memberButtons(member))) };
+}
+
+function renderPresentedClusterMember(row: PresentedClusterMember, rank: number) {
+  const member = row.member;
+  return [
+    `${rank}. <b>${h(row.section)}</b>`,
+    `<code>${h(member.address)}</code>`,
+    `${chainLabel(member.chain)} · ${h(member.role.replaceAll('_', ' '))} · ${Math.round(member.relationshipConfidence * 100)}%`,
+    `Evidence: ${h(member.evidenceTier)} · observation_only`
+  ].join('\n');
+}
+
+function renderAdvanced(presentation: InvestigationPresentation, page: number, sessionId: string) {
+  const { items, hasNext } = pageRows(presentation.relationGroups, page, 5);
+  const text = [
+    `<b>ADVANCED / SVI REZULTATI</b> · strana ${page}`,
+    `${presentation.totalRelations} relacija · ${presentation.relationGroups.length} grupisanih događaja`,
+    ...(items.length ? items.map((group, index) => renderRelationGroup(group, (page - 1) * 5 + index + 1)) : ['Nema persistovanih relacija.'])
+  ].join('\n\n');
+  const buttons = items.flatMap((group, index) => {
+    const selector = String((page - 1) * 5 + index);
+    const row: InlineKeyboard['inline_keyboard'][number] = [];
+    if (group.sourceTxHash) row.push({ text: 'Source tx', url: transactionExplorer(group.sourceChain, group.sourceTxHash) });
+    if (group.receivers.length === 1) row.push({ text: 'Receiver', url: walletExplorer(group.receivers[0].chain, group.receivers[0].address) });
+    else row.push({ text: `Prikaži ${group.receivers.length} receivera`, callback_data: callback('receivers', sessionId, selector) });
+    row.push({ text: 'Evidence', callback_data: callback('evidence', sessionId, `a:${selector}`) });
+    return [row];
+  });
+  return { text, keyboard: operatorListKeyboard(sessionId, page, hasNext, buttons) };
+}
+
+function renderRelationGroup(group: PresentedRelationGroup, rank: number) {
+  const receiver = group.receivers[0];
+  if (group.receivers.length > 1) return [
+    `${rank}. <b>${h(group.label)}</b>`,
+    '',
+    '<b>Source:</b>',
+    `<code>${h(group.sourceAddress)}</code>`,
+    '',
+    `- ${group.receivers.length} receiver walleta`,
+    `- ukupno poslato: ${formatAmount(group.totalAmountUsd, group.amountToken, group.assetSymbol)}`,
+    `- route: ${h(group.routeType.replaceAll('_', '-'))}, depth ${group.depth}`,
+    `- token deployments: ${group.deploymentCount}`,
+    `- classification: ${h(group.classification.replaceAll('_', ' '))}`
+  ].join('\n');
+  return [
+    `${rank}. <b>${h(group.label)}</b> · ${h(group.classification.replaceAll('_', ' '))}`,
+    `Source: <code>${h(group.sourceAddress)}</code>`,
+    `Receiver: <code>${h(receiver?.address ?? 'n/a')}</code>`,
+    `Amount: ${formatAmount(group.totalAmountUsd, group.amountToken, group.assetSymbol)} · depth ${group.depth}`,
+    `Role: ${h(receiver?.role.replaceAll('_', ' ') ?? 'unclassified')} · Confidence: ${Math.round(group.confidence * 100)}%`
+  ].join('\n');
+}
+
+function renderGroupReceivers(presentation: InvestigationPresentation, selector: string | undefined, page: number, sessionId: string) {
+  const groupIndex = Math.max(0, Number(selector) || 0);
+  const group = presentation.relationGroups[groupIndex];
+  if (!group) return { text: '<b>Receiver grupa više nije dostupna.</b>', keyboard: operatorBackKeyboard(sessionId) };
+  const { items, hasNext } = pageRows(group.receivers, page, 5);
+  const text = [
+    `<b>${h(group.label)} · RECEIVERI</b> · strana ${page} · ${group.receivers.length} ukupno`,
+    ...items.map((receiver, index) => [
+      `${(page - 1) * 5 + index + 1}. <code>${h(receiver.address)}</code>`,
+      `${chainLabel(receiver.chain)} · ${h(receiver.role.replaceAll('_', ' '))} · ${Math.round(receiver.confidence * 100)}%`
+    ].join('\n'))
+  ].join('\n\n');
+  return { text, keyboard: operatorListKeyboard(sessionId, page, hasNext, items.map((receiver) => [{ text: 'Receiver', url: walletExplorer(receiver.chain, receiver.address) }])) };
+}
+
+function renderOperatorEvidence(presentation: InvestigationPresentation, selector: string | undefined, sessionId: string) {
+  const match = /^([pdba]):(\d+)$/.exec(selector ?? '');
+  const index = Number(match?.[2] ?? -1);
+  if (match?.[1] === 'a') {
+    const group = presentation.relationGroups[index];
+    if (!group) return { text: '<b>Evidence više nije dostupan.</b>', keyboard: operatorBackKeyboard(sessionId) };
+    return {
+      text: [
+        `<b>EVIDENCE · ${h(group.label)}</b>`,
+        `Supporting: ${h(group.evidenceTiers.join(', ') || 'none')}`,
+        `Reasons: ${h(group.reasons.join(', ') || 'none')}`,
+        `Persisted relations: ${group.relationCount} · transfers: ${group.transferCount}`,
+        `Classification: ${h(group.classification)}`
+      ].join('\n'),
+      keyboard: operatorBackKeyboard(sessionId)
+    };
+  }
+  const rows = match?.[1] === 'd' ? presentation.deploymentFindings : match?.[1] === 'b' ? presentation.bridgeFindings : presentation.priorityFindings;
+  const finding = rows[index];
+  if (!finding) return { text: '<b>Evidence više nije dostupan.</b>', keyboard: operatorBackKeyboard(sessionId) };
+  return {
+    text: [
+      `<b>EVIDENCE · ${h(finding.label)}</b>`,
+      `Supporting: ${h(finding.evidenceTiers.join(', ') || 'none')}`,
+      `Reasons: ${h(finding.reasons.join(', ') || 'none')}`,
+      `Relationship confidence: ${Math.round(finding.confidence * 100)}%`,
+      `Contradicting evidence records: ${finding.contradictingEvidence.filter(Boolean).length}`,
+      `Event time: ${h(finding.eventTs)}`
+    ].join('\n'),
+    keyboard: operatorBackKeyboard(sessionId)
+  };
+}
+
+function operatorListKeyboard(sessionId: string, page: number, hasNext: boolean, rows: InlineKeyboard['inline_keyboard']): InlineKeyboard {
+  const navigation: InlineKeyboard['inline_keyboard'][number] = [];
+  if (page > 1) navigation.push({ text: '‹ Back', callback_data: callback('page', sessionId, String(page - 1)) });
+  if (hasNext) navigation.push({ text: 'Next ›', callback_data: callback('page', sessionId, String(page + 1)) });
+  return { inline_keyboard: [...rows, ...(navigation.length ? [navigation] : []), [{ text: 'Back', callback_data: callback('invest', sessionId, 'summary') }]] };
+}
+
+function operatorBackKeyboard(sessionId: string): InlineKeyboard {
+  return { inline_keyboard: [[{ text: 'Back', callback_data: callback('invest', sessionId, 'summary') }]] };
+}
+
+function chainLabel(chain: string) {
+  if (chain === 'ETHEREUM') return 'Ethereum';
+  if (chain === 'ARBITRUM') return 'Arbitrum';
+  if (chain === 'SOLANA') return 'Solana';
+  if (chain === 'BASE') return 'Base';
+  return chain;
+}
+
+function renderInvestigationLegacy(investigation: WalletInvestigationResult, state: OperatorSessionState, sessionId: string) {
   const view = state.investigationView ?? 'summary';
   if (view === 'summary') return renderInvestigationSummary(investigation, sessionId);
   if (view === 'cluster') return renderCluster(investigation, state.page || 1, sessionId);
@@ -457,13 +720,14 @@ function invalidTargetMessage(workflow: OperatorWorkflow) {
   return 'Vrednost nije validna. Pošalji validan wallet ili postojeći entity ID.';
 }
 function workflowView(workflow: OperatorWorkflow): OperatorSessionState['investigationView'] {
-  if (workflow === 'flow') return 'paths';
+  if (workflow === 'flow') return 'priority';
   if (workflow === 'bridges') return 'bridges';
   if (workflow === 'entity') return 'cluster';
   return 'summary';
 }
 function investigationView(value: string): NonNullable<OperatorSessionState['investigationView']> {
-  return value === 'paths' || value === 'cluster' || value === 'deployments' || value === 'evidence' || value === 'bridges' ? value : 'summary';
+  return value === 'paths' || value === 'priority' || value === 'cluster' || value === 'alts' || value === 'deployments'
+    || value === 'evidence' || value === 'bridges' || value === 'advanced' || value === 'receivers' ? value : 'summary';
 }
 interface TokenPnlTelegramRow {
   chain: string;
