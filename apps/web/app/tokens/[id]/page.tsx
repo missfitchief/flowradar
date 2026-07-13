@@ -28,8 +28,11 @@ interface TokenDetailPageProps {
   params: Promise<{ id: string }>;
 }
 
-const CHAIN_BADGE_CLASS: Record<'SOLANA' | 'BSC', string> = {
+const CHAIN_BADGE_CLASS: Record<'SOLANA' | 'ETHEREUM' | 'BASE' | 'ARBITRUM' | 'BSC', string> = {
   SOLANA: 'border-transparent bg-violet-500/15 text-violet-300',
+  ETHEREUM: 'border-transparent bg-blue-500/15 text-blue-300',
+  BASE: 'border-transparent bg-sky-500/15 text-sky-300',
+  ARBITRUM: 'border-transparent bg-cyan-500/15 text-cyan-300',
   BSC: 'border-transparent bg-amber-500/15 text-amber-300',
 };
 
@@ -42,8 +45,11 @@ const SIGNAL_BADGE_CLASS: Record<string, string> = {
 };
 
 /** DexScreener's chain slug differs from our ChainId enum casing (binding decision #8). */
-const DEXSCREENER_CHAIN_SLUG: Record<'SOLANA' | 'BSC', string> = {
+const DEXSCREENER_CHAIN_SLUG: Record<'SOLANA' | 'ETHEREUM' | 'BASE' | 'ARBITRUM' | 'BSC', string> = {
   SOLANA: 'solana',
+  ETHEREUM: 'ethereum',
+  BASE: 'base',
+  ARBITRUM: 'arbitrum',
   BSC: 'bsc',
 };
 

@@ -144,6 +144,27 @@ async function bootstrapChains(): Promise<void> {
         explorerAddressUrl: 'https://solscan.io/account/{address}'
       },
       {
+        id: 'ETHEREUM',
+        name: 'Ethereum',
+        nativeSymbol: 'ETH',
+        explorerTxUrl: 'https://etherscan.io/tx/{hash}',
+        explorerAddressUrl: 'https://etherscan.io/address/{address}'
+      },
+      {
+        id: 'BASE',
+        name: 'Base',
+        nativeSymbol: 'ETH',
+        explorerTxUrl: 'https://basescan.org/tx/{hash}',
+        explorerAddressUrl: 'https://basescan.org/address/{address}'
+      },
+      {
+        id: 'ARBITRUM',
+        name: 'Arbitrum One',
+        nativeSymbol: 'ETH',
+        explorerTxUrl: 'https://arbiscan.io/tx/{hash}',
+        explorerAddressUrl: 'https://arbiscan.io/address/{address}'
+      },
+      {
         id: 'BSC',
         name: 'BNB Smart Chain',
         nativeSymbol: 'BNB',
@@ -152,7 +173,7 @@ async function bootstrapChains(): Promise<void> {
       }
     ]
   });
-  log('bootstrapped Chain rows (SOLANA, BSC).');
+  log('bootstrapped Chain rows (SOLANA, ETHEREUM, BASE, ARBITRUM, BSC).');
 }
 
 async function bootstrapSettings(): Promise<Settings> {

@@ -20,8 +20,11 @@ const SECTION_CAP = 6;
 const NEW_WATCHED_CAP = 6;
 
 /** DexScreener's chain slug differs from our ChainId enum casing (mirrors tokens/[id]/page.tsx binding decision #8). */
-const DEXSCREENER_CHAIN_SLUG: Record<'SOLANA' | 'BSC', string> = {
+const DEXSCREENER_CHAIN_SLUG: Record<'SOLANA' | 'ETHEREUM' | 'BASE' | 'ARBITRUM' | 'BSC', string> = {
   SOLANA: 'solana',
+  ETHEREUM: 'ethereum',
+  BASE: 'base',
+  ARBITRUM: 'arbitrum',
   BSC: 'bsc',
 };
 

@@ -255,7 +255,7 @@ describe.skipIf(!dbReachable)('buildTokenTopPnlCandidates (discovery builder)', 
     expect(r3.provider.mintsErrored).toBe(1);
     expect(r3.errors).toBe(0); // provider errors are isolated per mint, not batch errors
     const state = await prisma.topPnlFetchState.findUniqueOrThrow({
-      where: { mint_provider: { mint: tok3.address, provider: 'birdeye_top_traders' } }
+      where: { chain_mint_provider: { chain: 'SOLANA', mint: tok3.address, provider: 'birdeye_top_traders' } }
     });
     expect(state.status).toBe('provider_error');
     expect(state.retryCount).toBe(1);

@@ -68,7 +68,7 @@ export interface WalletDiscoveryResult {
   errors: number;
 }
 
-const ALL_CHAINS: Chain[] = ['SOLANA', 'BSC'];
+const ALL_CHAINS: Array<Extract<Chain, 'SOLANA' | 'BSC'>> = ['SOLANA', 'BSC'];
 
 export async function runWalletDiscovery(
   prisma: PrismaClient,

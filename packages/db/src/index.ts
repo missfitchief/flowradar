@@ -63,3 +63,8 @@ export * from './runnermining/liveRecovery';
 export * from './tracker/massTracker';
 export * from './tracker/traceStore';
 export * from './tracker/legacySource';
+export * from './discovery/unified';
+export * from './discovery/unifiedEntity';
+export * from './operator/types';
+export * from './operator/export';
+export * from './operator/service';

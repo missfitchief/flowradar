@@ -1,4 +1,4 @@
-import type { BridgeCorrelation, CapitalTrace, ClassifiedMassEvent, TraceConfig } from './types';
+import type { BridgeCorrelation, CapitalTrace, ClassifiedMassEvent, MassTransactionEvent, TraceConfig } from './types';
 import { DEFAULT_TRACE_CONFIG } from './types';
 
 interface QueueState {
@@ -17,7 +17,7 @@ function walletKey(chain: string, address: string): string {
 export function traceCapitalToTokenBuys(args: {
   sourceEntityKey: string;
   sourceWallet: string;
-  sourceChain: 'SOLANA' | 'BSC';
+  sourceChain: MassTransactionEvent['chain'];
   sourceRole: CapitalTrace['sourceRole'];
   events: readonly ClassifiedMassEvent[];
   bridgeCorrelations?: readonly BridgeCorrelation[];

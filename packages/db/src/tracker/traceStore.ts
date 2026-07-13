@@ -5,7 +5,7 @@ import {
   type MassTransactionEvent,
   type RelevanceVerdict
 } from '@flowradar/core';
-import type { MassTransactionEvent as DbEvent, PrismaClient } from '@prisma/client';
+import type { ChainId, MassTransactionEvent as DbEvent, PrismaClient } from '@prisma/client';
 
 export interface StoredTraceBuildOptions {
   from: Date;
@@ -54,7 +54,7 @@ export async function buildStoredMassTrackerTraces(
     const sourceEntityKey = `lineage:${root.id}`;
     const rows = new Map<string, DbEvent>();
     const bridgeRows = new Map<string, BridgeCorrelation>();
-    const members = new Map<string, { chain: 'SOLANA' | 'BSC'; address: string; role: 'operator_root' | 'linked_wallet' }>();
+    const members = new Map<string, { chain: ChainId; address: string; role: 'operator_root' | 'linked_wallet' }>();
     members.set(`${root.wallet.chain}:${root.wallet.address}`, { ...root.wallet, role: 'operator_root' });
     for (const sub of root.subscriptions) {
       const key = `${sub.wallet.chain}:${sub.wallet.address}`;

@@ -414,7 +414,7 @@ export async function buildTokenTopPnlCandidates(
       // --- provider rows (budgeted + resumable) -----------------------------
       if (provider) {
         const state = await prisma.topPnlFetchState.findUnique({
-          where: { mint_provider: { mint: lc.mint, provider: 'birdeye_top_traders' } }
+          where: { chain_mint_provider: { chain, mint: lc.mint, provider: 'birdeye_top_traders' } }
         });
         const done =
           state && (state.status === 'fetched' || state.status === 'empty' || (!retryErrored && state.status === 'provider_error'));
@@ -443,8 +443,9 @@ export async function buildTokenTopPnlCandidates(
               await upsertRow(item.walletAddress, 'birdeye_top_traders', i + 1, item, v);
             }
             await prisma.topPnlFetchState.upsert({
-              where: { mint_provider: { mint: lc.mint, provider: 'birdeye_top_traders' } },
+              where: { chain_mint_provider: { chain, mint: lc.mint, provider: 'birdeye_top_traders' } },
               create: {
+                chain,
                 mint: lc.mint,
                 provider: 'birdeye_top_traders',
                 status: items.length > 0 ? 'fetched' : 'empty',
@@ -463,8 +464,9 @@ export async function buildTokenTopPnlCandidates(
           } catch (err) {
             const message = err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300);
             await prisma.topPnlFetchState.upsert({
-              where: { mint_provider: { mint: lc.mint, provider: 'birdeye_top_traders' } },
+              where: { chain_mint_provider: { chain, mint: lc.mint, provider: 'birdeye_top_traders' } },
               create: {
+                chain,
                 mint: lc.mint,
                 provider: 'birdeye_top_traders',
                 status: 'provider_error',

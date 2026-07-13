@@ -14,7 +14,7 @@ import { fmtAge, fmtPct, fmtUsd } from '@/lib/format';
 // whatChanged -> evidence chips (SECOND-to-last) -> footer links (raw data,
 // THIRD/last). Bigger type than the dense tables (text-base/lg, not text-xs).
 
-export type SignalCardChain = 'SOLANA' | 'BSC';
+export type SignalCardChain = 'SOLANA' | 'ETHEREUM' | 'BASE' | 'ARBITRUM' | 'BSC';
 export type SignalCardStatus = 'watching' | 'hot' | 'profit_rotation' | 'exit_warning' | 'dead';
 export type SignalCardSeverity = 'INFO' | 'WATCH' | 'HIGH' | 'CRITICAL';
 
@@ -56,6 +56,9 @@ export interface SignalCardData {
 
 const CHAIN_BADGE_CLASS: Record<SignalCardChain, string> = {
   SOLANA: 'border-transparent bg-violet-500/15 text-violet-300',
+  ETHEREUM: 'border-transparent bg-blue-500/15 text-blue-300',
+  BASE: 'border-transparent bg-sky-500/15 text-sky-300',
+  ARBITRUM: 'border-transparent bg-cyan-500/15 text-cyan-300',
   BSC: 'border-transparent bg-amber-500/15 text-amber-300',
 };
 

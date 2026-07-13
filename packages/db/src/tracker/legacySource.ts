@@ -1,5 +1,5 @@
 import type { MassTransactionEvent } from '@flowradar/core';
-import type { MoneyFlowEdge, PrismaClient, Token, Wallet, WalletTokenTrade } from '@prisma/client';
+import type { ChainId, MoneyFlowEdge, PrismaClient, Token, Wallet, WalletTokenTrade } from '@prisma/client';
 import type { MassTrackerSourceItem } from './massTracker';
 
 export interface LegacyTrackerSourceOptions {
@@ -82,9 +82,9 @@ export async function* streamLegacyLineageEvidence(
     prisma.lineageRoot.findMany({ where: { permanent: true }, select: { wallet: { select: { chain: true, address: true } } } }),
     prisma.monitoringSubscription.findMany({ where: { active: true, lineageRootId: { not: null } }, select: { wallet: { select: { chain: true, address: true } } } })
   ]);
-  const sourceKeys = new Map<string, { chain: 'SOLANA' | 'BSC'; address: string }>();
+  const sourceKeys = new Map<string, { chain: ChainId; address: string }>();
   for (const item of [...roots, ...subscriptions]) sourceKeys.set(`${item.wallet.chain}:${item.wallet.address}`, item.wallet);
-  const destinations = new Map<string, { chain: 'SOLANA' | 'BSC'; address: string }>();
+  const destinations = new Map<string, { chain: ChainId; address: string }>();
   let edges = 0;
   for (const chain of ['SOLANA', 'BSC'] as const) {
     const addresses = [...sourceKeys.values()].filter((x) => x.chain === chain).map((x) => x.address);
@@ -157,7 +157,7 @@ function honestUsd(row: { valuedUsd: unknown; valuationStatus: string | null; am
   const legacy = Number(row.amountUsd);
   return legacy > 0 && Number.isFinite(legacy) ? legacy : null;
 }
-function canonical(chain: 'SOLANA' | 'BSC', value: string): string { return chain === 'BSC' ? value.toLowerCase() : value; }
+function canonical(chain: ChainId, value: string): string { return chain === 'SOLANA' ? value : value.toLowerCase(); }
 /** Stable signed 31-bit FNV-1a; eventId remains the authoritative identity. */
 function stableEventIndex(value: string): number { let hash = 0x811c9dc5; for (let i = 0; i < value.length; i++) { hash ^= value.charCodeAt(i); hash = Math.imul(hash, 0x01000193); } return hash & 0x7fffffff; }
 function clamp(value: number, min: number, max: number): number { return Math.max(min, Math.min(max, Math.trunc(value))); }

@@ -15,7 +15,7 @@ import type { Settings } from './settings';
 // ---------------------------------------------------------------------------
 
 /** Mirrors schema.prisma `enum ChainId`. */
-export type Chain = 'SOLANA' | 'BSC';
+export type Chain = 'SOLANA' | 'ETHEREUM' | 'BASE' | 'ARBITRUM' | 'BSC';
 
 /** Mirrors schema.prisma `enum TradeAction` (WalletTokenTrade.action). */
 export type TradeAction = 'BUY' | 'SELL' | 'TRANSFER_IN' | 'TRANSFER_OUT' | 'LP_ADD' | 'LP_REMOVE';

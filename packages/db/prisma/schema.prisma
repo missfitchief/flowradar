@@ -28,6 +28,9 @@ generator client {
 
 enum ChainId {
   SOLANA
+  ETHEREUM
+  BASE
+  ARBITRUM
   BSC
 }
 
@@ -2111,6 +2114,7 @@ model TokenTopPnlCandidate {
 /// (fetched mints are skipped) + budgeted, mirroring token_enrichments.
 model TopPnlFetchState {
   id         String    @id @default(cuid())
+  chain      ChainId   @default(SOLANA)
   mint       String
   provider   String    @default("birdeye_top_traders")
   /// fetched | empty | provider_error
@@ -2122,7 +2126,7 @@ model TopPnlFetchState {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
-  @@unique([mint, provider])
+  @@unique([chain, mint, provider])
   @@index([status])
   @@map("top_pnl_fetch_states")
 }
@@ -2734,4 +2738,165 @@ model TokenMetadata {
   @@unique([chain, mint])
   @@index([availability])
   @@map("token_metadata")
+}
+
+/// Canonical, provider-independent historical-winner universe. One row per
+/// chain/token aggregates every verified source and carries its own resumable
+/// processing state. Unsupported/missing coverage is persisted, never mocked.
+model HistoricalTokenUniverse {
+  id                     String    @id @default(cuid())
+  chain                  ChainId
+  tokenAddress           String
+  sources                String[]
+  /// verified_above_10m | operator_core | candidate | conflicting | invalid
+  historicalWinnerStatus String
+  athMcapUsd              Decimal?  @db.Decimal(24, 4)
+  athTs                   DateTime?
+  /// covered | partially_covered | unavailable | conflicting | invalid
+  coverage                String
+  /// pending | processing | processed | partial | retryable | unavailable | invalid
+  processingStatus        String
+  evidenceJson            Json
+  retryCount              Int       @default(0)
+  lastError               String?
+  nextRetryAt             DateTime?
+  lastProcessedAt         DateTime?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@unique([chain, tokenAddress])
+  @@index([historicalWinnerStatus, processingStatus])
+  @@index([chain, processingStatus])
+  @@map("historical_token_universe")
+}
+
+/// One bounded/resumable discovery execution receipt. This is operational
+/// evidence only and never grants signal eligibility.
+model ProfitableWalletDiscoveryRun {
+  id                  String    @id
+  startedAt           DateTime
+  completedAt         DateTime?
+  status              String
+  universeConsidered  Int       @default(0)
+  tokensProcessed     Int       @default(0)
+  tokensPartial       Int       @default(0)
+  tokensUnavailable   Int       @default(0)
+  localCandidates     Int       @default(0)
+  providerCandidates  Int       @default(0)
+  walletsObserved     Int       @default(0)
+  retryableFailures   Int       @default(0)
+  peakHeapBytes       BigInt    @default(0)
+  throughputPerSec    Float     @default(0)
+  error               String?
+  metadataJson        Json
+
+  @@index([startedAt])
+  @@index([status])
+  @@map("profitable_wallet_discovery_runs")
+}
+
+/// Cross-chain entity projection built only from safe evidence: existing
+/// probable/strong entities, identical EVM account addresses, and verified
+/// official bridge correlations. It is a relationship graph, not identity.
+model UnifiedEntity {
+  id            String   @id @default(cuid())
+  entityKey     String   @unique
+  chains        ChainId[]
+  memberCount   Int      @default(0)
+  confidence    Float
+  evidenceJson  Json
+  caveats       String[]
+  engineVersion Int
+  computedAt    DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  addresses UnifiedEntityAddress[]
+
+  @@index([memberCount])
+  @@map("unified_entities")
+}
+
+model UnifiedEntityAddress {
+  id              String   @id @default(cuid())
+  entityId        String
+  chain           ChainId
+  address         String
+  role            String
+  evidenceTier    String
+  confidence      Float
+  evidenceJson    Json
+  observationOnly Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  entity UnifiedEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@unique([chain, address])
+  @@index([entityId, role])
+  @@map("unified_entity_addresses")
+}
+
+/// Persisted operator watchlist. Telegram user/chat ids are decimal strings so
+/// no JavaScript-number or database-width truncation can occur.
+model OperatorWatch {
+  id         String   @id @default(cuid())
+  userId     String
+  chatId     String
+  targetType String
+  targetKey  String
+  chain      ChainId?
+  alertTypes String[]
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  alerts OperatorWatchAlert[]
+
+  @@unique([userId, chatId, targetType, targetKey])
+  @@index([active, updatedAt])
+  @@map("operator_watches")
+}
+
+model OperatorWatchAlert {
+  id          String    @id @default(cuid())
+  watchId     String
+  eventKey    String
+  alertType   String
+  payloadJson Json
+  status      String    @default("pending")
+  createdAt   DateTime  @default(now())
+  sentAt      DateTime?
+  lastError   String?
+
+  watch OperatorWatch @relation(fields: [watchId], references: [id], onDelete: Cascade)
+
+  @@unique([watchId, eventKey, alertType])
+  @@index([status, createdAt])
+  @@map("operator_watch_alerts")
+}
+
+/// Short-lived persisted callback state keeps Telegram callback_data bounded
+/// to 64 bytes and makes pagination restart-safe.
+model OperatorSession {
+  id        String   @id @default(cuid())
+  userId    String
+  chatId    String
+  workflow  String
+  stateJson Json
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, expiresAt])
+  @@map("operator_sessions")
+}
+
+/// Long-poll offset only. The bot token is never persisted.
+model TelegramBotCursor {
+  botKey       String   @id
+  nextUpdateId BigInt   @default(0)
+  updatedAt    DateTime @updatedAt
+
+  @@map("telegram_bot_cursors")
 }
