@@ -2471,3 +2471,80 @@ model EntityDnaProfile {
   @@index([memberCount])
   @@map("entity_dna_profiles")
 }
+
+/// Per-token top-PnL extraction OUTCOME (finish-pipeline sprint) — one row per
+/// verified $10M+ runner recording whether wallet discovery actually
+/// SUCCEEDED, not merely that the token has a processing state. SHADOW-ONLY.
+model TopPnlExtractionStatus {
+  id                 String   @id @default(cuid())
+  chain              ChainId
+  mint               String
+  /// local_reconstruction_ok | provider_ok | retryable_provider_failure |
+  /// unavailable | no_valid_wallets | incomplete_coverage
+  status             String
+  hasTokenRow        Boolean  @default(false)
+  hasLocalTrades     Boolean  @default(false)
+  walletCount        Int      @default(0)
+  locallyVerified    Int      @default(0)
+  providerOnly       Int      @default(0)
+  incomplete         Int      @default(0)
+  providerFetchState String?
+  reasonCodes        String[]
+  receiptsJson       Json
+  engineVersion      Int
+  computedAt         DateTime
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([chain, mint])
+  @@index([status])
+  @@map("top_pnl_extraction_status")
+}
+
+/// Real capital chain (finish-pipeline sprint) — the end-to-end product
+/// proof: a known/probable entity moves capital to a receiver (STAGING),
+/// that receiver later buys a token (DEPLOYMENT), or profit from one token
+/// rotates into another through the same/linked entity (ROTATION). Built by
+/// JOINING existing evidence (outflow paths, receiver enrollments, local
+/// trades) — nothing fabricated; near-empty deployment is an honest data
+/// state, never faked. SHADOW-ONLY, observation_only.
+model CapitalChain {
+  id                 String    @id @default(cuid())
+  /// Deterministic idempotency key: kind|sourceWallet|receiverWallet|tokenBought (nulls as empty).
+  dedupeKey          String    @unique
+  chain              ChainId
+  /// staging | deployment | profit_rotation
+  kind               String
+  sourceEntityKey    String
+  sourceWallet       String
+  receiverWallet     String?
+  /// direct_transfer | multi_hop_transfer | same_wallet_rotation | linked_entity_rotation
+  route              String
+  evidenceTier       String
+  knownValueUsd      Decimal?  @db.Decimal(24, 4)
+  fundingTs          DateTime?
+  /// The token the capital was deployed / rotated INTO (null for pure staging).
+  tokenBought        String?
+  tokenBoughtSymbol  String?
+  entryMcapUsd       Decimal?  @db.Decimal(24, 4)
+  fundingToBuyDelaySec Int?
+  /// The token a profit rotation came FROM (rotation only).
+  sourceToken        String?
+  realizedProfitUsd  Decimal?  @db.Decimal(24, 4)
+  receiverClass      String?
+  relationshipTier   String?
+  independentEntitiesOnToken Int @default(0)
+  confidence         Float
+  reasonCodes        String[]
+  receiptsJson       Json
+  caveats            String[]
+  engineVersion      Int
+  computedAt         DateTime
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([kind])
+  @@index([tokenBought])
+  @@index([sourceEntityKey])
+  @@map("capital_chains")
+}

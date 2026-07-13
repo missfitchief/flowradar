@@ -27,7 +27,9 @@ const {
   buildCapitalOutflowPaths,
   buildReceiverEnrollments,
   buildTokenCandidateScores,
-  buildEntityGraph
+  buildEntityGraph,
+  buildTopPnlExtractionStatus,
+  buildCapitalChains
 } = await import('@flowradar/db');
 const { createBirdeyeTokenTopTraders } = await import('@flowradar/providers');
 import { writeFileSync, mkdirSync } from 'node:fs';
@@ -98,6 +100,12 @@ async function main() {
   // Stage 5: automatic token candidates over the widened universe.
   const cands = await buildTokenCandidateScores(prisma, { chain: 'SOLANA', limit: 500 });
   console.log('[mining] candidates', JSON.stringify({ byState: cands.byState, skippedLargeCap: cands.skippedLargeCap, errors: cands.errors }));
+
+  // Stage 6: per-token extraction status + real capital chains.
+  const extraction = await buildTopPnlExtractionStatus(prisma, { chain: 'SOLANA' });
+  const chains = await buildCapitalChains(prisma, { chain: 'SOLANA' });
+  console.log('[mining] extraction', JSON.stringify(extraction.byStatus));
+  console.log('[mining] chains', JSON.stringify({ staging: chains.staging, deployment: chains.deployment, profitRotation: chains.profitRotation, endToEnd: chains.endToEndExamples, errors: chains.errors }));
 
   // ---- FULL COVERAGE REPORT -------------------------------------------------
   const [lc, enr, tpcByVal, uniqueWallets, dnaAgg, dormClasses, entClasses, sideWallets, rolesByRole, entityAgg, staging, deployedRecv, replayAgg] = await Promise.all([
@@ -180,6 +188,8 @@ async function main() {
       probableSideWallets: sideWallets
     },
     roles: Object.fromEntries(rolesByRole.map((g) => [g.role, g._count._all])),
+    extractionStatus: extraction.byStatus,
+    capitalChains: { staging: chains.staging, deployment: chains.deployment, profitRotation: chains.profitRotation, endToEndExamples: chains.endToEndExamples },
     capital: { stagingReceivers: staging, deployedReceivers: deployedRecv },
     replay: Object.fromEntries(replayAgg.map((g) => [g.classification, g._count._all])),
     candidates: { byState: cands.byState, skippedLargeCap: cands.skippedLargeCap },
