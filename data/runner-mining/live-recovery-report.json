@@ -1,0 +1,37 @@
+{
+  "ts": "2026-07-13T11:18:32.480Z",
+  "durationSec": 34,
+  "receiverBackfill": {
+    "byStatus": {
+      "retryable_provider_failure": 77,
+      "partial_coverage": 63,
+      "covered_no_post_receipt_buy": 11
+    },
+    "deploymentsFound": 0,
+    "written": 151,
+    "errors": 0
+  },
+  "tokenMetadata": {
+    "considered": 683,
+    "resolved": 0,
+    "placeholderOnly": 0,
+    "retryable": 683,
+    "unavailable": 0,
+    "missingCredential": 0,
+    "requestsUsed": 1
+  },
+  "capitalChains": {
+    "staging": 233,
+    "deployment": 0,
+    "profitRotation": 2
+  },
+  "candidates": {
+    "WATCHING": 320,
+    "STEALTH_ACCUMULATION": 1,
+    "INVALIDATED": 15
+  },
+  "honestGaps": [
+    "token metadata unresolved this run (683 retryable=provider quota/rate-limit, 0 unavailable=provider returned no metadata, of 683) — retryable never fabricated",
+    "receiver deployment chains remain 0: 0/151 receivers show a post-receipt token buy — 11 covered-no-buy (clean post-receipt poll), 63 partial_coverage (seen but no clean post-receipt poll — absence NOT proven), 77 retryable (not yet polled / source failed)"
+  ]
+}

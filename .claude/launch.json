@@ -22,7 +22,7 @@
       "cwd": "apps/web",
       "port": 5190,
       "env": {
-        "DATABASE_URL": "postgresql://flowradar:flowradar@localhost:5439/flowradar_pilot",
+        "DATABASE_URL": "postgresql://flowradar:flowradar@localhost:5439/flowradar_pilot?connection_limit=20&pool_timeout=30",
         "MOCK_MODE": "false"
       }
     }
