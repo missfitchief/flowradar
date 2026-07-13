@@ -3035,3 +3035,149 @@ model TelegramBotCursor {
 
   @@map("telegram_bot_cursors")
 }
+
+/// Canonical persisted wallet investigation. Every Telegram wallet/entity/
+/// flow/bridge view reads this snapshot instead of running an independent
+/// lookup. Investigation evidence is observation-only.
+model WalletInvestigation {
+  id                   String    @id @default(cuid())
+  investigationKey     String    @unique
+  rootAddress          String
+  addressKind          String
+  maxDepth             Int
+  status               String
+  entityKey            String?
+  coverageStatus       String
+  summaryJson          Json
+  providerReceiptsJson Json
+  startedAt            DateTime
+  completedAt          DateTime?
+  lastRefreshAt        DateTime?
+  lastError            String?
+  engineVersion        Int
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  chains      WalletInvestigationChainCoverage[]
+  paths       WalletInvestigationPath[]
+  members     WalletInvestigationMember[]
+  deployments WalletInvestigationDeployment[]
+
+  @@index([rootAddress, completedAt])
+  @@index([entityKey, completedAt])
+  @@index([status, updatedAt])
+  @@map("wallet_investigations")
+}
+
+model WalletInvestigationChainCoverage {
+  id              String    @id @default(cuid())
+  investigationId String
+  chain           ChainId
+  activityFound   Boolean   @default(false)
+  firstActivityAt DateTime?
+  lastActivityAt  DateTime?
+  eventsScanned   Int       @default(0)
+  coverageStatus  String
+  provider        String?
+  warnings        String[]
+  receiptsJson    Json
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  investigation WalletInvestigation @relation(fields: [investigationId], references: [id], onDelete: Cascade)
+
+  @@unique([investigationId, chain])
+  @@index([chain, activityFound])
+  @@map("wallet_investigation_chain_coverage")
+}
+
+model WalletInvestigationPath {
+  id                        String   @id @default(cuid())
+  investigationId           String
+  pathKey                   String
+  routeType                 String
+  sourceChain               ChainId
+  sourceAddress             String
+  destinationChain          ChainId
+  destinationAddress        String
+  assetAddress              String?
+  assetSymbol               String?
+  amountToken               String?
+  amountUsd                 Decimal? @db.Decimal(24, 4)
+  valueStatus               String
+  eventTs                   DateTime
+  txHash                    String?
+  protocol                  String?
+  evidenceTier              String
+  confidence                Float
+  hopCount                  Int
+  hopsJson                  Json
+  supportingEvidenceJson    Json
+  contradictingEvidenceJson Json
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  investigation WalletInvestigation @relation(fields: [investigationId], references: [id], onDelete: Cascade)
+
+  @@unique([investigationId, pathKey])
+  @@index([investigationId, eventTs])
+  @@index([investigationId, routeType, eventTs])
+  @@index([destinationChain, destinationAddress])
+  @@map("wallet_investigation_paths")
+}
+
+model WalletInvestigationMember {
+  id                        String   @id @default(cuid())
+  investigationId           String
+  chain                     ChainId
+  address                   String
+  role                      String
+  parentChain               ChainId?
+  parentAddress             String?
+  entityKey                 String?
+  relationshipConfidence    Float
+  evidenceTier              String
+  supportingEvidenceJson    Json
+  contradictingEvidenceJson Json
+  firstLinkedAt             DateTime
+  lastLinkedAt              DateTime
+  observationOnly           Boolean  @default(true)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  investigation WalletInvestigation @relation(fields: [investigationId], references: [id], onDelete: Cascade)
+
+  @@unique([investigationId, chain, address])
+  @@index([entityKey, relationshipConfidence])
+  @@index([chain, address])
+  @@map("wallet_investigation_members")
+}
+
+model WalletInvestigationDeployment {
+  id                   String   @id @default(cuid())
+  investigationId      String
+  deploymentKey        String
+  chain                ChainId
+  buyerAddress         String
+  tokenAddress         String
+  tokenSymbol          String?
+  buyTs                DateTime
+  buyTxHash            String
+  amountToken          String?
+  amountUsd            Decimal? @db.Decimal(24, 4)
+  entryMarketCapUsd    Decimal? @db.Decimal(24, 4)
+  fundingToBuyDelaySec Int?
+  sourceEntityKey      String?
+  capitalRouteJson     Json
+  holdingStatus        String
+  evidenceTier         String
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  investigation WalletInvestigation @relation(fields: [investigationId], references: [id], onDelete: Cascade)
+
+  @@unique([investigationId, deploymentKey])
+  @@index([chain, tokenAddress, buyTs])
+  @@index([buyerAddress, buyTs])
+  @@map("wallet_investigation_deployments")
+}

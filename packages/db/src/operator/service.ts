@@ -1,7 +1,9 @@
 import { Prisma, type AddressCategory, type ChainId, type OperatorSession, type PrismaClient } from '@prisma/client';
 import type { MassTransactionEvent } from '@flowradar/core';
-import type { WalletCapitalScanProvider } from '@flowradar/providers';
+import type { WalletBridgeScanProvider, WalletCapitalScanProvider } from '@flowradar/providers';
 import { normalizeAddress, runUnifiedProfitableWalletDiscovery, validAddress, type HistoricalTraderProvider } from '../discovery/unified';
+import { WalletInvestigationService } from '../investigation/walletInvestigation';
+import type { WalletInvestigationResult } from '../investigation/types';
 import { analyzeTokenWalletIntelligence } from '../intelligence/token';
 import { expandWalletCapitalGraph } from '../intelligence/walletFlows';
 import { enrollObservationWallet } from '../intelligence/monitoring';
@@ -20,10 +22,26 @@ const pendingWorkflowKey = (workflow: OperatorWorkflow) => `pending:${workflow}`
 export interface OperatorServiceOptions {
   tokenTopTraderProviders?: Partial<Record<ChainId, HistoricalTraderProvider>>;
   walletCapitalScanner?: WalletCapitalScanProvider;
+  walletBridgeScanner?: WalletBridgeScanProvider;
 }
 
 export class OperatorService {
-  constructor(private readonly prisma: PrismaClient, private readonly options: OperatorServiceOptions = {}) {}
+  private readonly investigations: WalletInvestigationService;
+  constructor(private readonly prisma: PrismaClient, private readonly options: OperatorServiceOptions = {}) {
+    this.investigations = new WalletInvestigationService(prisma, { walletScanner: options.walletCapitalScanner, bridgeScanner: options.walletBridgeScanner });
+  }
+
+  investigateWallet(addressInput: string, options: { refresh?: boolean; maxDepth?: number } = {}) {
+    return this.investigations.getOrInvestigate(addressInput, options);
+  }
+
+  loadWalletInvestigation(targetInput: string) { return this.investigations.load(targetInput); }
+
+  async scanWalletCapital(addressInput: string) { return this.investigations.investigate(addressInput, { refresh: true, maxDepth: 4 }); }
+
+  async walletInvestigationView(targetInput: string, options: { refresh?: boolean; maxDepth?: number } = {}): Promise<WalletInvestigationResult> {
+    return this.investigations.getOrInvestigate(targetInput, options);
+  }
 
   async walletSummary(addressInput: string): Promise<WalletSummary> {
     const target = await this.resolveTarget(addressInput);
@@ -93,7 +111,7 @@ export class OperatorService {
     };
   }
 
-  async scanWalletCapital(addressInput: string) {
+  private async scanWalletCapitalLegacy(addressInput: string) {
     const refs = uniqueRefs(inferredAddressRefs(addressInput));
     if (!refs.length) throw new Error('Wallet adresa nije validna');
     const scanner = this.options.walletCapitalScanner;
@@ -160,7 +178,7 @@ export class OperatorService {
     }
   }
 
-  async walletCapitalSummary(addressInput: string): Promise<WalletCapitalSummary> {
+  private async walletCapitalSummaryLegacy(addressInput: string): Promise<WalletCapitalSummary> {
     const refs = uniqueRefs(inferredAddressRefs(addressInput));
     if (!refs.length) throw new Error('Wallet adresa nije validna');
     const relationships = await this.prisma.walletFlowRelationship.findMany({

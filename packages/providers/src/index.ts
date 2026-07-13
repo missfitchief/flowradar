@@ -30,3 +30,4 @@ export * from './gmgn/allowlist';
 export * from './gmgn/gmgnProvider';
 export * from './bridge/wormholeScan';
 export * from './walletCapital/liveScanner';
+export * from './bridge/walletBridgeScanner';

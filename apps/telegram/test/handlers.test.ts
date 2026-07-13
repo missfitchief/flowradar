@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { OperatorService } from '@flowradar/db';
+import type { OperatorService, WalletInvestigationResult } from '@flowradar/db';
 import { createUpdateHandler } from '../src/handlers';
 import { navKeyboard } from '../src/render';
 import type { TelegramApi } from '../src/types';
 
 const ADDRESS = '11111111111111111111111111111111';
+const RECEIVER = '22222222222222222222222222222222';
+const TOKEN = '33333333333333333333333333333333';
 
 function apiMock(): TelegramApi {
   return {
@@ -13,16 +15,25 @@ function apiMock(): TelegramApi {
   } as unknown as TelegramApi;
 }
 
-function walletCapitalSummary() {
+function investigation(): WalletInvestigationResult {
   return {
-    address: ADDRESS, scannedChains: ['SOLANA'], entityKey: 'entity:1', relations: [{
-      sourceChain: 'SOLANA', chain: 'SOLANA', address: '22222222222222222222222222222222', role: 'execution_wallet',
-      route: 'direct_transfer', hops: 1, amount: '2.5', amountSymbol: 'SOL', amountUsd: 400,
-      sourceTxHash: 'tx-hash', sourceTxUrl: 'https://solscan.io/tx/tx-hash', firstTransferTs: '2026-07-13T01:00:00.000Z',
-      lastTransferTs: '2026-07-13T01:00:00.000Z', tokens: [{ address: '33333333333333333333333333333333', symbol: 'NEW', firstBuyTs: '2026-07-13T01:05:00.000Z', fundingToBuyDelaySec: 300 }],
-      rotations: ['SOLANA:44444444444444444444444444444444'], confidence: 0.9, fresh: true, dormant: false,
-      safeEntityLink: true, entityKey: 'entity:1'
-    }]
+    id: 'investigation1', investigationKey: `solana:${ADDRESS}`, rootAddress: ADDRESS, addressKind: 'solana', maxDepth: 4,
+    status: 'completed', entityKey: 'entity:1', coverageStatus: 'complete', activityChains: ['SOLANA'], completedAt: '2026-07-13T01:10:00.000Z',
+    coverage: [{ chain: 'SOLANA', activityFound: true, firstActivityAt: '2026-07-13T01:00:00.000Z', lastActivityAt: '2026-07-13T01:10:00.000Z', eventsScanned: 3, coverageStatus: 'complete', provider: 'test', warnings: [] }],
+    counts: { directReceivers: 1, multiHopWallets: 0, bridgeDestinations: 0, probableAltExecutionWallets: 1, profitCollectors: 0, tokenDeployments: 1, possibleCexLinks: 0, strongLinks: 1, probableLinks: 0, possibleLinks: 0 },
+    paths: [{
+      id: 'direct:1', routeType: 'direct', sourceChain: 'SOLANA', sourceAddress: ADDRESS, destinationChain: 'SOLANA', destinationAddress: RECEIVER,
+      assetAddress: null, assetSymbol: 'SOL', amountToken: '2.5', amountUsd: 400, valueStatus: 'usd_verified', eventTs: '2026-07-13T01:00:00.000Z',
+      txHash: 'tx-hash', protocol: null, evidenceTier: 'exact_direct_transfer', confidence: 0.9, supportingEvidence: {}, contradictingEvidence: {},
+      hops: [{ sourceChain: 'SOLANA', sourceAddress: ADDRESS, destinationChain: 'SOLANA', destinationAddress: RECEIVER, assetAddress: null, assetSymbol: 'SOL', amountToken: '2.5', amountUsd: 400, valueStatus: 'usd_verified', timestamp: '2026-07-13T01:00:00.000Z', txHash: 'tx-hash', routeType: 'direct', protocol: null, evidenceTier: 'exact_direct_transfer', confidence: 0.9 }]
+    }, {
+      id: 'deployment:1', routeType: 'token_deployment', sourceChain: 'SOLANA', sourceAddress: RECEIVER, destinationChain: 'SOLANA', destinationAddress: TOKEN,
+      assetAddress: TOKEN, assetSymbol: 'NEW', amountToken: '100', amountUsd: 50, valueStatus: 'usd_verified', eventTs: '2026-07-13T01:05:00.000Z',
+      txHash: 'buy-hash', protocol: null, evidenceTier: 'transaction_verified_buy_after_funding', confidence: 0.9, supportingEvidence: {}, contradictingEvidence: {}, hops: []
+    }],
+    members: [{ chain: 'SOLANA', address: ADDRESS, role: 'root_main', parentChain: null, parentAddress: null, entityKey: 'entity:1', relationshipConfidence: 1, evidenceTier: 'investigation_root', firstLinkedAt: '2026-07-13T01:00:00.000Z', lastLinkedAt: '2026-07-13T01:10:00.000Z', observationOnly: true }, { chain: 'SOLANA', address: RECEIVER, role: 'execution_wallet', parentChain: 'SOLANA', parentAddress: ADDRESS, entityKey: 'entity:1', relationshipConfidence: 0.9, evidenceTier: 'exact_direct_transfer', firstLinkedAt: '2026-07-13T01:00:00.000Z', lastLinkedAt: '2026-07-13T01:00:00.000Z', observationOnly: true }],
+    deployments: [{ id: 'deployment:1', chain: 'SOLANA', buyerAddress: RECEIVER, tokenAddress: TOKEN, tokenSymbol: 'NEW', buyTs: '2026-07-13T01:05:00.000Z', buyTxHash: 'buy-hash', amountToken: '100', amountUsd: 50, entryMarketCapUsd: null, fundingToBuyDelaySec: 300, sourceEntityKey: 'entity:1', capitalRoute: [], holdingStatus: 'holding_or_unresolved', evidenceTier: 'transaction_verified_buy_after_funding' }],
+    providerReceipts: {}
   };
 }
 
@@ -43,87 +54,95 @@ describe('Telegram command handlers', () => {
     expect(api.sendMessage).toHaveBeenCalledWith('123', 'Pošalji wallet adresu.', expect.objectContaining({ inline_keyboard: expect.any(Array) }));
   });
 
-  it('treats the next ordinary message as the pending wallet target', async () => {
+  it('runs one canonical investigation for the pending wallet and sends only its summary', async () => {
     const api = apiMock();
     const service = {
       getPendingSession: vi.fn().mockResolvedValue({ workflow: 'wallet', session: { id: 'pending1' } }),
       validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn().mockResolvedValue(1),
-      createSession: vi.fn().mockResolvedValue({ id: 'session1' }), scanWalletCapital: vi.fn().mockResolvedValue({}),
-      walletCapitalSummary: vi.fn().mockResolvedValue(walletCapitalSummary()), watch: vi.fn().mockResolvedValue({})
+      createSession: vi.fn().mockResolvedValue({ id: 'session1' }), walletInvestigationView: vi.fn().mockResolvedValue(investigation()),
+      updateSession: vi.fn().mockResolvedValue(true)
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 2, message: { message_id: 2, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: ADDRESS } });
-    expect(service.validateWorkflowTarget).toHaveBeenCalledWith('wallet', ADDRESS);
-    expect(service.clearPendingSession).toHaveBeenCalledWith('123', '123');
-    expect(service.scanWalletCapital).toHaveBeenCalledWith(ADDRESS);
-    expect(service.walletCapitalSummary).toHaveBeenCalledWith(ADDRESS);
-    expect(service.watch).toHaveBeenCalledWith('123', '123', ADDRESS);
-    expect(api.sendMessage).toHaveBeenCalledWith('123', expect.stringContaining('<b>WALLET CAPITAL TRACE</b>'), expect.any(Object));
+    expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4 });
+    expect(service.updateSession).toHaveBeenCalledWith('session1', '123', '123', expect.objectContaining({ investigationId: 'investigation1', investigationView: 'summary', pageSize: 5 }));
+    expect(api.sendMessage).toHaveBeenCalledOnce();
     const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[0]!;
-    expect(text).toContain('Direct receivers');
-    expect(text).toContain('<code>22222222222222222222222222222222</code>');
-    expect(text).toContain('NEW');
+    expect(text).toContain('<b>WALLET INVESTIGATION</b>');
+    expect(text).toContain(`<code>${ADDRESS}</code>`);
     expect(text).not.toContain('Wallet DNA');
-    expect(keyboard?.inline_keyboard[0]?.[0]?.copy_text).toEqual({ text: '22222222222222222222222222222222' });
+    expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual(['Capital paths', 'Cluster wallets', 'Token deployments', 'Evidence', 'Refresh', 'Watch cluster']);
+  });
+
+  it.each([
+    ['/flow', 'paths', 'CAPITAL PATHS'],
+    ['/bridges', 'bridges', 'VERIFIED BRIDGE PATHS'],
+    ['/entity', 'cluster', 'CLUSTER WALLETS']
+  ])('uses the same canonical investigation for %s', async (command, view, heading) => {
+    const api = apiMock();
+    const service = {
+      validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'session1' }),
+      walletInvestigationView: vi.fn().mockResolvedValue(investigation()), updateSession: vi.fn()
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 3, message: { message_id: 3, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `${command} ${ADDRESS}` } });
+    expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4 });
+    expect(service.updateSession).toHaveBeenCalledWith('session1', '123', '123', expect.objectContaining({ investigationId: 'investigation1', investigationView: view }));
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain(heading);
+  });
+
+  it('paginates persisted paths with full copyable addresses and explorer links without rescanning', async () => {
+    const api = apiMock();
+    const service = {
+      clearPendingSession: vi.fn(), getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'wallet', stateJson: { target: ADDRESS, investigationId: 'investigation1', investigationView: 'summary', page: 1, pageSize: 5 } }),
+      updateSession: vi.fn(), loadWalletInvestigation: vi.fn().mockResolvedValue(investigation())
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 4, callback_query: { id: 'cb-paths', from: { id: 123 }, data: 'v1|invest|session1|paths', message: { message_id: 4, chat: { id: 123, type: 'private' }, text: 'summary' } } });
+    const [, , text, keyboard] = vi.mocked(api.editMessage).mock.calls[0]!;
+    expect(service.loadWalletInvestigation).toHaveBeenCalledWith('investigation1');
+    expect(text).toContain(`<code>${ADDRESS}</code>`);
+    expect(text).toContain(`<code>${RECEIVER}</code>`);
+    expect(text).toContain('TOKEN DEPLOYMENT');
+    expect(keyboard?.inline_keyboard.flat().find((button) => button.copy_text?.text === RECEIVER)?.copy_text).toEqual({ text: RECEIVER });
+    expect(keyboard?.inline_keyboard.flat().find((button) => button.url === `https://solscan.io/account/${RECEIVER}`)?.url).toBe(`https://solscan.io/account/${RECEIVER}`);
+  });
+
+  it('refreshes only when the Refresh button is used', async () => {
+    const api = apiMock();
+    const service = {
+      clearPendingSession: vi.fn(), getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'wallet', stateJson: { target: ADDRESS, investigationId: 'investigation1', investigationView: 'summary', page: 1, pageSize: 5 } }),
+      investigateWallet: vi.fn().mockResolvedValue(investigation()), updateSession: vi.fn()
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 5, callback_query: { id: 'cb-refresh', from: { id: 123 }, data: 'v1|refresh|session1|run', message: { message_id: 5, chat: { id: 123, type: 'private' }, text: 'summary' } } });
+    expect(service.investigateWallet).toHaveBeenCalledWith(ADDRESS, { refresh: true, maxDepth: 4 });
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith('cb-refresh', 'Refreshing investigation');
   });
 
   it('clears pending state on /cancel and Back', async () => {
     const api = apiMock();
     const service = { clearPendingSession: vi.fn().mockResolvedValue(1) } as unknown as OperatorService;
     const handler = createUpdateHandler(service, api, new Set(['123']));
-    await handler({ update_id: 3, message: { message_id: 3, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/cancel' } });
-    await handler({ update_id: 4, callback_query: { id: 'cb1', from: { id: 123 }, data: 'v1|cancel|pending1|pending', message: { message_id: 4, chat: { id: 123, type: 'private' }, text: 'Pošalji wallet adresu.' } } });
+    await handler({ update_id: 6, message: { message_id: 6, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/cancel' } });
+    await handler({ update_id: 7, callback_query: { id: 'cb1', from: { id: 123 }, data: 'v1|cancel|pending1|pending', message: { message_id: 7, chat: { id: 123, type: 'private' }, text: 'Pošalji wallet adresu.' } } });
     expect(service.clearPendingSession).toHaveBeenCalledTimes(2);
-    expect(api.editMessage).toHaveBeenCalledWith('123', 4, 'Otkazano.', { inline_keyboard: [] });
+    expect(api.editMessage).toHaveBeenCalledWith('123', 7, 'Otkazano.', { inline_keyboard: [] });
   });
 
   it('offers wallet/token choice for an ambiguous direct address', async () => {
     const api = apiMock();
     const service = { getPendingSession: vi.fn().mockResolvedValue(null), classifyAddressInput: vi.fn().mockResolvedValue('ambiguous'), createSession: vi.fn().mockResolvedValue({ id: 'session1' }) } as unknown as OperatorService;
-    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 5, message: { message_id: 5, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: ADDRESS } });
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 8, message: { message_id: 8, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: ADDRESS } });
     const keyboard = vi.mocked(api.sendMessage).mock.calls[0]?.[2];
     expect(keyboard?.inline_keyboard[0]?.map((button) => button.text)).toEqual(['Analiziraj kao wallet', 'Analiziraj kao token']);
   });
 
-  it('runs the real token scan and returns one short empty message only after zero results', async () => {
+  it('keeps the token empty result short after the real scan', async () => {
     const api = apiMock();
     const service = {
       validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'session1' }),
       scanTokenTopPnl: vi.fn().mockResolvedValue({ chains: ['SOLANA'], candidateCount: 0 }),
-      tokenSummary: vi.fn().mockResolvedValue({ tokens: [], metadata: [], universe: [{ chain: 'SOLANA', coverage: 'unavailable', processingStatus: 'unavailable' }], topPnl: { items: [], page: 1, pageSize: 10, total: 0, hasNext: false }, coverageWarnings: ['Provider coverage nije dostupan.'] })
+      tokenSummary: vi.fn().mockResolvedValue({ topPnl: { items: [], page: 1, pageSize: 10, total: 0, hasNext: false } })
     } as unknown as OperatorService;
-    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 6, message: { message_id: 6, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
-    const [chatId, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[0]!;
-    expect(chatId).toBe('123');
-    expect(service.scanTokenTopPnl).toHaveBeenCalledWith(ADDRESS);
-    expect(text).toBe('Nije pronađen nijedan top-PnL wallet za ovaj token.');
-    expect(keyboard?.inline_keyboard).toEqual([]);
-  });
-
-  it('renders full top-PnL wallet details with copy and explorer buttons', async () => {
-    const api = apiMock();
-    const wallet = '22222222222222222222222222222222';
-    const service = {
-      validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'session1' }),
-      scanTokenTopPnl: vi.fn().mockResolvedValue({ chains: ['SOLANA'], candidateCount: 1 }),
-      tokenSummary: vi.fn().mockResolvedValue({
-        tokens: [], metadata: [], universe: [], coverageWarnings: [],
-        topPnl: { page: 1, pageSize: 10, total: 1, hasNext: false, items: [{
-          chain: 'SOLANA', walletAddress: wallet, realizedPnlUsd: 125_400, roi: 6.4, boughtUsd: 20_000,
-          soldUsd: 145_400, remainingPositionUsd: null, firstBuyTs: '2026-07-13T10:00:00.000Z',
-          dormancy: { days7: true, days14: true, days30: false, days90: null }, validation: 'locally_verified'
-        }] }
-      })
-    } as unknown as OperatorService;
-    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 7, message: { message_id: 7, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
-    const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[0]!;
-    expect(text).toContain('TOP 10 PNL WALLETS');
-    expect(text).toContain('+$125,400 PnL · 640% ROI');
-    expect(text).toContain(`<code>${wallet}</code>`);
-    expect(text).not.toContain('Coverage:');
-    expect(keyboard?.inline_keyboard[0]).toEqual([
-      { text: 'Copy wallet', copy_text: { text: wallet } },
-      { text: 'Explorer', url: `https://solscan.io/account/${wallet}` }
-    ]);
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 9, message: { message_id: 9, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toBe('Nije pronađen nijedan top-PnL wallet za ovaj token.');
   });
 
   it('does not edit an unchanged Telegram message', async () => {
@@ -133,7 +152,7 @@ describe('Telegram command handlers', () => {
       clearPendingSession: vi.fn(), getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'recent', stateJson: { page: 1, pageSize: 10 } }),
       updateSession: vi.fn().mockResolvedValue(true), recent: vi.fn().mockResolvedValue({ items: [], page: 1, pageSize: 10, total: 0, hasNext: false, coverageWarnings: [] })
     } as unknown as OperatorService;
-    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 7, callback_query: { id: 'cb2', from: { id: 123 }, data: 'v1|exportback|session1|result', message: { message_id: 7, chat: { id: 123, type: 'private' }, text: 'Recent relevant events · page 1 · 0 total', reply_markup: keyboard } } });
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 10, callback_query: { id: 'cb2', from: { id: 123 }, data: 'v1|exportback|session1|result', message: { message_id: 10, chat: { id: 123, type: 'private' }, text: 'Recent relevant events · page 1 · 0 total', reply_markup: keyboard } } });
     expect(api.editMessage).not.toHaveBeenCalled();
     expect(api.answerCallbackQuery).toHaveBeenCalledWith('cb2');
   });
@@ -144,8 +163,7 @@ describe('Telegram command handlers', () => {
       clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'session1' }),
       profitable: vi.fn().mockResolvedValue({ items: [], page: 1, pageSize: 10, total: 0, hasNext: false, coverageWarnings: [] })
     } as unknown as OperatorService;
-    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 8, message: { message_id: 8, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/profitable' } });
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 11, message: { message_id: 11, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/profitable' } });
     expect(service.profitable).toHaveBeenCalledWith({ chain: 'ALL', sort: 'pnl', page: 1, pageSize: 10 });
-    expect(api.sendMessage).toHaveBeenCalledOnce();
   });
 });

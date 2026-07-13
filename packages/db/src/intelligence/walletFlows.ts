@@ -17,6 +17,7 @@ interface RelationAccumulator {
   bridgeCorrelationIds: string[];
   supporting: unknown[];
   contradicting: unknown[];
+  representativePath?: Array<{ eventId: string; ts: Date; safe: boolean; amountUsd: number | null }>;
 }
 
 export interface WalletFlowExpansionReport {
@@ -252,7 +253,8 @@ export async function expandWalletCapitalGraph(
       supportingEvidenceJson: json({
         evidence: relation.supporting, freshAtReceipt: item.fresh, dormantAtReceipt: item.dormant, monitoringEnrolled: item.monitoring,
         knownAmountUsd: minimumKnownAmount(relation.events.map((event) => event.amountUsd)),
-        sourceEventId: relation.events.slice().sort((a, b) => a.ts.getTime() - b.ts.getTime())[0]?.eventId ?? null
+        sourceEventId: relation.events.slice().sort((a, b) => a.ts.getTime() - b.ts.getTime())[0]?.eventId ?? null,
+        representativePathEventIds: (relation.representativePath ?? []).map((event) => event.eventId)
       }),
       contradictingEvidenceJson: json({ evidence: relation.contradicting, inferenceOnly: !item.safeEntityLink, cexNeverOwnership: relation.route === 'cex_correlation' }),
       tradedTokensJson: json(item.tradedTokens),
@@ -343,7 +345,8 @@ function addRelation(relations: Map<string, RelationAccumulator>, incoming: Rela
       events: [...incoming.events],
       bridgeCorrelationIds: [...incoming.bridgeCorrelationIds],
       supporting: [...incoming.supporting],
-      contradicting: [...incoming.contradicting]
+      contradicting: [...incoming.contradicting],
+      representativePath: [...incoming.events]
     });
     return;
   }
@@ -351,7 +354,12 @@ function addRelation(relations: Map<string, RelationAccumulator>, incoming: Rela
   for (const correlationId of incoming.bridgeCorrelationIds) current.bridgeCorrelationIds.push(correlationId);
   for (const evidence of incoming.supporting) current.supporting.push(evidence);
   for (const evidence of incoming.contradicting) current.contradicting.push(evidence);
+  if (!current.representativePath || pathOrder(incoming.events, current.representativePath) < 0) current.representativePath = [...incoming.events];
   current.hops = Math.min(current.hops, incoming.hops);
+}
+function pathOrder(a: RelationAccumulator['events'], b: RelationAccumulator['events']) {
+  if (a.length !== b.length) return a.length - b.length;
+  return a.map((event) => event.eventId).join('|').localeCompare(b.map((event) => event.eventId).join('|'));
 }
 function eventReceipt(event: { eventId: string; ts: Date; safeEntityLink: boolean; amountUsd: Prisma.Decimal | null }) {
   return { eventId: event.eventId, ts: event.ts, safe: event.safeEntityLink, amountUsd: decimal(event.amountUsd) };

@@ -1,12 +1,21 @@
-import { OperatorService, type OperatorSessionState, type OperatorWorkflow, type ProfitableSort, type WalletCapitalRelation, type WalletCapitalSummary } from '@flowradar/db';
+import {
+  OperatorService,
+  type InvestigationDeployment,
+  type InvestigationMember,
+  type InvestigationPath,
+  type OperatorSessionState,
+  type OperatorWorkflow,
+  type ProfitableSort,
+  type WalletInvestigationResult
+} from '@flowradar/db';
 import { isAuthorized } from './auth';
-import { callback, exportKeyboard, h, navKeyboard, renderBridges, renderFlows, renderProfitable, short } from './render';
+import { callback, exportKeyboard, h, navKeyboard, renderProfitable, short } from './render';
 import type { InlineKeyboard, TelegramApi, TelegramCallbackQuery, TelegramMessage, TelegramUpdate } from './types';
 
 const COMMANDS = [
-  { command: 'wallet', description: 'Live capital tracing (Solana/EVM)' }, { command: 'token', description: 'Token + top-PnL wallets' },
-  { command: 'profitable', description: 'Automatic profitable wallets' }, { command: 'entity', description: 'Entity and linked wallets' },
-  { command: 'flow', description: 'Capital-flow history' }, { command: 'bridges', description: 'Official bridge history' },
+  { command: 'wallet', description: 'Unified wallet investigation' }, { command: 'token', description: 'Token + top-PnL wallets' },
+  { command: 'profitable', description: 'Automatic profitable wallets' }, { command: 'entity', description: 'Investigation cluster wallets' },
+  { command: 'flow', description: 'Investigation capital paths' }, { command: 'bridges', description: 'Verified investigation bridges' },
   { command: 'watch', description: 'Persist a wallet/entity watch' }, { command: 'recent', description: 'Recent relevant events' },
   { command: 'cancel', description: 'Cancel pending input' }
 ];
@@ -14,6 +23,7 @@ const PENDING_PROMPTS: Partial<Record<OperatorWorkflow, string>> = {
   wallet: 'Pošalji wallet adresu.', token: 'Pošalji token CA.', entity: 'Pošalji wallet ili entity ID.',
   flow: 'Pošalji wallet ili entity.', bridges: 'Pošalji wallet ili entity.'
 };
+const INVESTIGATION_WORKFLOWS = new Set<OperatorWorkflow>(['wallet', 'entity', 'flow', 'bridges']);
 const EMPTY_KEYBOARD: InlineKeyboard = { inline_keyboard: [] };
 export const TELEGRAM_COMMANDS = [{ command: 'start', description: 'FlowRadar operator menu' }, ...COMMANDS];
 
@@ -46,7 +56,7 @@ async function handleMessage(service: OperatorService, api: TelegramApi, allowed
       if (command === 'watch') {
         if (!argument) throw new Error('Pošalji wallet ili entity ID.');
         const watch = await service.watch(userId, chatId, argument);
-        await api.sendMessage(chatId, `<b>Watch enabled</b>\n${h(watch.targetType)}: <code>${h(short(watch.targetKey, 10))}</code>\nNoise events are suppressed.`);
+        await api.sendMessage(chatId, `<b>Watch enabled</b>\n${h(watch.targetType)}: <code>${h(watch.targetKey)}</code>\nNoise events are suppressed.`);
         return;
       }
       if (!['wallet', 'token', 'profitable', 'entity', 'flow', 'bridges', 'recent'].includes(command)) throw new Error('Unknown command. Use /start.');
@@ -63,7 +73,7 @@ async function handleMessage(service: OperatorService, api: TelegramApi, allowed
       await service.clearPendingSession(userId, chatId);
       await sendWorkflow(service, api, userId, chatId, workflow, argument || undefined);
     } catch (error) {
-      await api.sendMessage(chatId, `<b>Request failed</b>\n${h(error instanceof Error ? error.message : String(error))}`);
+      await api.sendMessage(chatId, `<b>Request failed</b>\n${h(errorMessage(error))}`);
     }
     return;
   }
@@ -98,7 +108,7 @@ async function handleMessage(service: OperatorService, api: TelegramApi, allowed
     }
     await api.sendMessage(chatId, 'Adresa nije prepoznata. Pošalji validnu Solana ili EVM adresu, ili izaberi komandu iz /start.');
   } catch (error) {
-    await api.sendMessage(chatId, `<b>Request failed</b>\n${h(error instanceof Error ? error.message : String(error))}`);
+    await api.sendMessage(chatId, `<b>Request failed</b>\n${h(errorMessage(error))}`);
   }
 }
 
@@ -120,19 +130,20 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
   try {
     if (parsed.action === 'choose') {
       const workflow = parsed.value === 'token' ? 'token' : 'wallet';
-      const next = await service.createSession(userId, chatId, workflow, { ...state, page: 1 });
+      const nextState = { ...state, page: 1 };
+      const next = await service.createSession(userId, chatId, workflow, nextState);
       if (workflow === 'wallet') {
-        await api.answerCallbackQuery(query.id, 'Capital tracing started');
-        await runWalletWorkflow(service, api, userId, chatId, required({ ...state, page: 1 }), query);
+        await api.answerCallbackQuery(query.id, 'Investigation started');
+        await runInvestigationWorkflow(service, api, userId, chatId, workflow, nextState, next.id, query);
         return;
       }
-      const rendered = await renderWorkflow(service, workflow, { ...state, page: 1 }, next.id);
+      const rendered = await renderWorkflow(service, workflow, nextState, next.id);
       await editIfChanged(api, query, rendered.text, rendered.keyboard);
       await api.answerCallbackQuery(query.id);
       return;
     }
     if (parsed.action === 'exportmenu') {
-      await editIfChanged(api, query, `${h(query.message?.text ?? 'FlowRadar rezultat')}\n\n<b>Izvoz</b>\nIzaberi format.`, exportKeyboard(session.id));
+      await editIfChanged(api, query, `${h(query.message?.text ?? 'FlowRadar result')}\n\n<b>Izvoz</b>\nIzaberi format.`, exportKeyboard(session.id));
       await api.answerCallbackQuery(query.id);
       return;
     }
@@ -149,65 +160,84 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
       return;
     }
     if (parsed.action === 'watch') {
-      await service.watch(userId, chatId, state.target ?? '');
-      await api.answerCallbackQuery(query.id, 'Watch enabled');
+      const investigation = state.investigationId ? await service.loadWalletInvestigation(state.investigationId) : null;
+      await service.watch(userId, chatId, investigation?.entityKey ?? state.target ?? '');
+      await api.answerCallbackQuery(query.id, 'Cluster watch enabled');
       return;
     }
-    if (parsed.action === 'wallet') {
-      const entity = await service.entity(state.target ?? '');
-      const index = Math.max(0, Number(parsed.value) || 0);
-      const address = entity.addresses?.[index]?.address;
-      if (!address) throw new Error('Wallet is no longer available on this entity page');
-      const childState = defaultState(address);
-      const child = await service.createSession(userId, chatId, 'wallet', childState);
-      void child;
-      await api.answerCallbackQuery(query.id, 'Capital tracing started');
-      await runWalletWorkflow(service, api, userId, chatId, address, query);
+    if (parsed.action === 'refresh') {
+      await api.answerCallbackQuery(query.id, 'Refreshing investigation');
+      const investigation = await service.investigateWallet(required(state), { refresh: true, maxDepth: 4 });
+      state.investigationId = investigation.id;
+      state.investigationView = 'summary';
+      state.page = 1;
+      await service.updateSession(session.id, userId, chatId, state);
+      const rendered = renderInvestigation(investigation, state, session.id);
+      await editIfChanged(api, query, rendered.text, rendered.keyboard);
       return;
     }
-    if (parsed.action === 'page') state.page = Math.max(1, Number(parsed.value) || 1);
+    if (parsed.action === 'invest') {
+      state.investigationView = investigationView(parsed.value);
+      state.page = 1;
+    } else if (parsed.action === 'page') state.page = Math.max(1, Number(parsed.value) || 1);
     else if (parsed.action === 'sort') state.sort = parsed.value as ProfitableSort;
     else if (parsed.action === 'tokensort') state.tokenSort = parsed.value as OperatorSessionState['tokenSort'];
     else if (parsed.action === 'filter') state.chain = parsed.value as OperatorSessionState['chain'];
-    else if (parsed.action === 'view') {
-      const workflow = parsed.value as OperatorWorkflow;
-      const next = await service.createSession(userId, chatId, workflow, { ...state, page: 1 });
-      if (workflow === 'wallet') {
-        await api.answerCallbackQuery(query.id, 'Capital tracing started');
-        await runWalletWorkflow(service, api, userId, chatId, required({ ...state, page: 1 }), query);
-        return;
-      }
-      const rendered = await renderWorkflow(service, workflow, { ...state, page: 1 }, next.id);
-      await editIfChanged(api, query, rendered.text, rendered.keyboard);
-      await api.answerCallbackQuery(query.id);
-      return;
-    }
+    else if (parsed.action === 'view') state.page = 1;
+
     await service.updateSession(session.id, userId, chatId, state);
-    const rendered = await renderWorkflow(service, session.workflow as OperatorWorkflow, state, session.id);
+    const rendered = INVESTIGATION_WORKFLOWS.has(session.workflow as OperatorWorkflow)
+      ? await renderPersistedInvestigation(service, state, session.id)
+      : await renderWorkflow(service, session.workflow as OperatorWorkflow, state, session.id);
     await editIfChanged(api, query, rendered.text, rendered.keyboard);
     await api.answerCallbackQuery(query.id);
   } catch (error) {
-    await api.answerCallbackQuery(query.id, error instanceof Error ? error.message : 'Request failed');
+    await api.answerCallbackQuery(query.id, errorMessage(error));
   }
 }
 
 async function sendWorkflow(service: OperatorService, api: TelegramApi, userId: string, chatId: string, workflow: OperatorWorkflow, target?: string) {
   const state = defaultState(target);
   const session = await service.createSession(userId, chatId, workflow, state);
-  if (workflow === 'wallet') {
-    await runWalletWorkflow(service, api, userId, chatId, required(state));
+  if (INVESTIGATION_WORKFLOWS.has(workflow)) {
+    await runInvestigationWorkflow(service, api, userId, chatId, workflow, state, session.id);
     return;
   }
   const rendered = await renderWorkflow(service, workflow, state, session.id);
   await api.sendMessage(chatId, rendered.text, rendered.keyboard);
 }
 
+async function runInvestigationWorkflow(
+  service: OperatorService,
+  api: TelegramApi,
+  userId: string,
+  chatId: string,
+  workflow: OperatorWorkflow,
+  state: OperatorSessionState,
+  sessionId: string,
+  query?: TelegramCallbackQuery
+) {
+  const investigation = await service.walletInvestigationView(required(state), { maxDepth: 4 });
+  state.investigationId = investigation.id;
+  state.investigationView = workflowView(workflow);
+  state.page = 1;
+  state.pageSize = 5;
+  await service.updateSession(sessionId, userId, chatId, state);
+  const rendered = renderInvestigation(investigation, state, sessionId);
+  if (query) await editIfChanged(api, query, rendered.text, rendered.keyboard);
+  else await api.sendMessage(chatId, rendered.text, rendered.keyboard);
+}
+
+async function renderPersistedInvestigation(service: OperatorService, state: OperatorSessionState, sessionId: string) {
+  const investigation = await service.loadWalletInvestigation(state.investigationId ?? required(state));
+  if (!investigation) throw new Error('Investigation is no longer available. Use Refresh.');
+  return renderInvestigation(investigation, state, sessionId);
+}
+
 async function renderWorkflow(service: OperatorService, workflow: OperatorWorkflow, state: OperatorSessionState, sessionId: string): Promise<{ text: string; keyboard: InlineKeyboard }> {
-  const page = state.page || 1; const size = state.pageSize || 10;
-  if (workflow === 'wallet') {
-    const messages = renderWalletCapitalMessages(await service.walletCapitalSummary(required(state)));
-    return messages[0];
-  }
+  const page = state.page || 1;
+  const size = state.pageSize || 10;
+  if (INVESTIGATION_WORKFLOWS.has(workflow)) return renderPersistedInvestigation(service, state, sessionId);
   if (workflow === 'token') {
     const tokenAddress = required(state);
     await service.scanTokenTopPnl(tokenAddress);
@@ -223,160 +253,197 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
     const value = await service.profitable({ chain: state.chain, sort: state.sort, page, pageSize: size });
     return { text: renderProfitable(value), keyboard: navKeyboard(sessionId, page, value.hasNext, [[{ text: 'PnL', callback_data: callback('sort', sessionId, 'pnl') }, { text: 'WR', callback_data: callback('sort', sessionId, 'win_rate') }, { text: 'EV', callback_data: callback('sort', sessionId, 'ev') }], [{ text: 'SOL', callback_data: callback('filter', sessionId, 'SOLANA') }, { text: 'ETH', callback_data: callback('filter', sessionId, 'ETHEREUM') }, { text: 'Base', callback_data: callback('filter', sessionId, 'BASE') }], [{ text: 'ARB', callback_data: callback('filter', sessionId, 'ARBITRUM') }, { text: 'BSC', callback_data: callback('filter', sessionId, 'BSC') }, { text: 'All', callback_data: callback('filter', sessionId, 'ALL') }]]) };
   }
-  if (workflow === 'entity') {
-    const value = await service.entity(required(state));
-    const entityPageSize = 6;
-    const start = (page - 1) * entityPageSize;
-    const addresses = (value.addresses ?? []).slice(start, start + entityPageSize);
-    const text = [`<b>Entity ${h(value.entityKey ?? 'not found')}</b> · page ${page}`, ...addresses.map((x: { chain: string; address: string; role: string; confidence: number }) => `${h(x.chain)} <code>${h(short(x.address, 7))}</code> · ${h(x.role)} ${Math.round(x.confidence * 100)}%`), value.metrics ? `W/L/U ${value.metrics.winCount}/${value.metrics.lossCount}/${value.metrics.unresolvedPositions} · EV ${h(value.metrics.evUsd ?? 'n/a')}` : '', ...(value.coverageWarnings ?? []).map((x: string) => `<i>${h(x)}</i>`)].filter(Boolean).join('\n');
-    const walletButtons = addresses.map((x: { address: string }, index: number) => [{ text: `Wallet ${short(x.address, 5)}`, callback_data: callback('wallet', sessionId, String(start + index)) }]);
-    return { text, keyboard: navKeyboard(sessionId, page, start + addresses.length < (value.addresses?.length ?? 0), [...walletButtons, [{ text: 'Capital flow', callback_data: callback('view', sessionId, 'flow') }, { text: 'Bridges', callback_data: callback('view', sessionId, 'bridges') }], [{ text: 'Watch entity', callback_data: callback('watch', sessionId, 'on') }]]) };
-  }
-  if (workflow === 'flow') { const value = await service.flows(required(state), page, size); return { text: renderFlows(value), keyboard: navKeyboard(sessionId, page, value.hasNext) }; }
-  if (workflow === 'bridges') { const value = await service.bridges(required(state), page, size); return { text: renderBridges(value), keyboard: navKeyboard(sessionId, page, value.hasNext) }; }
   const value = await service.recent(page, size);
-  const text = [`<b>Recent relevant events</b> · page ${page} · ${value.total} total`, ...value.items.map((x) => `${h(x.chain)} <b>${h(x.kind)}</b> ${h(short(x.source))}→${h(short(x.destination))} · ${h(x.amountUsd ?? 'n/a')} · score ${h(x.score)}`)].join('\n');
+  const text = [`<b>Recent relevant events</b> · page ${page} · ${value.total} total`, ...value.items.map((row) => `${h(row.chain)} <b>${h(row.kind)}</b> ${h(short(row.source))}→${h(short(row.destination))} · ${h(row.amountUsd ?? 'n/a')} · score ${h(row.score)}`)].join('\n');
   return { text, keyboard: navKeyboard(sessionId, page, value.hasNext) };
 }
 
-async function runWalletWorkflow(
-  service: OperatorService,
-  api: TelegramApi,
-  userId: string,
-  chatId: string,
-  address: string,
-  query?: TelegramCallbackQuery
-) {
-  await service.scanWalletCapital(address);
-  const summary = await service.walletCapitalSummary(address);
-  await service.watch(userId, chatId, address);
-  const messages = renderWalletCapitalMessages(summary);
-  if (query) {
-    await editIfChanged(api, query, messages[0].text, messages[0].keyboard);
-    for (const message of messages.slice(1)) { await telegramPace(); await api.sendMessage(chatId, message.text, message.keyboard); }
-    return;
-  }
-  for (const [index, message] of messages.entries()) { if (index) await telegramPace(); await api.sendMessage(chatId, message.text, message.keyboard); }
+export function renderInvestigation(investigation: WalletInvestigationResult, state: OperatorSessionState, sessionId: string) {
+  const view = state.investigationView ?? 'summary';
+  if (view === 'summary') return renderInvestigationSummary(investigation, sessionId);
+  if (view === 'cluster') return renderCluster(investigation, state.page || 1, sessionId);
+  if (view === 'deployments') return renderDeployments(investigation, state.page || 1, sessionId);
+  if (view === 'evidence') return renderEvidence(investigation, sessionId);
+  return renderPaths(investigation, state.page || 1, sessionId, view === 'bridges');
 }
 
-export function renderWalletCapitalMessages(summary: WalletCapitalSummary): Array<{ text: string; keyboard: InlineKeyboard }> {
-  const group = (title: string, rows: WalletCapitalRelation[], limit: number, compact?: 'role' | 'token') => ({ title, total: rows.length, rows: prioritizeRelations(rows).slice(0, limit), compact });
-  const groups: Array<{ title: string; total: number; rows: WalletCapitalRelation[]; compact?: 'role' | 'token' }> = [
-    group('Direct receivers', summary.relations.filter((row) => row.route === 'direct_transfer'), 500),
-    group('Bridge destinations', summary.relations.filter((row) => row.route === 'exact_bridge' || row.route === 'bridge_inference'), 500),
-    group('Multi-hop receivers', summary.relations.filter((row) => row.route === 'multi_hop_transfer'), 500),
-    group('Probable alt/execution wallets', summary.relations.filter((row) => /execution|side|profit_collection/.test(row.role)), 500, 'role'),
-    group('Possible CEX-linked wallets', summary.relations.filter((row) => row.route === 'cex_correlation'), 500),
-    group('Token deployments', summary.relations.filter((row) => row.tokens.length > 0), 500, 'token')
+function renderInvestigationSummary(value: WalletInvestigationResult, sessionId: string) {
+  const activity = value.activityChains.length ? value.activityChains.join(', ') : 'none observed';
+  const text = [
+    '<b>WALLET INVESTIGATION</b>',
+    '',
+    '<b>Root:</b>',
+    `<code>${h(value.rootAddress)}</code>`,
+    '',
+    '<b>Chains:</b>',
+    h(activity),
+    '',
+    '<b>Discovered:</b>',
+    `- Direct receivers: ${value.counts.directReceivers}`,
+    `- Multi-hop wallets: ${value.counts.multiHopWallets}`,
+    `- Bridge destinations: ${value.counts.bridgeDestinations}`,
+    `- Probable alt/execution wallets: ${value.counts.probableAltExecutionWallets}`,
+    `- Profit collectors: ${value.counts.profitCollectors}`,
+    `- Token deployments: ${value.counts.tokenDeployments}`,
+    `- Possible CEX links: ${value.counts.possibleCexLinks}`,
+    '',
+    '<b>Cluster:</b>',
+    `- Entity ID: ${value.entityKey ? `<code>${h(value.entityKey)}</code>` : 'not established'}`,
+    `- Strong/probable links: ${value.counts.strongLinks}/${value.counts.probableLinks}`,
+    `- Possible links: ${value.counts.possibleLinks}`,
+    `- Coverage status: ${h(value.coverageStatus)}`
+  ].join('\n');
+  const keyboard: InlineKeyboard = { inline_keyboard: [
+    [{ text: 'Capital paths', callback_data: callback('invest', sessionId, 'paths') }, { text: 'Cluster wallets', callback_data: callback('invest', sessionId, 'cluster') }],
+    [{ text: 'Token deployments', callback_data: callback('invest', sessionId, 'deployments') }, { text: 'Evidence', callback_data: callback('invest', sessionId, 'evidence') }],
+    [{ text: 'Refresh', callback_data: callback('refresh', sessionId, 'run') }, { text: 'Watch cluster', callback_data: callback('watch', sessionId, 'cluster') }]
+  ] };
+  return { text, keyboard };
+}
+
+function renderPaths(value: WalletInvestigationResult, page: number, sessionId: string, bridgesOnly: boolean) {
+  const all = value.paths
+    .filter((path) => bridgesOnly ? path.routeType === 'bridge' : true)
+    .sort((a, b) => Date.parse(a.eventTs) - Date.parse(b.eventTs) || a.id.localeCompare(b.id));
+  const { items, hasNext } = pageRows(all, page, 5);
+  const title = bridgesOnly ? 'VERIFIED BRIDGE PATHS' : 'CAPITAL PATHS';
+  const text = [`<b>${title}</b> · page ${page} · ${all.length} total`, ...(items.length ? items.map((path, index) => renderPath(path, (page - 1) * 5 + index + 1)) : ['No persisted paths in this view.'])].join('\n\n');
+  return { text, keyboard: investigationListKeyboard(sessionId, page, hasNext, items.flatMap(pathButtonRows)) };
+}
+
+function renderPath(path: InvestigationPath, rank: number) {
+  const route = path.routeType.replaceAll('_', ' ').toUpperCase();
+  const hops = path.hops.length ? path.hops : [{
+    sourceChain: path.sourceChain, sourceAddress: path.sourceAddress, destinationChain: path.destinationChain,
+    destinationAddress: path.destinationAddress, amountToken: path.amountToken, amountUsd: path.amountUsd,
+    assetSymbol: path.assetSymbol, timestamp: path.eventTs, txHash: path.txHash ?? '', protocol: path.protocol,
+    evidenceTier: path.evidenceTier, confidence: path.confidence
+  }];
+  const routeLines = hops.flatMap((hop, index) => [
+    `${index ? '↓' : ''} ${h(hop.sourceChain)} <code>${h(hop.sourceAddress)}</code>`,
+    `→ ${h(hop.destinationChain)} <code>${h(hop.destinationAddress)}</code> · ${formatAmount(hop.amountUsd, hop.amountToken, hop.assetSymbol)}`
+  ]);
+  return [
+    `${rank}. <b>${h(route)}</b> · ${Math.round(path.confidence * 100)}%`,
+    ...routeLines,
+    `Evidence: ${h(path.evidenceTier)}${path.protocol ? ` · ${h(path.protocol)}` : ''}`,
+    `Time: ${h(path.eventTs)}`,
+    path.txHash ? `Source tx: <code>${h(path.txHash)}</code>` : 'Source tx: unavailable'
+  ].join('\n');
+}
+
+function pathButtonRows(path: InvestigationPath): InlineKeyboard['inline_keyboard'] {
+  const walletRefs = path.hops.length
+    ? [{ chain: path.hops[0].sourceChain, address: path.hops[0].sourceAddress }, ...path.hops.map((hop) => ({ chain: hop.destinationChain, address: hop.destinationAddress }))]
+    : [{ chain: path.sourceChain, address: path.sourceAddress }, { chain: path.destinationChain, address: path.destinationAddress }];
+  const uniqueWallets = [...new Map(walletRefs.map((ref) => [`${ref.chain}:${ref.address}`, ref])).values()];
+  const walletRows = uniqueWallets.map((ref, index) => [
+    { text: `Copy wallet ${index + 1}`, copy_text: { text: ref.address } },
+    { text: `Wallet ${index + 1} explorer`, url: walletExplorer(ref.chain, ref.address) }
+  ]);
+  const txRefs = path.hops.length
+    ? path.hops.filter((hop) => hop.txHash).map((hop) => ({ chain: hop.sourceChain, txHash: hop.txHash }))
+    : path.txHash ? [{ chain: path.sourceChain, txHash: path.txHash }] : [];
+  const uniqueTransactions = [...new Map(txRefs.map((ref) => [`${ref.chain}:${ref.txHash}`, ref])).values()];
+  const transactionRows = uniqueTransactions.map((ref, index) => [{ text: `Transaction ${index + 1}`, url: transactionExplorer(ref.chain, ref.txHash) }]);
+  return [...walletRows, ...transactionRows];
+}
+
+function renderCluster(value: WalletInvestigationResult, page: number, sessionId: string) {
+  const { items, hasNext } = pageRows(value.members, page, 5);
+  const text = [`<b>CLUSTER WALLETS</b> · page ${page} · ${value.members.length} total`, ...(items.length ? items.map((member, index) => renderMember(member, (page - 1) * 5 + index + 1)) : ['No evidence-backed cluster wallets.'])].join('\n\n');
+  return { text, keyboard: investigationListKeyboard(sessionId, page, hasNext, items.map(memberButtons)) };
+}
+
+function renderMember(member: InvestigationMember, rank: number) {
+  const parent = member.parentAddress ? `${member.parentChain} <code>${h(member.parentAddress)}</code>` : 'investigation root';
+  return [
+    `${rank}. <b>${h(member.role.replaceAll('_', ' '))}</b> · ${Math.round(member.relationshipConfidence * 100)}%`,
+    `${h(member.chain)} <code>${h(member.address)}</code>`,
+    `Linked from: ${parent}`,
+    `Evidence: ${h(member.evidenceTier)} · observation_only`,
+    `First/last: ${h(member.firstLinkedAt)} · ${h(member.lastLinkedAt)}`
+  ].join('\n');
+}
+
+function memberButtons(member: InvestigationMember): InlineKeyboard['inline_keyboard'][number] {
+  return [
+    { text: 'Copy wallet', copy_text: { text: member.address } },
+    { text: 'Explorer', url: walletExplorer(member.chain, member.address) }
   ];
-  const messages: Array<{ text: string; keyboard: InlineKeyboard }> = [];
-  let first = true;
-  for (const group of groups) {
-    if (!group.rows.length) continue;
-    const renderer = group.compact === 'role' ? renderRoleIndex : group.compact === 'token' ? renderTokenIndex : renderCapitalRelation;
-    for (const rows of relationChunks(group.rows, renderer)) {
-      const bounded = group.total > group.rows.length ? `Showing ${group.rows.length} highest-relevance routes of ${group.total}; every route is persisted and monitored.` : '';
-      const header = first
-        ? [`<b>WALLET CAPITAL TRACE</b>`, `<code>${h(summary.address)}</code>`, `Chains scanned: ${h(summary.scannedChains.join(', '))}`, summary.entityKey ? `Cluster: <code>${h(summary.entityKey)}</code>` : '', '', `<b>${h(group.title)}</b>`, bounded]
-        : [`<b>${h(group.title)}</b>`, bounded];
-      messages.push({
-        text: [...header.filter(Boolean), ...rows.map(renderer)].join('\n\n'),
-        keyboard: capitalRelationKeyboard(rows)
-      });
-      first = false;
-    }
-  }
-  if (!messages.length) {
-    messages.push({
-      text: [`<b>WALLET CAPITAL TRACE</b>`, `<code>${h(summary.address)}</code>`, `Chains scanned: ${h(summary.scannedChains.join(', '))}`, '', 'Realni scan nije pronašao relevantan wallet-to-receiver kapitalni tok.'].join('\n'),
-      keyboard: EMPTY_KEYBOARD
-    });
-  }
-  return messages;
 }
 
-function prioritizeRelations(rows: WalletCapitalRelation[]) {
-  return [...rows].sort((a, b) => Number(b.tokens.length > 0) - Number(a.tokens.length > 0)
-    || Number(b.safeEntityLink) - Number(a.safeEntityLink)
-    || b.confidence - a.confidence
-    || new Date(b.lastTransferTs).getTime() - new Date(a.lastTransferTs).getTime()
-    || a.address.localeCompare(b.address));
+function renderDeployments(value: WalletInvestigationResult, page: number, sessionId: string) {
+  const { items, hasNext } = pageRows(value.deployments, page, 5);
+  const text = [`<b>TOKEN DEPLOYMENTS</b> · page ${page} · ${value.deployments.length} total`, ...(items.length ? items.map((deployment, index) => renderDeployment(deployment, (page - 1) * 5 + index + 1)) : ['No token buy observed after tracked funding.'])].join('\n\n');
+  return { text, keyboard: investigationListKeyboard(sessionId, page, hasNext, items.map(deploymentButtons)) };
 }
 
-function renderCapitalRelation(row: WalletCapitalRelation) {
-  const amount = row.amountUsd != null ? plainMoney(row.amountUsd)
-    : row.amount ? `${h(row.amount)} ${h(row.amountSymbol ?? '')}`.trim() : 'n/a';
-  const tokens = row.tokens.length
-    ? row.tokens.slice(0, 8).map((token) => `${h(token.symbol ?? 'token')} <code>${h(token.address)}</code>${token.fundingToBuyDelaySec == null ? '' : ` (${duration(token.fundingToBuyDelaySec)} after funding)`}`).join('\n')
-    : 'none observed after funding';
-  const remainingTokens = row.tokens.length > 8 ? `\n+${row.tokens.length - 8} additional observed tokens` : '';
-  const sourceTx = row.sourceTxHash
-    ? row.sourceTxUrl ? `<a href="${h(row.sourceTxUrl)}">${h(row.sourceTxHash)}</a>` : `<code>${h(row.sourceTxHash)}</code>`
-    : 'n/a';
-  const status = row.fresh ? 'fresh' : row.dormant ? 'dormant' : 'active history';
+function renderDeployment(row: InvestigationDeployment, rank: number) {
   return [
-    `<code>${h(row.address)}</code>`,
-    `${h(row.chain)} · ${h(routeLabel(row.route, row.hops))} · role ${h(row.role)}`,
-    `Amount: ${amount}`,
-    `Source transaction: ${sourceTx}`,
-    `First / last transfer: ${h(row.firstTransferTs)} / ${h(row.lastTransferTs)}`,
-    `Tokens bought after funding:\n${tokens}${remainingTokens}`,
-    `Profit / rotation: ${row.rotations.length ? row.rotations.map(h).join(', ') : 'none observed'}`,
-    `Receiver: ${status} · confidence ${Math.round(row.confidence * 100)}%${row.safeEntityLink ? ' · evidence-backed cluster link' : ' · observation only'}`
+    `${rank}. <b>${h(row.tokenSymbol ?? 'TOKEN')}</b> · ${h(row.chain)}`,
+    `Token: <code>${h(row.tokenAddress)}</code>`,
+    `Buyer: <code>${h(row.buyerAddress)}</code>`,
+    `Buy: ${formatAmount(row.amountUsd, row.amountToken, row.tokenSymbol)} · ${h(row.buyTs)}`,
+    `Funding→buy: ${row.fundingToBuyDelaySec == null ? 'n/a' : duration(row.fundingToBuyDelaySec)}`,
+    `Evidence: ${h(row.evidenceTier)} · holding ${h(row.holdingStatus)}`,
+    `Buy tx: <code>${h(row.buyTxHash)}</code>`
   ].join('\n');
 }
 
-function renderRoleIndex(row: WalletCapitalRelation) {
-  return [`<code>${h(row.address)}</code>`, `${h(row.chain)} · ${h(row.role)} · ${h(routeLabel(row.route, row.hops))} · confidence ${Math.round(row.confidence * 100)}%`].join('\n');
-}
-
-function renderTokenIndex(row: WalletCapitalRelation) {
+function deploymentButtons(row: InvestigationDeployment): InlineKeyboard['inline_keyboard'][number] {
   return [
-    `<code>${h(row.address)}</code> · ${h(row.chain)}`,
-    ...row.tokens.slice(0, 8).map((token) => `${h(token.symbol ?? 'token')} <code>${h(token.address)}</code>${token.fundingToBuyDelaySec == null ? '' : ` · funding→buy ${duration(token.fundingToBuyDelaySec)}`}`)
-  ].join('\n');
+    { text: 'Copy token', copy_text: { text: row.tokenAddress } },
+    { text: 'Token explorer', url: tokenExplorer(row.chain, row.tokenAddress) },
+    { text: 'Buy tx', url: transactionExplorer(row.chain, row.buyTxHash) }
+  ];
 }
 
-function capitalRelationKeyboard(rows: WalletCapitalRelation[]): InlineKeyboard {
-  return { inline_keyboard: rows.map((row) => [
-    { text: `Copy ${short(row.address, 4)}`, copy_text: { text: row.address } },
-    { text: 'Explorer', url: walletExplorer(row.chain, row.address) }
-  ]) };
+function renderEvidence(value: WalletInvestigationResult, sessionId: string) {
+  const chains = value.coverage.map((row) => [
+    `<b>${h(row.chain)}</b> · ${h(row.coverageStatus)} · ${row.eventsScanned} events`,
+    `Provider: ${h(row.provider ?? 'unavailable')} · activity ${row.activityFound ? 'found' : 'not observed'}`,
+    `First/last: ${h(row.firstActivityAt ?? 'n/a')} · ${h(row.lastActivityAt ?? 'n/a')}`,
+    ...row.warnings.map((warning) => `<i>${h(warning)}</i>`)
+  ].join('\n'));
+  const text = [
+    '<b>INVESTIGATION EVIDENCE</b>',
+    `Status: ${h(value.status)} · coverage ${h(value.coverageStatus)} · depth ${value.maxDepth}`,
+    `Strong/probable/possible links: ${value.counts.strongLinks}/${value.counts.probableLinks}/${value.counts.possibleLinks}`,
+    'Service/router/CEX nodes are not ownership links. CEX paths remain inference-only.',
+    '',
+    ...chains
+  ].join('\n\n');
+  return { text, keyboard: investigationListKeyboard(sessionId, 1, false, []) };
 }
 
-function routeLabel(route: WalletCapitalRelation['route'], hops: number) {
-  if (route === 'direct_transfer') return 'direct';
-  if (route === 'multi_hop_transfer') return `multi-hop (${hops})`;
-  if (route === 'exact_bridge') return 'exact bridge';
-  if (route === 'bridge_inference') return 'bridge inference';
-  return 'possible CEX (unconfirmed)';
+function investigationListKeyboard(sessionId: string, page: number, hasNext: boolean, rows: InlineKeyboard['inline_keyboard']): InlineKeyboard {
+  const navigation: InlineKeyboard['inline_keyboard'][number] = [];
+  if (page > 1) navigation.push({ text: '‹ Back', callback_data: callback('page', sessionId, String(page - 1)) });
+  if (hasNext) navigation.push({ text: 'Next ›', callback_data: callback('page', sessionId, String(page + 1)) });
+  return { inline_keyboard: [
+    ...rows,
+    ...(navigation.length ? [navigation] : []),
+    [{ text: 'Investigation summary', callback_data: callback('invest', sessionId, 'summary') }]
+  ] };
 }
-function duration(seconds: number) {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3_600) return `${Math.round(seconds / 60)}m`;
-  if (seconds < 86_400) return `${Math.round(seconds / 3_600)}h`;
-  return `${Math.round(seconds / 86_400)}d`;
+
+function pageRows<T>(rows: T[], page: number, pageSize: number) {
+  const start = (page - 1) * pageSize;
+  return { items: rows.slice(start, start + pageSize), hasNext: start + pageSize < rows.length };
 }
-function relationChunks(rows: WalletCapitalRelation[], renderer: (row: WalletCapitalRelation) => string) {
-  const result: WalletCapitalRelation[][] = [];
-  let current: WalletCapitalRelation[] = [];
-  let length = 0;
-  for (const row of rows) {
-    const rowLength = renderer(row).length + 2;
-    if (current.length && length + rowLength > 3_200) { result.push(current); current = []; length = 0; }
-    current.push(row); length += rowLength;
-  }
-  if (current.length) result.push(current);
-  return result;
-}
-function telegramPace() { return new Promise<void>((resolve) => setTimeout(resolve, 1_050)); }
 
 async function editIfChanged(api: TelegramApi, query: TelegramCallbackQuery, text: string, keyboard: InlineKeyboard) {
   if (!query.message) return;
   const sameText = query.message.text === htmlToPlain(text);
   const sameKeyboard = JSON.stringify(query.message.reply_markup ?? null) === JSON.stringify(keyboard);
   if (sameText && sameKeyboard) return;
-  await api.editMessage(String(query.message.chat.id), query.message.message_id, text, keyboard);
+  try {
+    await api.editMessage(String(query.message.chat.id), query.message.message_id, text, keyboard);
+  } catch (error) {
+    if (/message is not modified/i.test(errorMessage(error))) return;
+    throw error;
+  }
 }
 
 function htmlToPlain(value: string) {
@@ -388,6 +455,15 @@ function invalidTargetMessage(workflow: OperatorWorkflow) {
   if (workflow === 'token') return 'Token CA nije validan. Pošalji validan token CA.';
   if (workflow === 'wallet') return 'Wallet adresa nije validna. Pošalji validnu wallet adresu.';
   return 'Vrednost nije validna. Pošalji validan wallet ili postojeći entity ID.';
+}
+function workflowView(workflow: OperatorWorkflow): OperatorSessionState['investigationView'] {
+  if (workflow === 'flow') return 'paths';
+  if (workflow === 'bridges') return 'bridges';
+  if (workflow === 'entity') return 'cluster';
+  return 'summary';
+}
+function investigationView(value: string): NonNullable<OperatorSessionState['investigationView']> {
+  return value === 'paths' || value === 'cluster' || value === 'deployments' || value === 'evidence' || value === 'bridges' ? value : 'summary';
 }
 interface TokenPnlTelegramRow {
   chain: string;
@@ -414,7 +490,6 @@ function renderTokenPnlWallet(row: TokenPnlTelegramRow, index: number) {
     `Validation: ${h(tokenValidation(row.validation))}`
   ].filter(Boolean).join('\n');
 }
-
 function tokenValidation(value: string) {
   if (value === 'locally_verified') return 'locally verified';
   if (value === 'provider_only') return 'provider only';
@@ -427,18 +502,32 @@ function tokenPnlKeyboard(rows: TokenPnlTelegramRow[]): InlineKeyboard {
   ]) };
 }
 function walletExplorer(chain: string, address: string) {
-  const base = chain === 'SOLANA' ? 'https://solscan.io/account/'
-    : chain === 'ETHEREUM' ? 'https://etherscan.io/address/'
-    : chain === 'BASE' ? 'https://basescan.org/address/'
-    : chain === 'ARBITRUM' ? 'https://arbiscan.io/address/'
-    : 'https://bscscan.com/address/';
-  return `${base}${encodeURIComponent(address)}`;
+  return `${explorerBase(chain)}/address/${encodeURIComponent(address)}`.replace('solscan.io/address', 'solscan.io/account');
+}
+function tokenExplorer(chain: string, address: string) {
+  return chain === 'SOLANA' ? `https://solscan.io/token/${encodeURIComponent(address)}` : `${explorerBase(chain)}/token/${encodeURIComponent(address)}`;
+}
+function transactionExplorer(chain: string, txHash: string) {
+  return `${explorerBase(chain)}/tx/${encodeURIComponent(txHash)}`;
+}
+function explorerBase(chain: string) {
+  if (chain === 'SOLANA') return 'https://solscan.io';
+  if (chain === 'ETHEREUM') return 'https://etherscan.io';
+  if (chain === 'BASE') return 'https://basescan.org';
+  if (chain === 'ARBITRUM') return 'https://arbiscan.io';
+  return 'https://bscscan.com';
+}
+function formatAmount(amountUsd: number | null, amountToken: string | null, symbol: string | null) {
+  if (amountUsd != null) return plainMoney(amountUsd);
+  return amountToken ? `${h(amountToken)} ${h(symbol ?? '')}`.trim() : 'unpriced';
 }
 function plainMoney(value: number | null) { return value == null ? 'n/a' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value); }
 function signedMoney(value: number | null) { if (value == null) return 'n/a'; return `${value >= 0 ? '+' : '-'}${plainMoney(Math.abs(value))}`; }
 function roi(value: number | null) { return value == null ? 'n/a' : `${Math.round(value * 100).toLocaleString('en-US')}%`; }
 function dormancyFlag(value: boolean | null) { return value == null ? '?' : value ? 'yes' : 'no'; }
+function duration(seconds: number) { if (seconds < 60) return `${seconds}s`; if (seconds < 3600) return `${Math.round(seconds / 60)}m`; if (seconds < 86_400) return `${Math.round(seconds / 3600)}h`; return `${Math.round(seconds / 86_400)}d`; }
 function parseCommand(text: string) { const match = text.trim().match(/^\/([a-z_]+)(?:@[a-z0-9_]+)?(?:\s+([\s\S]+))?$/i); return { command: match?.[1]?.toLowerCase() ?? '', argument: match?.[2]?.trim() ?? '' }; }
 function parseCallback(value: string | undefined) { const parts = value?.split('|'); return parts?.length === 4 && parts[0] === 'v1' ? { action: parts[1], sessionId: parts[2], value: parts[3] } : null; }
 function required(state: OperatorSessionState) { if (!state.target) throw new Error('Target is required'); return state.target; }
-function help() { return [`<b>FlowRadar operator</b>`, ...COMMANDS.map((x) => `/${x.command} — ${h(x.description)}`), '', 'Izaberi komandu; bot će zatim tražiti potrebnu adresu.', '<code>/wallet</code>', '<code>/token</code>', '<code>/profitable</code>'].join('\n'); }
+function help() { return [`<b>FlowRadar operator</b>`, ...COMMANDS.map((row) => `/${row.command} — ${h(row.description)}`), '', 'Izaberi komandu; bot će zatim tražiti potrebnu adresu.', '<code>/wallet</code>', '<code>/token</code>', '<code>/profitable</code>'].join('\n'); }
+function errorMessage(error: unknown) { return error instanceof Error ? error.message : String(error); }
