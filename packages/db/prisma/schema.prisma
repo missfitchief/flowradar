@@ -2533,7 +2533,7 @@ model CapitalChain {
   realizedProfitUsd  Decimal?  @db.Decimal(24, 4)
   receiverClass      String?
   relationshipTier   String?
-  independentEntitiesOnToken Int @default(0)
+  independentEntitiesOnToken Int?
   confidence         Float
   reasonCodes        String[]
   receiptsJson       Json

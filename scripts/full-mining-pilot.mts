@@ -102,8 +102,8 @@ async function main() {
   console.log('[mining] candidates', JSON.stringify({ byState: cands.byState, skippedLargeCap: cands.skippedLargeCap, errors: cands.errors }));
 
   // Stage 6: per-token extraction status + real capital chains.
-  const extraction = await buildTopPnlExtractionStatus(prisma, { chain: 'SOLANA' });
-  const chains = await buildCapitalChains(prisma, { chain: 'SOLANA' });
+  const extraction = await buildTopPnlExtractionStatus(prisma, { chain: 'SOLANA', limit: Math.max(2000, runnersTotal) });
+  const chains = await buildCapitalChains(prisma, { chain: 'SOLANA', limit: 5000 });
   console.log('[mining] extraction', JSON.stringify(extraction.byStatus));
   console.log('[mining] chains', JSON.stringify({ staging: chains.staging, deployment: chains.deployment, profitRotation: chains.profitRotation, endToEnd: chains.endToEndExamples, errors: chains.errors }));
 

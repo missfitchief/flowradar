@@ -26,12 +26,12 @@ export default async function CapitalPage() {
       take: 50
     }),
     prisma.capitalChain.findMany({
-      where: { kind: 'profit_rotation' },
+      where: { chain: 'SOLANA', kind: 'profit_rotation' },
       orderBy: [{ realizedProfitUsd: 'desc' }, { sourceWallet: 'asc' }],
       take: 50
     }),
     prisma.capitalChain.findMany({
-      where: { kind: 'deployment' },
+      where: { chain: 'SOLANA', kind: 'deployment' },
       orderBy: [{ fundingTs: 'desc' }],
       take: 50
     })
@@ -111,8 +111,10 @@ export default async function CapitalPage() {
           )}
           <p className="mt-2 text-xs text-zinc-500">
             Profit rotation is inferred from local priced positions (realized profit then a later buy) — not proof the
-            exact dollars moved. Capital deployment is near-empty here: receiver wallets have almost no post-receipt
-            trade coverage in this observation window (an honest data gap, not a null result).
+            exact dollars moved.
+            {deployments.length === 0
+              ? ' No capital-deployment chains yet: receiver wallets have almost no post-receipt trade coverage in this observation window (an honest data gap, not a null result).'
+              : ` ${deployments.length} deployment chain(s) shown from receivers that bought after being funded.`}
           </p>
         </section>
       )}
