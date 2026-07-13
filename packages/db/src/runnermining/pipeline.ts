@@ -250,11 +250,17 @@ export async function buildCapitalChains(
     take: limit + 1
   });
   if (outflows.length > limit) truncated = true;
+  const processedOutflows = outflows.slice(0, limit);
+  // Bounded: only the enrollments for the receivers we actually process
+  // (destination set is <= the capped outflow count), never the whole table.
+  const outflowDestinations = [...new Set(processedOutflows.map((o) => o.destinationAddress))];
   const receiverEnrollments = new Map(
-    (await prisma.receiverEnrollment.findMany({ where: { chain }, select: { receiverAddress: true, receiverClass: true, deploymentsJson: true, firstReceiptTs: true } }))
-      .map((r) => [r.receiverAddress, r])
+    (await prisma.receiverEnrollment.findMany({
+      where: { chain, receiverAddress: { in: outflowDestinations } },
+      select: { receiverAddress: true, receiverClass: true, deploymentsJson: true, firstReceiptTs: true }
+    })).map((r) => [r.receiverAddress, r])
   );
-  for (const o of outflows.slice(0, limit)) {
+  for (const o of processedOutflows) {
     try {
       const enrollment = receiverEnrollments.get(o.destinationAddress);
       // The persisted sourceEntityKey is already entity-adjusted (works for
