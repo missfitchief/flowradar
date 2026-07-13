@@ -60,3 +60,6 @@ export * from './runnermining/replay';
 export * from './runnermining/entityGraph';
 export * from './runnermining/pipeline';
 export * from './runnermining/liveRecovery';
+export * from './tracker/massTracker';
+export * from './tracker/traceStore';
+export * from './tracker/legacySource';

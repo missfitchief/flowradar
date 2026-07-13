@@ -292,7 +292,8 @@ export function mapHeliusTransaction(tx: HeliusTransaction, walletAddress: strin
     txHash: tx.signature,
     blockOrSlot: BigInt(tx.slot),
     ts: new Date(tx.timestamp * 1000),
-    legs
+    legs,
+    status: tx.transactionError == null ? 'succeeded' : 'failed'
   };
 }
 

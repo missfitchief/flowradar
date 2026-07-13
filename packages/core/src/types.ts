@@ -112,6 +112,8 @@ export interface NormalizedTx {
   blockOrSlot: bigint;
   ts: Date;
   legs: TxLeg[];
+  /** Additive provider execution status; legacy producers may omit it. */
+  status?: 'succeeded' | 'failed';
 }
 
 // ---------------------------------------------------------------------------

@@ -28,3 +28,4 @@ export * from './social';
 export * from './confluence';
 export * from './gmgn/allowlist';
 export * from './gmgn/gmgnProvider';
+export * from './bridge/wormholeScan';

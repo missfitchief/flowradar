@@ -16,7 +16,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@flowradar/db', () => ({
-  ingestNormalizedTxs: vi.fn(async () => {})
+  ingestNormalizedTxs: vi.fn(async () => {}),
+  createMassTrackerSession: vi.fn(async () => ({
+    runId: 'worker-test-run',
+    ingest: vi.fn(async () => {}),
+    recordProviderError: vi.fn(),
+    complete: vi.fn(async () => ({
+      runId: 'worker-test-run', inputEvents: 0, persistedEvents: 0,
+      duplicateEvents: 0, relevantEvents: 0, receiversEnrolled: 0,
+      bridgePairsVerified: 0, batches: 0, retryAttempts: 0,
+      providerErrors: 0, peakHeapBytes: 0, throughputPerSec: 0
+    })),
+    fail: vi.fn(async () => {})
+  }))
 }));
 
 import { ingestNormalizedTxs } from '@flowradar/db';
@@ -39,9 +51,7 @@ interface FakeWallet {
 }
 
 function makeTx(seq = 0): NormalizedTx {
-  // Only `.ts` (a Date) is read by walletActivity (cursor advance); the rest of
-  // the shape is irrelevant because ingestNormalizedTxs is mocked out.
-  return { ts: new Date(1_000 + seq) } as unknown as NormalizedTx;
+  return { txHash: `tx-${seq}`, blockOrSlot: BigInt(seq), ts: new Date(1_000 + seq), legs: [] };
 }
 
 /**

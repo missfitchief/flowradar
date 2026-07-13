@@ -30,9 +30,9 @@
 // Either way the cursor advance + the ingest layer's own dedupe keep re-polls
 // idempotent.
 
-import { ingestNormalizedTxs } from '@flowradar/db';
+import { createMassTrackerSession, ingestNormalizedTxs, type MassTrackerSession } from '@flowradar/db';
 import { isRateLimitError } from '@flowradar/providers';
-import type { Chain } from '@flowradar/core';
+import { normalizeMassTransaction, type Chain } from '@flowradar/core';
 import type { JobContext } from '../context';
 
 const PROVIDER_NAME = 'mock';
@@ -120,6 +120,10 @@ export async function run(ctx: JobContext): Promise<void> {
   let walletsWithErrors = 0;
   let walletsRateLimited = 0;
   let walletsBackfillTruncated = 0;
+  const massTracker = await createMassTrackerSession(prisma, {
+    enrollReceivers: true,
+    metadata: { job: 'walletActivity', mode: process.env.MOCK_MODE === 'false' ? 'live' : 'mock' }
+  });
 
   // Sequential by design: each wallet is awaited before the next, so the
   // provider's shared rate limiter (one instance per cached provider) meters
@@ -129,48 +133,49 @@ export async function run(ctx: JobContext): Promise<void> {
   // provider error — including a provider throttle (429) that survived the
   // adapter's own backoff/retries — is caught and recorded per-wallet, never
   // rethrown, so it can't abort the rest of the cycle.
-  for (const wallet of wallets) {
-    try {
-      const result = await pollAndIngestWallet(ctx, wallet.address, wallet.chain);
-      totalIngestedTxs += result.txsIngested;
-      totalPagesFetched += result.pagesFetched;
-      if (result.backfillTruncated) {
-        walletsBackfillTruncated += 1;
-        // Not silent: we hit the page cap and deliberately stopped this poll;
-        // the advanced cursor means the next cycle continues from newer activity.
-        log.info(`walletActivity: bounded backfill truncated for ${wallet.address}`, {
+  try {
+    for (const wallet of wallets) {
+      try {
+        const result = await pollAndIngestWallet(ctx, wallet.address, wallet.chain, massTracker);
+        totalIngestedTxs += result.txsIngested;
+        totalPagesFetched += result.pagesFetched;
+        if (result.backfillTruncated) {
+          walletsBackfillTruncated += 1;
+          log.info(`walletActivity: bounded backfill truncated for ${wallet.address}`, {
+            chain: wallet.chain,
+            pagesFetched: result.pagesFetched,
+            txsIngested: result.txsIngested,
+            maxPages: maxBackfillPages()
+          });
+        }
+      } catch (err) {
+        massTracker.recordProviderError();
+        walletsWithErrors += 1;
+        const rateLimited = isRateLimitError(err);
+        if (rateLimited) walletsRateLimited += 1;
+        await recordSyncFailure(prisma, wallet.chain, wallet.address, err);
+        log.error(`walletActivity: failed to poll wallet ${wallet.address}`, {
           chain: wallet.chain,
-          pagesFetched: result.pagesFetched,
-          txsIngested: result.txsIngested,
-          maxPages: maxBackfillPages()
+          kind: rateLimited ? 'rate_limited' : 'provider_error',
+          error: err instanceof Error ? err.message : String(err)
         });
       }
-    } catch (err) {
-      walletsWithErrors += 1;
-      const rateLimited = isRateLimitError(err);
-      if (rateLimited) walletsRateLimited += 1;
-      await recordSyncFailure(prisma, wallet.chain, wallet.address, err);
-      log.error(`walletActivity: failed to poll wallet ${wallet.address}`, {
-        chain: wallet.chain,
-        // Honest classification: a provider throttle is rate_limited, not an
-        // auth_error or unknown failure (live-validation finding 2026-07-07).
-        kind: rateLimited ? 'rate_limited' : 'provider_error',
-        error: err instanceof Error ? err.message : String(err)
-      });
     }
+    const trackerMetrics = await massTracker.complete();
+    log.info('walletActivity cycle complete', {
+      walletsPolled: wallets.length, txsIngested: totalIngestedTxs,
+      pagesFetched: totalPagesFetched, walletsWithErrors, walletsRateLimited,
+      walletsBackfillTruncated, massTrackerRunId: trackerMetrics.runId,
+      massEvents: trackerMetrics.inputEvents, massEventsPerSec: trackerMetrics.throughputPerSec,
+      massPeakHeapBytes: trackerMetrics.peakHeapBytes, massRetries: trackerMetrics.retryAttempts
+    });
+  } catch (error) {
+    await massTracker.fail(error);
+    throw error;
   }
-
-  log.info('walletActivity cycle complete', {
-    walletsPolled: wallets.length,
-    txsIngested: totalIngestedTxs,
-    pagesFetched: totalPagesFetched,
-    walletsWithErrors,
-    walletsRateLimited,
-    walletsBackfillTruncated
-  });
 }
 
-async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chain): Promise<WalletPollResult> {
+async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chain, massTracker: MassTrackerSession): Promise<WalletPollResult> {
   const { prisma, providers } = ctx;
 
   const syncState = await prisma.providerSyncState.findUnique({
@@ -209,6 +214,9 @@ async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chai
       // memory. ingestNormalizedTxs is additive and dedupes, so per-page ingest
       // yields the identical DB state as one whole-history ingest.
       await ingestNormalizedTxs(prisma, chain, address, result.txs);
+      const observedAt = new Date();
+      const provider = activityProvider.providerName ?? PROVIDER_NAME;
+      await massTracker.ingest(result.txs.flatMap((tx) => normalizeMassTransaction(tx, { chain, provider, observedAt }, address)));
       txsIngested += result.txs.length;
       for (const tx of result.txs) {
         if (!latestTs || tx.ts.getTime() > latestTs.getTime()) latestTs = tx.ts;
