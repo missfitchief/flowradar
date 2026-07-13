@@ -26,7 +26,7 @@ async function main() {
   await live.$disconnect();
 
   const meta = await buildTokenMetadata(prisma, { chain: 'SOLANA', heliusApiKey: process.env.HELIUS_API_KEY, maxRequests: 3 });
-  console.log('[live-recovery] token metadata', JSON.stringify({ considered: meta.mintsConsidered, resolved: meta.resolved, retryable: meta.retryable, unavailable: meta.unavailable, requests: meta.requestsUsed }));
+  console.log('[live-recovery] token metadata', JSON.stringify({ considered: meta.mintsConsidered, resolved: meta.resolved, retryable: meta.retryable, unavailable: meta.unavailable, missingCredential: meta.missingCredential, requests: meta.requestsUsed }));
 
   // Recompute capital chains + candidates from the refreshed evidence.
   const chains = await buildCapitalChains(prisma, { chain: 'SOLANA', limit: 5000 });
@@ -34,14 +34,25 @@ async function main() {
   console.log('[live-recovery] chains', JSON.stringify({ staging: chains.staging, deployment: chains.deployment, rotation: chains.profitRotation }), 'candidates', JSON.stringify(cands.byState));
 
   // Data-driven honest gaps — computed from THIS run's real results.
+  // Distinguish the THREE distinct unresolved causes so the operator knows
+  // which is actionable: missing_credential (configure a key) vs quota-retryable
+  // (wait / rotate key) vs unavailable (provider answered, has no metadata).
   const gaps: string[] = [];
+  if (meta.missingCredential > 0) {
+    gaps.push(`token metadata: ${meta.missingCredential}/${meta.mintsConsidered} blocked on MISSING CREDENTIAL — HELIUS_API_KEY not configured; configure a key to resolve (not a quota problem)`);
+  }
   if (meta.resolved === 0 && (meta.retryable > 0 || meta.unavailable > 0)) {
-    gaps.push(`token metadata unresolved this run (${meta.retryable} retryable / ${meta.unavailable} unavailable of ${meta.mintsConsidered}) — provider quota/rate-limit (or missing credential), retryable, never fabricated`);
+    gaps.push(`token metadata unresolved this run (${meta.retryable} retryable=provider quota/rate-limit, ${meta.unavailable} unavailable=provider returned no metadata, of ${meta.mintsConsidered}) — retryable never fabricated`);
   } else if (meta.resolved > 0) {
-    gaps.push(`token metadata: ${meta.resolved} resolved, ${meta.retryable} retryable, ${meta.unavailable} unavailable`);
+    gaps.push(`token metadata: ${meta.resolved} resolved, ${meta.retryable} retryable, ${meta.unavailable} unavailable, ${meta.missingCredential} missing-credential`);
   }
   if (backfill.deploymentsFound === 0) {
-    gaps.push(`receiver deployment chains remain ${chains.deployment}: 0/${backfill.written} receivers show a post-receipt token buy in local+live data (${backfill.byStatus['covered_no_post_receipt_buy'] ?? 0} covered-no-buy, ${backfill.byStatus['retryable_provider_failure'] ?? 0} not yet polled)`);
+    const covered = backfill.byStatus['covered_no_post_receipt_buy'] ?? 0;
+    const partial = backfill.byStatus['partial_coverage'] ?? 0;
+    const retry = backfill.byStatus['retryable_provider_failure'] ?? 0;
+    // Report EVERY bucket so the sum reconciles to written and the largest
+    // group (partial_coverage) is never silently dropped.
+    gaps.push(`receiver deployment chains remain ${chains.deployment}: 0/${backfill.written} receivers show a post-receipt token buy — ${covered} covered-no-buy (clean post-receipt poll), ${partial} partial_coverage (seen but no clean post-receipt poll — absence NOT proven), ${retry} retryable (not yet polled / source failed)`);
   } else {
     gaps.push(`${backfill.deploymentsFound} receiver deployment(s) found from live-collected activity`);
   }
@@ -50,7 +61,7 @@ async function main() {
     ts: new Date().toISOString(),
     durationSec: Math.round((Date.now() - t0) / 1000),
     receiverBackfill: { byStatus: backfill.byStatus, deploymentsFound: backfill.deploymentsFound, written: backfill.written, errors: backfill.errors },
-    tokenMetadata: { considered: meta.mintsConsidered, resolved: meta.resolved, placeholderOnly: meta.placeholderOnly, retryable: meta.retryable, unavailable: meta.unavailable, requestsUsed: meta.requestsUsed },
+    tokenMetadata: { considered: meta.mintsConsidered, resolved: meta.resolved, placeholderOnly: meta.placeholderOnly, retryable: meta.retryable, unavailable: meta.unavailable, missingCredential: meta.missingCredential, requestsUsed: meta.requestsUsed },
     capitalChains: { staging: chains.staging, deployment: chains.deployment, profitRotation: chains.profitRotation },
     candidates: cands.byState,
     honestGaps: gaps
