@@ -1,76 +1,78 @@
 import { describe, expect, it } from 'vitest';
-import type { InvestigationPath, WalletInvestigationResult } from '@flowradar/db';
+import type { InvestigationMemberIntelligence, InvestigationPath, WalletInvestigationResult } from '@flowradar/db';
 import { buildInvestigationPresentation } from '../src/investigationPresentation';
 
 const SOURCE = '0x0c8300000000000000000000000000000000932d';
+const EXECUTION = '0x0000000000000000000000000000000000000001';
+const TOKEN = '0x0000000000000000000000000000000000000999';
 
-function splitFundingInvestigation(): WalletInvestigationResult {
-  const paths = Array.from({ length: 12 }, (_, index) => fundingPath(index));
+function intel(tier: 'S' | 'A' | 'B' | 'C', evidence: number, alpha: number, wake: number): InvestigationMemberIntelligence {
   return {
-    id: 'split-investigation', investigationKey: `evm:${SOURCE}`, rootAddress: SOURCE, addressKind: 'evm', maxDepth: 4,
-    status: 'completed', entityKey: 'entity:split', coverageStatus: 'complete', activityChains: ['BASE'], completedAt: '2026-07-13T01:10:00.000Z',
-    coverage: [{ chain: 'BASE', activityFound: true, firstActivityAt: '2026-07-13T01:00:00.000Z', lastActivityAt: '2026-07-13T01:10:00.000Z', eventsScanned: 12, coverageStatus: 'complete', provider: 'test', warnings: [] }],
-    counts: { directReceivers: 0, multiHopWallets: 12, bridgeDestinations: 0, probableAltExecutionWallets: 0, profitCollectors: 0, tokenDeployments: 0, possibleCexLinks: 0, strongLinks: 0, probableLinks: 0, possibleLinks: 12 },
-    paths,
-    members: [rootMember(), ...paths.map((path) => ({
-      chain: 'BASE' as const, address: path.destinationAddress, role: 'fresh_funded_receiver', parentChain: 'BASE' as const, parentAddress: SOURCE,
-      entityKey: 'entity:split', relationshipConfidence: 0.3, evidenceTier: 'multi_hop_inference', firstLinkedAt: path.eventTs,
-      lastLinkedAt: path.eventTs, observationOnly: true
-    }))],
-    deployments: [], providerReceipts: {}
+    evidenceScore: evidence, historicalAlphaScore: alpha, wakeUpPotential: wake, tier,
+    trackingPriority: tier === 'S' || tier === 'A' ? 'track_now' : tier === 'B' ? 'watch' : 'context_only',
+    independentSignalCount: 3, clusterConclusion: evidence >= 75 ? 'supported' : evidence >= 60 ? 'probable' : 'possible',
+    evidenceSignals: [
+      { code: 'direct_funding', label: 'Direct funding', strength: 0.9, weight: 28, receiptCount: 2 },
+      { code: 'repeated_funding', label: 'Repeated funding', strength: 0.9, weight: 18, receiptCount: 2 },
+      { code: 'execution_pattern', label: 'Execution pattern', strength: 0.9, weight: 14, receiptCount: 2 }
+    ],
+    whyImportant: ['Repeated funding followed by token execution.'], contradictions: [], historicalCoverage: 'partial',
+    metrics: { transferCount: 2, uniqueTokensAfterFunding: 2, completedPositions: 5, winRate: 0.8, repeatRunnerCount: 2, realizedPnlUsd: 50_000, medianEntryMcapUsd: 100_000, maxCoveredDormantDays: 90 },
+    scoreVersion: 1
   };
 }
 
-function fundingPath(index: number): InvestigationPath {
-  const destination = `0x${String(index + 1).padStart(40, '0')}`;
+function investigation(): WalletInvestigationResult {
+  const lowPaths = Array.from({ length: 30 }, (_, index) => path(`low-${index}`, `0x${String(index + 100).padStart(40, '0')}`, 28));
   return {
-    id: `path-${index}`, routeType: 'multi_hop', sourceChain: 'BASE', sourceAddress: SOURCE, destinationChain: 'BASE', destinationAddress: destination,
-    assetAddress: null, assetSymbol: 'USDC', amountToken: '28', amountUsd: 28, valueStatus: 'usd_verified', eventTs: '2026-07-13T01:00:00.000Z',
-    txHash: '0xsplit', protocol: null, evidenceTier: 'multi_hop_inference', confidence: 0.3, supportingEvidence: {}, contradictingEvidence: {},
-    hops: [{ sourceChain: 'BASE', sourceAddress: SOURCE, destinationChain: 'BASE', destinationAddress: destination, assetAddress: null, assetSymbol: 'USDC', amountToken: '28', amountUsd: 28, valueStatus: 'usd_verified', timestamp: '2026-07-13T01:00:00.000Z', txHash: '0xsplit', routeType: 'multi_hop', protocol: null, evidenceTier: 'multi_hop_inference', confidence: 0.3 }]
+    id: 'intelligence-investigation', investigationKey: `evm:${SOURCE}`, rootAddress: SOURCE, addressKind: 'evm', maxDepth: 4,
+    status: 'completed', entityKey: 'entity:test', coverageStatus: 'complete', activityChains: ['BASE'], completedAt: '2026-07-13T01:10:00.000Z',
+    coverage: [{ chain: 'BASE', activityFound: true, firstActivityAt: '2026-07-13T01:00:00.000Z', lastActivityAt: '2026-07-13T01:10:00.000Z', eventsScanned: 100, coverageStatus: 'complete', provider: 'test', warnings: [] }],
+    counts: { directReceivers: 31, multiHopWallets: 0, bridgeDestinations: 0, probableAltExecutionWallets: 1, profitCollectors: 0, tokenDeployments: 1, possibleCexLinks: 0, strongLinks: 1, probableLinks: 0, possibleLinks: 30 },
+    paths: [path('execution', EXECUTION, 18_400), ...lowPaths],
+    members: [
+      { chain: 'BASE', address: SOURCE, role: 'root_main', parentChain: null, parentAddress: null, entityKey: 'entity:test', relationshipConfidence: 1, evidenceTier: 'investigation_root', firstLinkedAt: '2026-07-13T01:00:00.000Z', lastLinkedAt: '2026-07-13T01:10:00.000Z', observationOnly: true },
+      { chain: 'BASE', address: EXECUTION, role: 'execution_wallet', parentChain: 'BASE', parentAddress: SOURCE, entityKey: 'entity:test', relationshipConfidence: 0.9, evidenceTier: 'repeated_direct_funding', firstLinkedAt: '2026-01-01T00:00:00.000Z', lastLinkedAt: '2026-04-01T00:00:00.000Z', observationOnly: true, intelligence: intel('A', 84, 72, 81) },
+      ...lowPaths.map((row, index) => ({ chain: 'BASE' as const, address: row.destinationAddress, role: 'fresh_funded_receiver', parentChain: 'BASE' as const, parentAddress: SOURCE, entityKey: null, relationshipConfidence: 0.2, evidenceTier: 'insufficient_evidence', firstLinkedAt: row.eventTs, lastLinkedAt: row.eventTs, observationOnly: true, intelligence: intel(index < 5 ? 'B' : 'C', 42, 8, 22) }))
+    ],
+    deployments: [{
+      id: 'deployment:1', chain: 'BASE', buyerAddress: EXECUTION, tokenAddress: TOKEN, tokenSymbol: 'ALPHA', buyTs: '2026-07-13T01:05:00.000Z', buyTxHash: '0xbuy', amountToken: '100', amountUsd: 2_000, entryMarketCapUsd: 100_000,
+      fundingToBuyDelaySec: 300, sourceEntityKey: 'entity:test', capitalRoute: [], holdingStatus: 'holding_or_unresolved', evidenceTier: 'transaction_verified_buy_after_funding',
+      intelligence: { athMcapUsd: 10_000_000, athBasis: 'historical_universe', roi: 99, roiBasis: 'ath_over_entry_potential', importanceScore: 96, whyImportant: ['Bought by Tier A wallet.'] }
+    }],
+    providerReceipts: {}
   };
 }
 
-function rootMember() {
+function path(id: string, destination: string, amountUsd: number): InvestigationPath {
   return {
-    chain: 'BASE' as const, address: SOURCE, role: 'root_main', parentChain: null, parentAddress: null, entityKey: 'entity:split',
-    relationshipConfidence: 1, evidenceTier: 'investigation_root', firstLinkedAt: '2026-07-13T01:00:00.000Z',
-    lastLinkedAt: '2026-07-13T01:10:00.000Z', observationOnly: true
+    id, routeType: 'direct', sourceChain: 'BASE', sourceAddress: SOURCE, destinationChain: 'BASE', destinationAddress: destination,
+    assetAddress: null, assetSymbol: 'USDC', amountToken: String(amountUsd), amountUsd, valueStatus: 'usd_verified', eventTs: '2026-07-13T01:00:00.000Z',
+    txHash: `0x${id}`, protocol: null, evidenceTier: 'exact_direct_transfer', confidence: 0.9, supportingEvidence: {}, contradictingEvidence: {},
+    hops: [{ sourceChain: 'BASE', sourceAddress: SOURCE, destinationChain: 'BASE', destinationAddress: destination, assetAddress: null, assetSymbol: 'USDC', amountToken: String(amountUsd), amountUsd, valueStatus: 'usd_verified', timestamp: '2026-07-13T01:00:00.000Z', txHash: `0x${id}`, routeType: 'direct', protocol: null, evidenceTier: 'exact_direct_transfer', confidence: 0.9 }]
   };
 }
 
-describe('wallet investigation presentation filtering', () => {
-  it('keeps every relation while grouping repeated $28 funding as one low-priority event', () => {
-    const persisted = splitFundingInvestigation();
-    const presentation = buildInvestigationPresentation(persisted);
-
-    expect(presentation.totalRelations).toBe(12);
-    expect(persisted.paths).toHaveLength(12);
-    expect(presentation.relationGroups).toHaveLength(1);
-    expect(presentation.relationGroups[0]).toMatchObject({
-      label: 'SPLIT FUNDING', relationCount: 12, totalAmountUsd: 336, classification: 'low_priority', deploymentCount: 0
-    });
-    expect(presentation.relationGroups[0]?.receivers).toHaveLength(12);
-    expect(presentation.priorityFindings).toHaveLength(0);
-    expect(presentation.hiddenRelations).toBe(12);
-  });
-
-  it('deduplicates the same token buy receipt and ranks the deployment first', () => {
-    const value = splitFundingInvestigation();
-    const receiver = value.paths[0]!.destinationAddress;
-    value.deployments = [{
-      id: 'deployment-empty-symbol', chain: 'BASE', buyerAddress: receiver, tokenAddress: '0x0000000000000000000000000000000000000999', tokenSymbol: null,
-      buyTs: '2026-07-13T01:05:00.000Z', buyTxHash: '0xbuy', amountToken: '50', amountUsd: 100, entryMarketCapUsd: null,
-      fundingToBuyDelaySec: 300, sourceEntityKey: 'entity:split', capitalRoute: [], holdingStatus: 'holding_or_unresolved', evidenceTier: 'transaction_verified_buy_after_funding'
-    }, {
-      id: 'deployment-complete', chain: 'BASE', buyerAddress: receiver, tokenAddress: '0x0000000000000000000000000000000000000999', tokenSymbol: 'NEW',
-      buyTs: '2026-07-13T01:05:00.000Z', buyTxHash: '0xbuy', amountToken: '50', amountUsd: 100, entryMarketCapUsd: null,
-      fundingToBuyDelaySec: 300, sourceEntityKey: 'entity:split', capitalRoute: [], holdingStatus: 'holding_or_unresolved', evidenceTier: 'transaction_verified_buy_after_funding'
-    }];
+describe('wallet intelligence presentation', () => {
+  it('shows only Tier S/A by default while keeping every backend wallet untouched', () => {
+    const value = investigation();
     const presentation = buildInvestigationPresentation(value);
 
-    expect(presentation.deploymentFindings).toHaveLength(1);
-    expect(presentation.deploymentFindings[0]).toMatchObject({ kind: 'deployment', tokenSymbol: 'NEW' });
-    expect(presentation.priorityFindings[0]?.kind).toBe('deployment');
+    expect(value.members).toHaveLength(32);
+    expect(presentation.analyzedWallets).toBe(32);
+    expect(presentation.topWallets).toHaveLength(1);
+    expect(presentation.topWallets[0]?.member.address).toBe(EXECUTION);
+    expect(presentation.moreWallets).toHaveLength(20);
+    expect(presentation.topWallets.every((row) => row.intelligence.tier === 'S' || row.intelligence.tier === 'A')).toBe(true);
+  });
+
+  it('limits paths and deployments to intelligence-ranked top results with honest outcome metrics', () => {
+    const presentation = buildInvestigationPresentation(investigation());
+
+    expect(presentation.strongestPaths).toHaveLength(1);
+    expect(presentation.strongestPaths[0]).toMatchObject({ receiverAddress: EXECUTION, tokenAddress: TOKEN });
+    expect(presentation.topDeployments).toHaveLength(1);
+    expect(presentation.topDeployments[0]?.deployment.intelligence).toMatchObject({ athMcapUsd: 10_000_000, roi: 99 });
+    expect(presentation.topDeployments.length).toBeLessThanOrEqual(10);
   });
 });

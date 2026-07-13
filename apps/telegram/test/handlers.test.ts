@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { OperatorService, WalletInvestigationResult } from '@flowradar/db';
+import type { InvestigationMemberIntelligence, OperatorService, WalletInvestigationResult } from '@flowradar/db';
 import { createUpdateHandler } from '../src/handlers';
 import { navKeyboard } from '../src/render';
 import type { TelegramApi } from '../src/types';
@@ -7,6 +7,20 @@ import type { TelegramApi } from '../src/types';
 const ADDRESS = '11111111111111111111111111111111';
 const RECEIVER = '22222222222222222222222222222222';
 const TOKEN = '33333333333333333333333333333333';
+
+function intelligence(): InvestigationMemberIntelligence {
+  return {
+    evidenceScore: 84, historicalAlphaScore: 68, wakeUpPotential: 72, tier: 'A', trackingPriority: 'track_now',
+    independentSignalCount: 3, clusterConclusion: 'supported',
+    evidenceSignals: [
+      { code: 'direct_funding', label: 'Direct funding', strength: 0.9, weight: 28, receiptCount: 2 },
+      { code: 'repeated_funding', label: 'Repeated funding pattern', strength: 0.9, weight: 18, receiptCount: 2 },
+      { code: 'execution_pattern', label: 'Post-funding execution pattern', strength: 0.9, weight: 14, receiptCount: 1 }
+    ],
+    whyImportant: ['Three independent signals plus an early post-funding token buy.'], contradictions: [], historicalCoverage: 'partial',
+    metrics: { transferCount: 2, uniqueTokensAfterFunding: 1, completedPositions: 4, winRate: 0.75, repeatRunnerCount: 2, realizedPnlUsd: 12_000, medianEntryMcapUsd: 300_000, maxCoveredDormantDays: 90 }, scoreVersion: 1
+  };
+}
 
 function apiMock(): TelegramApi {
   return {
@@ -31,8 +45,8 @@ function investigation(): WalletInvestigationResult {
       assetAddress: TOKEN, assetSymbol: 'NEW', amountToken: '100', amountUsd: 50, valueStatus: 'usd_verified', eventTs: '2026-07-13T01:05:00.000Z',
       txHash: 'buy-hash', protocol: null, evidenceTier: 'transaction_verified_buy_after_funding', confidence: 0.9, supportingEvidence: {}, contradictingEvidence: {}, hops: []
     }],
-    members: [{ chain: 'SOLANA', address: ADDRESS, role: 'root_main', parentChain: null, parentAddress: null, entityKey: 'entity:1', relationshipConfidence: 1, evidenceTier: 'investigation_root', firstLinkedAt: '2026-07-13T01:00:00.000Z', lastLinkedAt: '2026-07-13T01:10:00.000Z', observationOnly: true }, { chain: 'SOLANA', address: RECEIVER, role: 'execution_wallet', parentChain: 'SOLANA', parentAddress: ADDRESS, entityKey: 'entity:1', relationshipConfidence: 0.9, evidenceTier: 'exact_direct_transfer', firstLinkedAt: '2026-07-13T01:00:00.000Z', lastLinkedAt: '2026-07-13T01:00:00.000Z', observationOnly: true }],
-    deployments: [{ id: 'deployment:1', chain: 'SOLANA', buyerAddress: RECEIVER, tokenAddress: TOKEN, tokenSymbol: 'NEW', buyTs: '2026-07-13T01:05:00.000Z', buyTxHash: 'buy-hash', amountToken: '100', amountUsd: 50, entryMarketCapUsd: null, fundingToBuyDelaySec: 300, sourceEntityKey: 'entity:1', capitalRoute: [], holdingStatus: 'holding_or_unresolved', evidenceTier: 'transaction_verified_buy_after_funding' }],
+    members: [{ chain: 'SOLANA', address: ADDRESS, role: 'root_main', parentChain: null, parentAddress: null, entityKey: 'entity:1', relationshipConfidence: 1, evidenceTier: 'investigation_root', firstLinkedAt: '2026-07-13T01:00:00.000Z', lastLinkedAt: '2026-07-13T01:10:00.000Z', observationOnly: true }, { chain: 'SOLANA', address: RECEIVER, role: 'execution_wallet', parentChain: 'SOLANA', parentAddress: ADDRESS, entityKey: 'entity:1', relationshipConfidence: 0.9, evidenceTier: 'exact_direct_transfer', firstLinkedAt: '2026-07-13T01:00:00.000Z', lastLinkedAt: '2026-07-13T01:00:00.000Z', observationOnly: true, intelligence: intelligence() }],
+    deployments: [{ id: 'deployment:1', chain: 'SOLANA', buyerAddress: RECEIVER, tokenAddress: TOKEN, tokenSymbol: 'NEW', buyTs: '2026-07-13T01:05:00.000Z', buyTxHash: 'buy-hash', amountToken: '100', amountUsd: 50, entryMarketCapUsd: 100_000, fundingToBuyDelaySec: 300, sourceEntityKey: 'entity:1', capitalRoute: [], holdingStatus: 'holding_or_unresolved', evidenceTier: 'transaction_verified_buy_after_funding', intelligence: { athMcapUsd: 1_000_000, athBasis: 'historical_universe', roi: 9, roiBasis: 'ath_over_entry_potential', importanceScore: 88, whyImportant: ['Bought by Tier A wallet.'] } }],
     providerReceipts: {}
   };
 }
@@ -67,19 +81,19 @@ describe('Telegram command handlers', () => {
     expect(service.updateSession).toHaveBeenCalledWith('session1', '123', '123', expect.objectContaining({ investigationId: 'investigation1', investigationView: 'summary', pageSize: 5 }));
     expect(api.sendMessage).toHaveBeenCalledOnce();
     const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[0]!;
-    expect(text).toContain('<b>WALLET INVESTIGATION</b>');
+    expect(text).toContain('<b>WALLET INTELLIGENCE REPORT</b>');
     expect(text).toContain(`<code>${ADDRESS}</code>`);
     expect(text).not.toContain('Wallet DNA');
     expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual([
-      'Najvažnije putanje', 'Token deployments', 'Alt / execution walleti', 'Bridges', 'Ceo cluster', 'Advanced / svi rezultati'
+      'Tier A evidence', 'Explorer', 'Strongest paths', 'Top deployments', 'Evidence', 'Show more'
     ]);
     expect(keyboard?.inline_keyboard.flat().some((button) => button.text === 'Refresh')).toBe(false);
   });
 
   it.each([
-    ['/flow', 'priority', 'NAJVAŽNIJE PUTANJE'],
-    ['/bridges', 'bridges', 'BRIDGES'],
-    ['/entity', 'cluster', 'CEO CLUSTER']
+    ['/flow', 'priority', 'STRONGEST CAPITAL PATHS'],
+    ['/bridges', 'bridges', 'STRONGEST BRIDGE PATHS'],
+    ['/entity', 'cluster', 'WALLET INTELLIGENCE REPORT']
   ])('uses the same canonical investigation for %s', async (command, view, heading) => {
     const api = apiMock();
     const service = {
@@ -103,7 +117,7 @@ describe('Telegram command handlers', () => {
     expect(service.loadWalletInvestigation).toHaveBeenCalledWith('investigation1');
     expect(text).toContain(`<code>${ADDRESS}</code>`);
     expect(text).toContain(`<code>${RECEIVER}</code>`);
-    expect(text).toContain('TOKEN DEPLOYMENT');
+    expect(text).toContain('TOKEN BUY');
     expect(keyboard?.inline_keyboard.flat().find((button) => button.url === `https://solscan.io/account/${RECEIVER}`)?.url).toBe(`https://solscan.io/account/${RECEIVER}`);
     expect(text?.match(/<b>\d+\. /g)?.length ?? 0).toBeLessThanOrEqual(5);
   });
@@ -117,7 +131,7 @@ describe('Telegram command handlers', () => {
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 5, callback_query: { id: 'cb-refresh', from: { id: 123 }, data: 'v1|refresh|session1|run', message: { message_id: 5, chat: { id: 123, type: 'private' }, text: 'old summary' } } });
     expect(service.loadWalletInvestigation).toHaveBeenCalledWith('investigation1');
     expect(service.investigateWallet).not.toHaveBeenCalled();
-    expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain('WALLET INVESTIGATION');
+    expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain('WALLET INTELLIGENCE REPORT');
   });
 
   it('clears pending state on /cancel and Back', async () => {

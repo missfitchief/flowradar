@@ -5,6 +5,7 @@ import { normalizeAddress, validAddress } from '../discovery/unified';
 import { expandWalletCapitalGraph } from '../intelligence/walletFlows';
 import { enrollObservationWallet } from '../intelligence/monitoring';
 import { createMassTrackerSession } from '../tracker/massTracker';
+import { enrichWalletInvestigation, WALLET_INTELLIGENCE_SCORE_VERSION } from './intelligence';
 import type {
   InvestigationChainCoverage, InvestigationCoverageStatus, InvestigationDeployment, InvestigationHop,
   InvestigationMember, InvestigationPath, InvestigationRouteType, WalletInvestigationResult
@@ -40,6 +41,7 @@ interface InfrastructureReceipt {
 }
 
 export class WalletInvestigationService {
+  private readonly intelligenceCache = new Map<string, { recordVersion: string; value: WalletInvestigationResult }>();
   constructor(private readonly prisma: PrismaClient, private readonly options: WalletInvestigationServiceOptions = {}) {}
 
   async investigate(addressInput: string, options: { refresh?: boolean; maxDepth?: number } = {}): Promise<WalletInvestigationResult> {
@@ -66,6 +68,7 @@ export class WalletInvestigationService {
         ...(options.refresh ? { lastRefreshAt: startedAt } : {}), engineVersion: WALLET_INVESTIGATION_ENGINE_VERSION
       }
     });
+    this.intelligenceCache.delete(investigation.id);
 
     try {
       const scan = await this.scanAndBackfill(refs, maxDepth, investigation.id, startedAt);
@@ -150,12 +153,23 @@ export class WalletInvestigationService {
 
   private async loadByKey(investigationKey: string) {
     const record = await this.loadRecord({ investigationKey });
-    return record ? mapRecord(record) : null;
+    return record ? this.mapIntelligence(record) : null;
   }
 
   private async loadById(id: string) {
+    const cached = this.intelligenceCache.get(id);
+    if (cached) return cached.value;
     const record = await this.loadRecord({ id });
-    return record ? mapRecord(record) : null;
+    return record ? this.mapIntelligence(record) : null;
+  }
+
+  private async mapIntelligence(record: NonNullable<Awaited<ReturnType<WalletInvestigationService['loadRecord']>>>) {
+    const recordVersion = `${record.updatedAt.toISOString()}:${record.engineVersion}:${WALLET_INTELLIGENCE_SCORE_VERSION}`;
+    const cached = this.intelligenceCache.get(record.id);
+    if (cached?.recordVersion === recordVersion) return cached.value;
+    const value = await enrichWalletInvestigation(this.prisma, mapRecord(record));
+    this.intelligenceCache.set(record.id, { recordVersion, value });
+    return value;
   }
 
   private loadRecord(where: Prisma.WalletInvestigationWhereInput) {

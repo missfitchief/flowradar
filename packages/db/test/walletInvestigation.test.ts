@@ -60,6 +60,9 @@ describe('WalletInvestigationService', () => {
     expect(result.deployments.map((row) => row.tokenAddress)).toEqual(expect.arrayContaining(TOKENS));
     expect(result.deployments.every((row) => row.capitalRoute.length >= 2)).toBe(true);
     expect(result.members.filter((row) => row.address !== ROOT).every((row) => row.observationOnly)).toBe(true);
+    expect(result.members.every((row) => row.intelligence && Number.isFinite(row.intelligence.evidenceScore) && Number.isFinite(row.intelligence.historicalAlphaScore) && Number.isFinite(row.intelligence.wakeUpPotential))).toBe(true);
+    expect(result.members.filter((row) => row.intelligence?.tier === 'S' || row.intelligence?.tier === 'A').every((row) => (row.intelligence?.independentSignalCount ?? 0) >= 2 || row.role === 'root_main')).toBe(true);
+    expect(result.deployments.every((row) => row.intelligence && row.intelligence.importanceScore >= 0)).toBe(true);
     expect(result.members).toContainEqual(expect.objectContaining({ address: BRIDGE_CONTRACT, role: 'service_router_node', relationshipConfidence: 0 }));
     expect(result.counts).toMatchObject({ directReceivers: 1, multiHopWallets: 1, bridgeDestinations: 1, tokenDeployments: 3, possibleLinks: 0 });
     expect(loaded.id).toBe(result.id);

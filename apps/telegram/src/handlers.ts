@@ -9,13 +9,7 @@ import {
   type WalletInvestigationResult
 } from '@flowradar/db';
 import { isAuthorized } from './auth';
-import {
-  buildInvestigationPresentation,
-  type InvestigationPresentation,
-  type PresentedClusterMember,
-  type PresentedFinding,
-  type PresentedRelationGroup
-} from './investigationPresentation';
+import { renderInvestigationReport } from './investigationRenderer';
 import { callback, exportKeyboard, h, navKeyboard, renderProfitable, short } from './render';
 import type { InlineKeyboard, TelegramApi, TelegramCallbackQuery, TelegramMessage, TelegramUpdate } from './types';
 
@@ -275,6 +269,11 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
 }
 
 export function renderInvestigation(investigation: WalletInvestigationResult, state: OperatorSessionState, sessionId: string) {
+  return renderInvestigationReport(investigation, state, sessionId);
+}
+
+/* Retired raw-relation renderer retained temporarily for review history.
+export function renderInvestigationRawLegacy(investigation: WalletInvestigationResult, state: OperatorSessionState, sessionId: string) {
   const presentation = buildInvestigationPresentation(investigation);
   const view = state.investigationView ?? 'summary';
   const page = state.page || 1;
@@ -520,6 +519,7 @@ function chainLabel(chain: string) {
   if (chain === 'BASE') return 'Base';
   return chain;
 }
+*/
 
 function renderInvestigationLegacy(investigation: WalletInvestigationResult, state: OperatorSessionState, sessionId: string) {
   const view = state.investigationView ?? 'summary';
@@ -727,7 +727,7 @@ function workflowView(workflow: OperatorWorkflow): OperatorSessionState['investi
 }
 function investigationView(value: string): NonNullable<OperatorSessionState['investigationView']> {
   return value === 'paths' || value === 'priority' || value === 'cluster' || value === 'alts' || value === 'deployments'
-    || value === 'evidence' || value === 'bridges' || value === 'advanced' || value === 'receivers' ? value : 'summary';
+    || value === 'evidence' || value === 'bridges' || value === 'more' || value === 'advanced' || value === 'receivers' ? value : 'summary';
 }
 interface TokenPnlTelegramRow {
   chain: string;

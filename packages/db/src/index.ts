@@ -70,4 +70,5 @@ export * from './operator/export';
 export * from './operator/service';
 export * from './intelligence';
 export * from './investigation/types';
+export * from './investigation/intelligence';
 export * from './investigation/walletInvestigation';

@@ -54,6 +54,42 @@ export interface InvestigationPath {
   contradictingEvidence: unknown;
 }
 
+export type InvestigationIntelligenceTier = 'S' | 'A' | 'B' | 'C';
+export type InvestigationTrackingPriority = 'track_now' | 'watch' | 'context_only' | 'exclude';
+
+export interface InvestigationEvidenceSignal {
+  code: string;
+  label: string;
+  strength: number;
+  weight: number;
+  receiptCount: number;
+}
+
+export interface InvestigationMemberIntelligence {
+  evidenceScore: number;
+  historicalAlphaScore: number;
+  wakeUpPotential: number;
+  tier: InvestigationIntelligenceTier;
+  trackingPriority: InvestigationTrackingPriority;
+  independentSignalCount: number;
+  clusterConclusion: 'supported' | 'probable' | 'possible' | 'unconfirmed' | 'infrastructure';
+  evidenceSignals: InvestigationEvidenceSignal[];
+  whyImportant: string[];
+  contradictions: string[];
+  historicalCoverage: 'full' | 'partial' | 'minimal' | 'unavailable';
+  metrics: {
+    transferCount: number;
+    uniqueTokensAfterFunding: number;
+    completedPositions: number | null;
+    winRate: number | null;
+    repeatRunnerCount: number | null;
+    realizedPnlUsd: number | null;
+    medianEntryMcapUsd: number | null;
+    maxCoveredDormantDays: number | null;
+  };
+  scoreVersion: number;
+}
+
 export interface InvestigationMember {
   chain: ChainId;
   address: string;
@@ -66,6 +102,16 @@ export interface InvestigationMember {
   firstLinkedAt: string;
   lastLinkedAt: string;
   observationOnly: boolean;
+  intelligence?: InvestigationMemberIntelligence;
+}
+
+export interface InvestigationDeploymentIntelligence {
+  athMcapUsd: number | null;
+  athBasis: 'historical_universe' | 'token_lifecycle' | 'token_enrichment' | 'local_observed' | 'unavailable';
+  roi: number | null;
+  roiBasis: 'ath_over_entry_potential' | 'provider_claimed' | 'unavailable';
+  importanceScore: number;
+  whyImportant: string[];
 }
 
 export interface InvestigationDeployment {
@@ -84,6 +130,7 @@ export interface InvestigationDeployment {
   capitalRoute: InvestigationHop[];
   holdingStatus: string;
   evidenceTier: string;
+  intelligence?: InvestigationDeploymentIntelligence;
 }
 
 export interface WalletInvestigationResult {
