@@ -59,3 +59,4 @@ export * from './runnermining/goldenCohort';
 export * from './runnermining/replay';
 export * from './runnermining/entityGraph';
 export * from './runnermining/pipeline';
+export * from './runnermining/liveRecovery';

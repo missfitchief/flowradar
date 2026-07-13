@@ -2548,3 +2548,72 @@ model CapitalChain {
   @@index([sourceEntityKey])
   @@map("capital_chains")
 }
+
+/// Per-receiver post-receipt activity backfill result (live-recovery sprint).
+/// One row per enrolled receiver recording whether a token deployment was
+/// observed after its funding receipt, read from local + live-collected
+/// activity. Honest terminal status per receiver. SHADOW-ONLY.
+model ReceiverActivityBackfill {
+  id                    String    @id @default(cuid())
+  chain                 ChainId
+  receiverAddress       String
+  sourceEntityKey       String
+  sourceWallets         String[]
+  firstReceiptTs        DateTime
+  backfillStart         DateTime
+  backfillEnd           DateTime
+  /// deployment_found | covered_no_post_receipt_buy | partial_coverage |
+  /// retryable_provider_failure | unavailable | invalid
+  status                String
+  source                String
+  hasLiveWalletRow      Boolean   @default(false)
+  postReceiptTxObserved Int       @default(0)
+  postReceiptEdges      Int       @default(0)
+  firstActivityTs       DateTime?
+  firstBuyTs            DateTime?
+  firstBuyMint          String?
+  fundingToBuyDelaySec  Int?
+  boughtKnownUsd        Decimal?  @db.Decimal(24, 4)
+  entryMcapUsd          Decimal?  @db.Decimal(24, 4)
+  receiverClass         String?
+  relationshipTier      String?
+  reasonCodes           String[]
+  receiptsJson          Json
+  caveats               String[]
+  engineVersion         Int
+  computedAt            DateTime
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([chain, receiverAddress])
+  @@index([status])
+  @@map("receiver_activity_backfills")
+}
+
+/// Canonical token metadata (live-recovery sprint) — resolved name/symbol/logo
+/// separate from the ingest placeholder (which stores a mint prefix). NULL
+/// name/symbol means UNAVAILABLE (never a mint prefix). Bounded + resumable
+/// provider fetch; availability + source labeled honestly. SHADOW-ONLY.
+model TokenMetadata {
+  id           String    @id @default(cuid())
+  chain        ChainId
+  mint         String
+  name         String?
+  symbol       String?
+  logoUri      String?
+  /// helius_das | birdeye_overview | onchain_metaplex | unavailable
+  source       String
+  /// resolved | placeholder_only | retryable | unavailable
+  availability String
+  lastError    String?
+  fetchedAt    DateTime?
+  reasonCodes  String[]
+  engineVersion Int
+  computedAt   DateTime
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([chain, mint])
+  @@index([availability])
+  @@map("token_metadata")
+}
