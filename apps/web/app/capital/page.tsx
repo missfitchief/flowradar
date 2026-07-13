@@ -16,13 +16,23 @@ const TIER_LABEL: Record<string, string> = {
 };
 
 export default async function CapitalPage() {
-  const [paths, receivers] = await Promise.all([
+  const [paths, receivers, rotations, deployments] = await Promise.all([
     prisma.capitalOutflowPath.findMany({
       orderBy: [{ evidenceTier: 'asc' }, { firstTransferTs: 'desc' }],
       take: 100
     }),
     prisma.receiverEnrollment.findMany({
       orderBy: [{ deployedTokenCount: 'desc' }, { receiverAddress: 'asc' }],
+      take: 50
+    }),
+    prisma.capitalChain.findMany({
+      where: { kind: 'profit_rotation' },
+      orderBy: [{ realizedProfitUsd: 'desc' }, { sourceWallet: 'asc' }],
+      take: 50
+    }),
+    prisma.capitalChain.findMany({
+      where: { kind: 'deployment' },
+      orderBy: [{ fundingTs: 'desc' }],
       take: 50
     })
   ]);
@@ -36,6 +46,77 @@ export default async function CapitalPage() {
 
   return (
     <div className="space-y-6">
+      {(deployments.length > 0 || rotations.length > 0) && (
+        <section>
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">
+            End-to-end chains (entity → capital → next token)
+          </h2>
+          {deployments.length > 0 && (
+            <div className="mb-4 overflow-x-auto rounded-xl border border-zinc-800">
+              <div className="border-b border-zinc-800 bg-zinc-900/70 px-3 py-2 text-xs text-zinc-400">
+                Capital deployment — a funded receiver later bought a token
+              </div>
+              <table className="w-full text-left text-sm">
+                <thead className="text-xs text-zinc-500">
+                  <tr>
+                    <th className="px-3 py-2">Source entity</th>
+                    <th className="px-3 py-2">Receiver</th>
+                    <th className="px-3 py-2">Token bought</th>
+                    <th className="px-3 py-2 text-right">Value</th>
+                    <th className="px-3 py-2 text-right">Indep. entities</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/60">
+                  {deployments.map((c) => (
+                    <tr key={c.id} className="hover:bg-zinc-900/40">
+                      <td className="px-3 py-2"><Link href={`/entity/${c.sourceWallet}`} className="font-mono text-xs text-sky-400 hover:underline">{shortAddr(c.sourceWallet)}</Link></td>
+                      <td className="px-3 py-2 font-mono text-xs">{c.receiverWallet ? shortAddr(c.receiverWallet) : '—'}</td>
+                      <td className="px-3 py-2"><Link href={`/token/${c.tokenBought}`} className="text-sky-400 hover:underline">{c.tokenBoughtSymbol ? `$${c.tokenBoughtSymbol}` : shortAddr(c.tokenBought ?? '')}</Link></td>
+                      <td className="px-3 py-2 text-right">{c.knownValueUsd === null ? 'unknown' : fmtUsd(Number(c.knownValueUsd))}</td>
+                      <td className="px-3 py-2 text-right">{c.independentEntitiesOnToken}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {rotations.length > 0 && (
+            <div className="overflow-x-auto rounded-xl border border-zinc-800">
+              <div className="border-b border-zinc-800 bg-zinc-900/70 px-3 py-2 text-xs text-zinc-400">
+                Profit rotation — realized runner profit followed by a buy into another token (same wallet)
+              </div>
+              <table className="w-full text-left text-sm">
+                <thead className="text-xs text-zinc-500">
+                  <tr>
+                    <th className="px-3 py-2">Wallet</th>
+                    <th className="px-3 py-2">Profit from</th>
+                    <th className="px-3 py-2 text-right">Realized profit</th>
+                    <th className="px-3 py-2">Rotated into</th>
+                    <th className="px-3 py-2 text-right">Indep. entities</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/60">
+                  {rotations.map((c) => (
+                    <tr key={c.id} className="hover:bg-zinc-900/40">
+                      <td className="px-3 py-2"><Link href={`/entity/${c.sourceWallet}`} className="font-mono text-xs text-sky-400 hover:underline">{shortAddr(c.sourceWallet)}</Link></td>
+                      <td className="px-3 py-2"><Link href={`/token/${c.sourceToken}`} className="font-mono text-xs text-sky-400 hover:underline">{shortAddr(c.sourceToken ?? '')}</Link></td>
+                      <td className="px-3 py-2 text-right text-emerald-400">{c.realizedProfitUsd === null ? 'unknown' : fmtUsd(Number(c.realizedProfitUsd))}</td>
+                      <td className="px-3 py-2"><Link href={`/token/${c.tokenBought}`} className="text-sky-400 hover:underline">{c.tokenBoughtSymbol ? `$${c.tokenBoughtSymbol}` : shortAddr(c.tokenBought ?? '')}</Link></td>
+                      <td className="px-3 py-2 text-right">{c.independentEntitiesOnToken}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="mt-2 text-xs text-zinc-500">
+            Profit rotation is inferred from local priced positions (realized profit then a later buy) — not proof the
+            exact dollars moved. Capital deployment is near-empty here: receiver wallets have almost no post-receipt
+            trade coverage in this observation window (an honest data gap, not a null result).
+          </p>
+        </section>
+      )}
+
       <div>
         <h1 className="text-xl font-semibold">Capital Movements</h1>
         <p className="mt-1 max-w-3xl text-sm text-zinc-400">

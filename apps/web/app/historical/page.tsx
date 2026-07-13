@@ -35,6 +35,13 @@ export default async function HistoricalPage() {
       select: { mint: true, eventKind: true, classification: true }
     })
   ]);
+  const extractionRows = await prisma.topPnlExtractionStatus.findMany({
+    where: { chain: 'SOLANA', mint: { in: mints } },
+    select: { mint: true, status: true }
+  });
+  const extractionOf = new Map(extractionRows.map((e) => [e.mint, e.status]));
+  const extractionCounts: Record<string, number> = {};
+  for (const e of extractionRows) extractionCounts[e.status] = (extractionCounts[e.status] ?? 0) + 1;
   const enrichOf = new Map(enrichments.map((e) => [e.mint, e]));
   const symbolOf = new Map(tokens.map((t) => [t.address, t.symbol]));
   const candsOf = new Map<string, { total: number; verified: number }>();
@@ -71,6 +78,13 @@ export default async function HistoricalPage() {
           candidates extracted. Click any token for its top-PnL wallets, dormant/fresh entries, funding paths and
           whether the same entities are active again.
         </p>
+        <p className="mt-2 text-xs text-zinc-400">
+          <span className="font-medium text-zinc-300">Extraction outcomes: </span>
+          {Object.entries(extractionCounts)
+            .sort((a, b) => b[1] - a[1])
+            .map(([s, n]) => `${s.replaceAll('_', ' ')}: ${n}`)
+            .join(' · ') || 'not computed'}
+        </p>
       </div>
 
       <div className="overflow-x-auto rounded-xl border border-zinc-800">
@@ -80,6 +94,7 @@ export default async function HistoricalPage() {
               <th className="px-3 py-2">Token</th>
               <th className="px-3 py-2 text-right">ATH market cap</th>
               <th className="px-3 py-2">ATH date</th>
+              <th className="px-3 py-2">Extraction</th>
               <th className="px-3 py-2 text-right">Top-PnL candidates</th>
               <th className="px-3 py-2 text-right">Locally verified</th>
               <th className="px-3 py-2">Replay outcome</th>
@@ -98,6 +113,7 @@ export default async function HistoricalPage() {
                   {r.enr?.athMcapUsd ? fmtUsd(Number(r.enr.athMcapUsd)) : <span className="text-zinc-500">unenriched</span>}
                 </td>
                 <td className="px-3 py-2 text-xs">{r.enr?.athTs ? r.enr.athTs.toISOString().slice(0, 10) : '—'}</td>
+                <td className="px-3 py-2 text-xs">{(extractionOf.get(r.mint) ?? 'pending').replaceAll('_', ' ')}</td>
                 <td className="px-3 py-2 text-right">{r.cands.total}</td>
                 <td className="px-3 py-2 text-right">{r.cands.verified}</td>
                 <td className="px-3 py-2 text-xs">{r.replay ? r.replay.replaceAll('_', ' ') : '—'}</td>
