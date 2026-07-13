@@ -2837,6 +2837,141 @@ model UnifiedEntityAddress {
   @@map("unified_entity_addresses")
 }
 
+/// Persisted CA -> ranked wallet intelligence. Historical-token analysis is
+/// discovery evidence only and never turns the source token into a live alert.
+model TokenWalletIntelligence {
+  id                        String   @id @default(cuid())
+  chain                     ChainId
+  tokenAddress              String
+  walletAddress             String
+  rank                      Int
+  status                    String   @default("observation_only")
+  role                      String
+  entityKey                 String?
+  qualityScore              Float
+  evidenceConfidence        Float
+  localBuyCount             Int      @default(0)
+  localSellCount            Int      @default(0)
+  localTransferCount        Int      @default(0)
+  localRealizedPnlUsd       Decimal? @db.Decimal(24, 4)
+  entryTs                   DateTime?
+  exitTs                    DateTime?
+  dormant7d                 Boolean?
+  dormant14d                Boolean?
+  dormant30d                Boolean?
+  dormant90d                Boolean?
+  funderAddress             String?
+  funderTxHash              String?
+  completedPositions        Int      @default(0)
+  winCount                  Int      @default(0)
+  lossCount                 Int      @default(0)
+  unresolvedPositions       Int      @default(0)
+  winRate                   Float?
+  evUsd                     Float?
+  repeatRunnerCount         Int?
+  oneWinnerDependence       Float?
+  coverage                  String
+  supportingEvidenceJson    Json
+  contradictingEvidenceJson Json
+  monitoringEnrolled        Boolean  @default(false)
+  engineVersion             Int
+  computedAt                DateTime
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  @@unique([chain, tokenAddress, walletAddress])
+  @@index([chain, tokenAddress, qualityScore])
+  @@index([chain, walletAddress])
+  @@map("token_wallet_intelligence")
+}
+
+/// Persisted wallet -> related wallet/capital path projection. Only rows with
+/// safeEntityLink may merge entities; bridge/CEX inference remains possible.
+model WalletFlowRelationship {
+  id                        String   @id @default(cuid())
+  sourceChain               ChainId
+  sourceWallet              String
+  sourceEntityKey           String?
+  relatedChain              ChainId
+  relatedWallet             String
+  relatedEntityKey          String?
+  role                      String
+  route                     String
+  hops                      Int
+  transferCount             Int      @default(0)
+  firstTransferTs           DateTime
+  lastTransferTs            DateTime
+  relationshipConfidence    Float
+  safeEntityLink            Boolean  @default(false)
+  transferReceiptIds        String[]
+  bridgeCorrelationIds      String[]
+  supportingEvidenceJson    Json
+  contradictingEvidenceJson Json
+  tradedTokensJson          Json
+  pnlMetricsJson            Json
+  status                    String   @default("observation_only")
+  engineVersion             Int
+  computedAt                DateTime
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  @@unique([sourceChain, sourceWallet, relatedChain, relatedWallet, route])
+  @@index([relatedChain, relatedWallet])
+  @@index([sourceEntityKey])
+  @@index([safeEntityLink])
+  @@map("wallet_flow_relationships")
+}
+
+/// New activity alert built only from new token-buy events by monitored
+/// wallets/entities. Historical membership alone can never create a row.
+model TrackedTokenActivationAlert {
+  id                String   @id @default(cuid())
+  dedupeKey         String   @unique
+  chain             ChainId
+  tokenAddress      String
+  alertType         String
+  activatedAt       DateTime
+  trackedWallets    String[]
+  entityKeys        String[]
+  trackedWalletCount Int     @default(0)
+  independentEntityCount Int @default(0)
+  sourceEventIds    String[]
+  confidence        Float
+  historicalToken  Boolean  @default(false)
+  evidenceJson      Json
+  caveats           String[]
+  status            String   @default("active")
+  engineVersion     Int
+  computedAt        DateTime
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([chain, tokenAddress, activatedAt])
+  @@index([status, activatedAt])
+  @@map("tracked_token_activation_alerts")
+}
+
+/// Operational receipt for continuous activation scans, including honest
+/// empty runs and historical rows skipped for lack of new activity.
+model TrackedActivationScanRun {
+  id                       String   @id
+  startedAt                DateTime
+  completedAt              DateTime?
+  status                   String
+  sinceTs                  DateTime
+  trackedWallets           Int      @default(0)
+  newBuyEvents             Int      @default(0)
+  tokensConsidered         Int      @default(0)
+  alertsCreated            Int      @default(0)
+  historicalWithoutActivitySkipped Int @default(0)
+  errorCount               Int      @default(0)
+  metadataJson             Json
+
+  @@index([startedAt])
+  @@index([status])
+  @@map("tracked_activation_scan_runs")
+}
+
 /// Persisted operator watchlist. Telegram user/chat ids are decimal strings so
 /// no JavaScript-number or database-width truncation can occur.
 model OperatorWatch {

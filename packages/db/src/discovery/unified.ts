@@ -30,6 +30,10 @@ export interface HistoricalTraderProvider {
 
 export interface UnifiedDiscoveryOptions {
   chains?: ChainId[];
+  /** Optional exact CA filter for an operator-triggered historical analysis.
+   * It bypasses the $10M universe-status gate but never promotes the token to
+   * a live opportunity; the persisted universe row remains `candidate`. */
+  tokenAddresses?: string[];
   limit?: number;
   perTokenLocalCap?: number;
   perTokenProviderCap?: number;
@@ -196,6 +200,7 @@ export async function runUnifiedProfitableWalletDiscovery(
   const providerCap = clamp(options.perTokenProviderCap ?? 20, 1, 100);
   const maxTrades = clamp(options.maxTradesPerToken ?? 10_000, 100, 250_000);
   const requestBudget = clamp(options.requestBudget ?? 500, 0, 50_000);
+  const targetAddresses = options.tokenAddresses?.map((address) => address.trim()).filter(Boolean);
   let providerRequests = 0;
 
   const report: UnifiedDiscoveryReport = {
@@ -226,7 +231,9 @@ export async function runUnifiedProfitableWalletDiscovery(
     const universe = await prisma.historicalTokenUniverse.findMany({
       where: {
         chain: { in: chains },
-        historicalWinnerStatus: { in: ['verified_above_10m', 'operator_core'] },
+        ...(targetAddresses?.length
+          ? { tokenAddress: { in: targetAddresses } }
+          : { historicalWinnerStatus: { in: ['verified_above_10m', 'operator_core'] } }),
         processingStatus: { in: statuses },
         OR: [{ nextRetryAt: null }, { nextRetryAt: { lte: now } }]
       },

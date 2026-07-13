@@ -32,13 +32,14 @@ export async function buildUnifiedEntityGraph(
   const nodes = new Map<NodeKey, NodeEvidence>();
   const links: LinkEvidence[] = [];
 
-  const [profiles, roles, roots, dna, candidates, correlations] = await Promise.all([
+  const [profiles, roles, roots, dna, candidates, correlations, flowRelationships] = await Promise.all([
     prisma.entityDnaProfile.findMany({ orderBy: [{ chain: 'asc' }, { entityKey: 'asc' }], take: maxProfiles }),
     prisma.walletRoleAssignment.findMany({ orderBy: [{ chain: 'asc' }, { walletAddress: 'asc' }, { confidence: 'desc' }], take: maxRoles }),
     prisma.lineageRoot.findMany({ take: maxProfiles, select: { wallet: { select: { chain: true, address: true } }, source: true, label: true } }),
     prisma.walletDnaProfile.findMany({ orderBy: [{ chain: 'asc' }, { walletAddress: 'asc' }], take: maxProfiles, select: { chain: true, walletAddress: true, confidence: true, discoveryJson: true } }),
     prisma.tokenTopPnlCandidate.findMany({ orderBy: [{ chain: 'asc' }, { walletAddress: 'asc' }, { confidence: 'desc' }], distinct: ['chain', 'walletAddress'], take: maxProfiles, select: { chain: true, walletAddress: true, confidence: true, validation: true, source: true } }),
-    prisma.massBridgeCorrelation.findMany({ where: { status: 'verified' }, orderBy: { correlatedAt: 'desc' }, take: maxBridgePairs })
+    prisma.massBridgeCorrelation.findMany({ where: { status: 'verified' }, orderBy: { correlatedAt: 'desc' }, take: maxBridgePairs }),
+    prisma.walletFlowRelationship.findMany({ orderBy: [{ computedAt: 'desc' }, { id: 'asc' }], take: maxRoles })
   ]);
 
   for (const profile of profiles) {
@@ -55,6 +56,27 @@ export async function buildUnifiedEntityGraph(
   for (const root of roots) addNode(nodes, root.wallet.chain, normalizeAddress(root.wallet.chain, root.wallet.address), 'root_main', 1, 'operator_seed', { source: root.source, label: root.label });
   for (const row of dna) addNode(nodes, row.chain, normalizeAddress(row.chain, row.walletAddress), 'execution_wallet', normalizeConfidence(row.confidence), 'profitable_wallet_discovery', { discovery: row.discoveryJson });
   for (const row of candidates) addNode(nodes, row.chain, normalizeAddress(row.chain, row.walletAddress), 'execution_wallet', normalizeConfidence(row.confidence), 'top_pnl_discovery', { validation: row.validation, source: row.source });
+  for (const relationship of flowRelationships) {
+    const sourceAddress = normalizeAddress(relationship.sourceChain, relationship.sourceWallet);
+    const relatedAddress = normalizeAddress(relationship.relatedChain, relationship.relatedWallet);
+    addNode(nodes, relationship.sourceChain, sourceAddress, 'unknown_related_wallet', normalizeConfidence(relationship.relationshipConfidence), relationship.route, { relationshipId: relationship.id, side: 'source' });
+    addNode(nodes, relationship.relatedChain, relatedAddress, relationship.role, normalizeConfidence(relationship.relationshipConfidence), relationship.route, {
+      relationshipId: relationship.id,
+      transferReceiptIds: relationship.transferReceiptIds,
+      bridgeCorrelationIds: relationship.bridgeCorrelationIds,
+      supporting: relationship.supportingEvidenceJson,
+      contradicting: relationship.contradictingEvidenceJson
+    });
+    if (relationship.safeEntityLink && ['direct_transfer', 'multi_hop_transfer', 'exact_bridge'].includes(relationship.route) && relationship.role !== 'service_router_cex_node') {
+      links.push({
+        a: nodeKey(relationship.sourceChain, sourceAddress),
+        b: nodeKey(relationship.relatedChain, relatedAddress),
+        confidence: normalizeConfidence(relationship.relationshipConfidence),
+        kind: `wallet_flow:${relationship.route}`,
+        receipt: { relationshipId: relationship.id, transferReceiptIds: relationship.transferReceiptIds, bridgeCorrelationIds: relationship.bridgeCorrelationIds }
+      });
+    }
+  }
 
   // Same 20-byte account on EVM networks is continuity evidence, not a
   // same-token/router heuristic and not an identity claim. Service nodes are
@@ -81,12 +103,20 @@ export async function buildUnifiedEntityGraph(
     const eventIds = [...new Set(correlations.flatMap((x) => [x.sourceEventId, x.destinationEventId]))];
     const events = await prisma.massTransactionEvent.findMany({ where: { eventId: { in: eventIds } } });
     const byId = new Map(events.map((event) => [event.eventId, event]));
+    const infrastructureKeys = await loadInfrastructureKeys(prisma, events.flatMap((event) => [
+      { chain: event.chain, address: normalizeAddress(event.chain, event.actorAddress ?? event.fromAddress) },
+      { chain: event.chain, address: normalizeAddress(event.chain, event.toAddress) }
+    ]));
     for (const correlation of correlations) {
       const source = byId.get(correlation.sourceEventId);
       const destination = byId.get(correlation.destinationEventId);
       if (!source || !destination || source.chain === destination.chain) continue;
       const sourceAddress = normalizeAddress(source.chain, source.actorAddress ?? source.fromAddress);
       const destinationAddress = normalizeAddress(destination.chain, destination.actorAddress ?? destination.toAddress);
+      // A verified bridge receipt proves a route only between end-user
+      // endpoints. A registry-known bridge/router/CEX/contract terminal must
+      // never become a union-find connector between otherwise unrelated users.
+      if (infrastructureKeys.has(nodeKey(source.chain, sourceAddress)) || infrastructureKeys.has(nodeKey(destination.chain, destinationAddress))) continue;
       const bridgeConfidence = Math.max(0.5, normalizeConfidence(correlation.confidence));
       addNode(nodes, source.chain, sourceAddress, source.sourceRole ? mapRole(source.sourceRole) : 'funding_wallet', bridgeConfidence, 'verified_official_bridge', { eventId: source.eventId });
       addNode(nodes, destination.chain, destinationAddress, 'bridge_linked_receiver', bridgeConfidence, 'verified_official_bridge', { eventId: destination.eventId });
@@ -183,6 +213,19 @@ function unifiedEntityKey(members: NodeKey[]) { return `ue_${createHash('sha256'
 function normalizeConfidence(value: number) { return Math.max(0, Math.min(1, value > 1 ? value / 100 : value)); }
 function clamp(value: number, min: number, max: number) { return Math.max(min, Math.min(max, Math.trunc(value))); }
 function json(value: unknown): Prisma.InputJsonValue { return value as Prisma.InputJsonValue; }
+async function loadInfrastructureKeys(prisma: PrismaClient, rows: Array<{ chain: ChainId; address: string }>) {
+  const result = new Set<NodeKey>();
+  for (const chain of ['SOLANA', 'ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'] as ChainId[]) {
+    const addresses = [...new Set(rows.filter((row) => row.chain === chain).map((row) => row.address))].sort();
+    for (let index = 0; index < addresses.length; index += 5_000) {
+      const registryRows = await prisma.addressRegistry.findMany({
+        where: { chain, address: { in: addresses.slice(index, index + 5_000) } }, select: { chain: true, address: true }
+      });
+      for (const row of registryRows) result.add(nodeKey(row.chain, row.address));
+    }
+  }
+  return result;
+}
 
 class UnionFind {
   private readonly parent = new Map<NodeKey, NodeKey>();

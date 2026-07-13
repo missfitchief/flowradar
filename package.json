@@ -22,6 +22,7 @@
     "tracker:wormhole-pilot": "tsx scripts/wormhole-tracker-pilot.mts",
     "discovery:run": "tsx scripts/operator-discovery.mts",
     "operator:pilot": "tsx scripts/operator-service-pilot.mts",
+    "backend:pilot": "tsx scripts/backend-intelligence-pilot.mts",
     "telegram:smoke": "tsx scripts/telegram-smoke.mts",
     "test": "vitest run",
     "typecheck": "tsc -b apps/worker apps/telegram packages/core packages/db packages/providers && npm run typecheck -w apps/web",

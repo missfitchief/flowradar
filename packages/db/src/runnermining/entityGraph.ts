@@ -561,7 +561,9 @@ export async function buildEntityGraph(
   // lose data. Skipped (never a silent partial wipe) when any input was capped.
   if (report.errors === 0 && !anyTruncation) {
     const [staleRoles, staleEntities] = await Promise.all([
-      prisma.walletRoleAssignment.deleteMany({ where: { chain, computedAt: { lt: now } } }),
+      // Engine-v2 wallet-flow roles are owned by the cross-chain mass-flow
+      // projector and must not be deleted by this legacy same-chain rebuild.
+      prisma.walletRoleAssignment.deleteMany({ where: { chain, engineVersion: { lte: ENTITY_GRAPH_ENGINE_VERSION }, computedAt: { lt: now } } }),
       prisma.entityDnaProfile.deleteMany({ where: { chain, computedAt: { lt: now } } })
     ]);
     report.staleRolesRemoved = staleRoles.count;

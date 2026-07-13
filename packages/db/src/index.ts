@@ -68,3 +68,4 @@ export * from './discovery/unifiedEntity';
 export * from './operator/types';
 export * from './operator/export';
 export * from './operator/service';
+export * from './intelligence';

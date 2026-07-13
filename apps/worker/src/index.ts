@@ -78,6 +78,7 @@ import * as tokenTopTraderBackfill from './jobs/tokenTopTraderBackfill';
 import * as duneQuery from './jobs/duneQuery';
 import * as socialIngest from './jobs/socialIngest';
 import * as externalConfluence from './jobs/externalConfluence';
+import * as trackedActivation from './jobs/trackedActivation';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const HOUR_MS = 60 * 60 * 1000;
@@ -226,6 +227,14 @@ async function main(): Promise<void> {
     {
       name: 'monitoringScheduler',
       run: monitoringScheduler.run,
+      intervalSec: settings.intervals.walletActivitySec
+    },
+    // Reads only newly persisted token-buy events from the observation
+    // universe. Historical winners choose wallets; fresh transactions choose
+    // tokens. The scanner persists both alerts and honest empty run receipts.
+    {
+      name: 'trackedActivation',
+      run: trackedActivation.run,
       intervalSec: settings.intervals.walletActivitySec
     },
     // stealthAccumulation (P2, 2026-07-11): SHADOW-ONLY lifecycle snapshots
