@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
 import { OperatorService, prisma } from '@flowradar/db';
-import { createBirdeyeTokenTopTraders, createGmgnTokenTopTraders, type TokenTopTradersProvider } from '@flowradar/providers';
+import { createBirdeyeTokenTopTraders, createGmgnTokenTopTraders, createLiveWalletCapitalScanner, type TokenTopTradersProvider } from '@flowradar/providers';
 import { createTelegramApi } from './api';
 import { parseAllowedUserIds } from './auth';
 import { runLongPolling } from './poller';
@@ -35,10 +35,11 @@ export async function main() {
     SOLANA: { name: 'telegram_real_top_traders', adapter: solanaTopTraders, windowsComparable: false, timeFrame: '24h' as const },
     ...(birdeyeTopTraders ? { BSC: { name: 'birdeye_top_traders', adapter: birdeyeTopTraders, windowsComparable: false, timeFrame: '24h' as const } } : {})
   };
+  const walletCapitalScanner = createLiveWalletCapitalScanner(process.env);
   const controller = new AbortController();
   const shutdown = () => controller.abort();
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
-  try { await runLongPolling({ service: new OperatorService(prisma, { tokenTopTraderProviders }), api: createTelegramApi(token), allowedUserIds, signal: controller.signal }); }
+  try { await runLongPolling({ service: new OperatorService(prisma, { tokenTopTraderProviders, walletCapitalScanner }), api: createTelegramApi(token), allowedUserIds, signal: controller.signal }); }
   finally { await prisma.$disconnect(); }
 }
 

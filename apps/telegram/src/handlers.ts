@@ -1,10 +1,10 @@
-import { OperatorService, type OperatorSessionState, type OperatorWorkflow, type ProfitableSort } from '@flowradar/db';
+import { OperatorService, type OperatorSessionState, type OperatorWorkflow, type ProfitableSort, type WalletCapitalRelation, type WalletCapitalSummary } from '@flowradar/db';
 import { isAuthorized } from './auth';
-import { callback, exportKeyboard, h, navKeyboard, renderBridges, renderFlows, renderProfitable, renderWallet, short } from './render';
+import { callback, exportKeyboard, h, navKeyboard, renderBridges, renderFlows, renderProfitable, short } from './render';
 import type { InlineKeyboard, TelegramApi, TelegramCallbackQuery, TelegramMessage, TelegramUpdate } from './types';
 
 const COMMANDS = [
-  { command: 'wallet', description: 'Wallet summary (Solana/EVM)' }, { command: 'token', description: 'Token + top-PnL wallets' },
+  { command: 'wallet', description: 'Live capital tracing (Solana/EVM)' }, { command: 'token', description: 'Token + top-PnL wallets' },
   { command: 'profitable', description: 'Automatic profitable wallets' }, { command: 'entity', description: 'Entity and linked wallets' },
   { command: 'flow', description: 'Capital-flow history' }, { command: 'bridges', description: 'Official bridge history' },
   { command: 'watch', description: 'Persist a wallet/entity watch' }, { command: 'recent', description: 'Recent relevant events' },
@@ -121,6 +121,11 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
     if (parsed.action === 'choose') {
       const workflow = parsed.value === 'token' ? 'token' : 'wallet';
       const next = await service.createSession(userId, chatId, workflow, { ...state, page: 1 });
+      if (workflow === 'wallet') {
+        await api.answerCallbackQuery(query.id, 'Capital tracing started');
+        await runWalletWorkflow(service, api, userId, chatId, required({ ...state, page: 1 }), query);
+        return;
+      }
       const rendered = await renderWorkflow(service, workflow, { ...state, page: 1 }, next.id);
       await editIfChanged(api, query, rendered.text, rendered.keyboard);
       await api.answerCallbackQuery(query.id);
@@ -155,9 +160,9 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
       if (!address) throw new Error('Wallet is no longer available on this entity page');
       const childState = defaultState(address);
       const child = await service.createSession(userId, chatId, 'wallet', childState);
-      const rendered = await renderWorkflow(service, 'wallet', childState, child.id);
-      await editIfChanged(api, query, rendered.text, rendered.keyboard);
-      await api.answerCallbackQuery(query.id);
+      void child;
+      await api.answerCallbackQuery(query.id, 'Capital tracing started');
+      await runWalletWorkflow(service, api, userId, chatId, address, query);
       return;
     }
     if (parsed.action === 'page') state.page = Math.max(1, Number(parsed.value) || 1);
@@ -167,6 +172,11 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
     else if (parsed.action === 'view') {
       const workflow = parsed.value as OperatorWorkflow;
       const next = await service.createSession(userId, chatId, workflow, { ...state, page: 1 });
+      if (workflow === 'wallet') {
+        await api.answerCallbackQuery(query.id, 'Capital tracing started');
+        await runWalletWorkflow(service, api, userId, chatId, required({ ...state, page: 1 }), query);
+        return;
+      }
       const rendered = await renderWorkflow(service, workflow, { ...state, page: 1 }, next.id);
       await editIfChanged(api, query, rendered.text, rendered.keyboard);
       await api.answerCallbackQuery(query.id);
@@ -184,6 +194,10 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
 async function sendWorkflow(service: OperatorService, api: TelegramApi, userId: string, chatId: string, workflow: OperatorWorkflow, target?: string) {
   const state = defaultState(target);
   const session = await service.createSession(userId, chatId, workflow, state);
+  if (workflow === 'wallet') {
+    await runWalletWorkflow(service, api, userId, chatId, required(state));
+    return;
+  }
   const rendered = await renderWorkflow(service, workflow, state, session.id);
   await api.sendMessage(chatId, rendered.text, rendered.keyboard);
 }
@@ -191,8 +205,8 @@ async function sendWorkflow(service: OperatorService, api: TelegramApi, userId: 
 async function renderWorkflow(service: OperatorService, workflow: OperatorWorkflow, state: OperatorSessionState, sessionId: string): Promise<{ text: string; keyboard: InlineKeyboard }> {
   const page = state.page || 1; const size = state.pageSize || 10;
   if (workflow === 'wallet') {
-    const value = await service.walletSummary(required(state));
-    return { text: renderWallet(value), keyboard: navKeyboard(sessionId, 1, false, [[{ text: 'Capital flow', callback_data: callback('view', sessionId, 'flow') }, { text: 'Entity / alts', callback_data: callback('view', sessionId, 'entity') }], [{ text: 'Bridges', callback_data: callback('view', sessionId, 'bridges') }, { text: 'Watch wallet', callback_data: callback('watch', sessionId, 'on') }]]) };
+    const messages = renderWalletCapitalMessages(await service.walletCapitalSummary(required(state)));
+    return messages[0];
   }
   if (workflow === 'token') {
     const tokenAddress = required(state);
@@ -224,6 +238,138 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
   const text = [`<b>Recent relevant events</b> · page ${page} · ${value.total} total`, ...value.items.map((x) => `${h(x.chain)} <b>${h(x.kind)}</b> ${h(short(x.source))}→${h(short(x.destination))} · ${h(x.amountUsd ?? 'n/a')} · score ${h(x.score)}`)].join('\n');
   return { text, keyboard: navKeyboard(sessionId, page, value.hasNext) };
 }
+
+async function runWalletWorkflow(
+  service: OperatorService,
+  api: TelegramApi,
+  userId: string,
+  chatId: string,
+  address: string,
+  query?: TelegramCallbackQuery
+) {
+  await service.scanWalletCapital(address);
+  const summary = await service.walletCapitalSummary(address);
+  await service.watch(userId, chatId, address);
+  const messages = renderWalletCapitalMessages(summary);
+  if (query) {
+    await editIfChanged(api, query, messages[0].text, messages[0].keyboard);
+    for (const message of messages.slice(1)) { await telegramPace(); await api.sendMessage(chatId, message.text, message.keyboard); }
+    return;
+  }
+  for (const [index, message] of messages.entries()) { if (index) await telegramPace(); await api.sendMessage(chatId, message.text, message.keyboard); }
+}
+
+function renderWalletCapitalMessages(summary: WalletCapitalSummary): Array<{ text: string; keyboard: InlineKeyboard }> {
+  const group = (title: string, rows: WalletCapitalRelation[], limit: number, compact?: 'role' | 'token') => ({ title, total: rows.length, rows: prioritizeRelations(rows).slice(0, limit), compact });
+  const groups: Array<{ title: string; total: number; rows: WalletCapitalRelation[]; compact?: 'role' | 'token' }> = [
+    group('Direct receivers', summary.relations.filter((row) => row.route === 'direct_transfer'), 100),
+    group('Bridge destinations', summary.relations.filter((row) => row.route === 'exact_bridge' || row.route === 'bridge_inference'), 100),
+    group('Multi-hop receivers', summary.relations.filter((row) => row.route === 'multi_hop_transfer'), 40),
+    group('Probable alt/execution wallets', summary.relations.filter((row) => /execution|side|profit_collection/.test(row.role)), 10, 'role'),
+    group('Possible CEX-linked wallets', summary.relations.filter((row) => row.route === 'cex_correlation'), 50),
+    group('Token deployments', summary.relations.filter((row) => row.tokens.length > 0), 20, 'token')
+  ];
+  const messages: Array<{ text: string; keyboard: InlineKeyboard }> = [];
+  let first = true;
+  for (const group of groups) {
+    if (!group.rows.length) continue;
+    const renderer = group.compact === 'role' ? renderRoleIndex : group.compact === 'token' ? renderTokenIndex : renderCapitalRelation;
+    for (const rows of relationChunks(group.rows, renderer)) {
+      const bounded = group.total > group.rows.length ? `Showing ${group.rows.length} highest-relevance routes of ${group.total}; every route is persisted and monitored.` : '';
+      const header = first
+        ? [`<b>WALLET CAPITAL TRACE</b>`, `<code>${h(summary.address)}</code>`, `Chains scanned: ${h(summary.scannedChains.join(', '))}`, summary.entityKey ? `Cluster: <code>${h(summary.entityKey)}</code>` : '', '', `<b>${h(group.title)}</b>`, bounded]
+        : [`<b>${h(group.title)}</b>`, bounded];
+      messages.push({
+        text: [...header.filter(Boolean), ...rows.map(renderer)].join('\n\n'),
+        keyboard: capitalRelationKeyboard(rows)
+      });
+      first = false;
+    }
+  }
+  if (!messages.length) {
+    messages.push({
+      text: [`<b>WALLET CAPITAL TRACE</b>`, `<code>${h(summary.address)}</code>`, `Chains scanned: ${h(summary.scannedChains.join(', '))}`, '', 'Realni scan nije pronašao relevantan wallet-to-receiver kapitalni tok.'].join('\n'),
+      keyboard: EMPTY_KEYBOARD
+    });
+  }
+  return messages;
+}
+
+function prioritizeRelations(rows: WalletCapitalRelation[]) {
+  return [...rows].sort((a, b) => Number(b.tokens.length > 0) - Number(a.tokens.length > 0)
+    || Number(b.safeEntityLink) - Number(a.safeEntityLink)
+    || b.confidence - a.confidence
+    || new Date(b.lastTransferTs).getTime() - new Date(a.lastTransferTs).getTime()
+    || a.address.localeCompare(b.address));
+}
+
+function renderCapitalRelation(row: WalletCapitalRelation) {
+  const amount = row.amountUsd != null ? plainMoney(row.amountUsd)
+    : row.amount ? `${h(row.amount)} ${h(row.amountSymbol ?? '')}`.trim() : 'n/a';
+  const tokens = row.tokens.length
+    ? row.tokens.slice(0, 8).map((token) => `${h(token.symbol ?? 'token')} <code>${h(token.address)}</code>${token.fundingToBuyDelaySec == null ? '' : ` (${duration(token.fundingToBuyDelaySec)} after funding)`}`).join('\n')
+    : 'none observed after funding';
+  const remainingTokens = row.tokens.length > 8 ? `\n+${row.tokens.length - 8} additional observed tokens` : '';
+  const sourceTx = row.sourceTxHash
+    ? row.sourceTxUrl ? `<a href="${h(row.sourceTxUrl)}">${h(row.sourceTxHash)}</a>` : `<code>${h(row.sourceTxHash)}</code>`
+    : 'n/a';
+  const status = row.fresh ? 'fresh' : row.dormant ? 'dormant' : 'active history';
+  return [
+    `<code>${h(row.address)}</code>`,
+    `${h(row.chain)} · ${h(routeLabel(row.route, row.hops))} · role ${h(row.role)}`,
+    `Amount: ${amount}`,
+    `Source transaction: ${sourceTx}`,
+    `First / last transfer: ${h(row.firstTransferTs)} / ${h(row.lastTransferTs)}`,
+    `Tokens bought after funding:\n${tokens}${remainingTokens}`,
+    `Profit / rotation: ${row.rotations.length ? row.rotations.map(h).join(', ') : 'none observed'}`,
+    `Receiver: ${status} · confidence ${Math.round(row.confidence * 100)}%${row.safeEntityLink ? ' · evidence-backed cluster link' : ' · observation only'}`
+  ].join('\n');
+}
+
+function renderRoleIndex(row: WalletCapitalRelation) {
+  return [`<code>${h(row.address)}</code>`, `${h(row.chain)} · ${h(row.role)} · ${h(routeLabel(row.route, row.hops))} · confidence ${Math.round(row.confidence * 100)}%`].join('\n');
+}
+
+function renderTokenIndex(row: WalletCapitalRelation) {
+  return [
+    `<code>${h(row.address)}</code> · ${h(row.chain)}`,
+    ...row.tokens.slice(0, 8).map((token) => `${h(token.symbol ?? 'token')} <code>${h(token.address)}</code>${token.fundingToBuyDelaySec == null ? '' : ` · funding→buy ${duration(token.fundingToBuyDelaySec)}`}`)
+  ].join('\n');
+}
+
+function capitalRelationKeyboard(rows: WalletCapitalRelation[]): InlineKeyboard {
+  return { inline_keyboard: rows.map((row) => [
+    { text: `Copy ${short(row.address, 4)}`, copy_text: { text: row.address } },
+    { text: 'Explorer', url: walletExplorer(row.chain, row.address) }
+  ]) };
+}
+
+function routeLabel(route: WalletCapitalRelation['route'], hops: number) {
+  if (route === 'direct_transfer') return 'direct';
+  if (route === 'multi_hop_transfer') return `multi-hop (${hops})`;
+  if (route === 'exact_bridge') return 'exact bridge';
+  if (route === 'bridge_inference') return 'bridge inference';
+  return 'possible CEX (unconfirmed)';
+}
+function duration(seconds: number) {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3_600) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 86_400) return `${Math.round(seconds / 3_600)}h`;
+  return `${Math.round(seconds / 86_400)}d`;
+}
+function relationChunks(rows: WalletCapitalRelation[], renderer: (row: WalletCapitalRelation) => string) {
+  const result: WalletCapitalRelation[][] = [];
+  let current: WalletCapitalRelation[] = [];
+  let length = 0;
+  for (const row of rows) {
+    const rowLength = renderer(row).length + 2;
+    if (current.length && length + rowLength > 3_200) { result.push(current); current = []; length = 0; }
+    current.push(row); length += rowLength;
+  }
+  if (current.length) result.push(current);
+  return result;
+}
+function telegramPace() { return new Promise<void>((resolve) => setTimeout(resolve, 1_050)); }
 
 async function editIfChanged(api: TelegramApi, query: TelegramCallbackQuery, text: string, keyboard: InlineKeyboard) {
   if (!query.message) return;

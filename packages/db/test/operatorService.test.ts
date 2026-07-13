@@ -5,10 +5,13 @@ import { OperatorService } from '../src/operator/service';
 const PREFIX = 'OPSERVICETEST';
 const ADDRESS = `0x${'ab'.repeat(20)}`;
 const ROOT_ADDRESS = `0x${'ef'.repeat(20)}`;
+const ALERT_WALLETS = [`0x${'12'.repeat(20)}`, `0x${'34'.repeat(20)}`];
+const ALERT_TOKEN = `0x${'56'.repeat(20)}`;
 
 async function cleanup() {
   await prisma.massBridgeCorrelation.deleteMany({ where: { correlationId: { startsWith: PREFIX } } });
   await prisma.massTransactionEvent.deleteMany({ where: { eventId: { startsWith: PREFIX } } });
+  await prisma.trackedTokenActivationAlert.deleteMany({ where: { tokenAddress: ALERT_TOKEN } });
   await prisma.operatorWatchAlert.deleteMany({ where: { watch: { targetKey: { startsWith: PREFIX } } } });
   await prisma.operatorWatch.deleteMany({ where: { OR: [{ targetKey: { startsWith: PREFIX } }, { userId: PREFIX }] } });
   await prisma.operatorSession.deleteMany({ where: { userId: PREFIX } });
@@ -17,6 +20,8 @@ async function cleanup() {
   await prisma.tokenTopPnlCandidate.deleteMany({ where: { walletAddress: ROOT_ADDRESS } });
   await prisma.lineageRoot.deleteMany({ where: { wallet: { address: ROOT_ADDRESS } } });
   await prisma.wallet.deleteMany({ where: { address: ROOT_ADDRESS } });
+  await prisma.unifiedEntity.deleteMany({ where: { entityKey: `${PREFIX}:activation-entity` } });
+  await prisma.token.deleteMany({ where: { address: ALERT_TOKEN } });
 }
 
 beforeEach(cleanup);
@@ -78,5 +83,31 @@ describe('OperatorService', () => {
     await prisma.massBridgeCorrelation.create({ data: { correlationId: `${PREFIX}:bridge`, protocol: 'test', sourceEventId: `${PREFIX}:bridge-source`, destinationEventId: `${PREFIX}:bridge-destination`, status: 'verified', confidence: 100, reasonCodes: ['test'] } });
     const result = await new OperatorService(prisma).bridges(ADDRESS);
     expect(result.items[0]?.confidence).toBe(1);
+  });
+
+  it('materializes only same-cluster multi-wallet new-token activation for a wallet watch', async () => {
+    const now = new Date();
+    const entity = await prisma.unifiedEntity.create({
+      data: {
+        entityKey: `${PREFIX}:activation-entity`, chains: ['BASE'], memberCount: 3, confidence: 0.9,
+        evidenceJson: {}, caveats: ['test'], engineVersion: 1, computedAt: now,
+        addresses: { create: [ADDRESS, ...ALERT_WALLETS].map((address) => ({ chain: 'BASE' as const, address, role: 'execution_wallet', evidenceTier: 'test', confidence: 0.9, evidenceJson: {}, observationOnly: true })) }
+      }
+    });
+    await prisma.token.create({ data: { chain: 'BASE', address: ALERT_TOKEN, symbol: 'NEW', name: 'New Cluster Token', decimals: 18, firstSeenAt: now, riskFlags: [] } });
+    const service = new OperatorService(prisma);
+    const watch = await service.watch(PREFIX, PREFIX, ADDRESS);
+    await prisma.trackedTokenActivationAlert.create({
+      data: {
+        dedupeKey: `${PREFIX}:activation`, chain: 'BASE', tokenAddress: ALERT_TOKEN, alertType: 'same_cluster_multi_wallet_buy', activatedAt: now,
+        trackedWallets: ALERT_WALLETS, entityKeys: [entity.entityKey], trackedWalletCount: 2, independentEntityCount: 1,
+        sourceEventIds: [`${PREFIX}:buy:1`, `${PREFIX}:buy:2`], confidence: 0.85, historicalToken: false,
+        evidenceJson: { newToken: true }, caveats: ['test'], status: 'active', engineVersion: 1, computedAt: now
+      }
+    });
+    expect(await service.materializeWatchAlerts(new Date(now.getTime() - 60_000))).toBe(1);
+    const alert = await prisma.operatorWatchAlert.findFirst({ where: { watchId: watch.id, alertType: 'receiver_bought_token' } });
+    expect(alert?.eventKey).toBe(`tracked-activation:${PREFIX}:activation`);
+    expect(alert?.payloadJson).toMatchObject({ token: 'New Cluster Token', symbol: 'NEW', ca: ALERT_TOKEN, wallets: ALERT_WALLETS, clusters: [entity.entityKey] });
   });
 });

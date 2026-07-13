@@ -13,13 +13,16 @@ function apiMock(): TelegramApi {
   } as unknown as TelegramApi;
 }
 
-function walletSummary() {
+function walletCapitalSummary() {
   return {
-    address: ADDRESS, detectedChains: ['SOLANA'], role: 'execution_wallet', relationshipConfidence: null, entityKey: null,
-    eventCounts: { raw: 1, relevant: 1, highPriority: 0 }, funders: [], routes: { direct: 0, multiHop: 0, bridges: 0, possibleCex: 0 },
-    dormancy: { days7: null, days14: null, days30: null, days90: null, latestClass: null, evidence: null }, positions: [],
-    completedPositions: 0, winCount: 0, lossCount: 0, unresolvedPositions: 0, winRate: null, evUsd: null,
-    repeatRunnerCount: null, oneWinnerDependence: null, undeployedCapitalUsd: null, lastRelevantActivity: null, coverageWarnings: []
+    address: ADDRESS, scannedChains: ['SOLANA'], entityKey: 'entity:1', relations: [{
+      sourceChain: 'SOLANA', chain: 'SOLANA', address: '22222222222222222222222222222222', role: 'execution_wallet',
+      route: 'direct_transfer', hops: 1, amount: '2.5', amountSymbol: 'SOL', amountUsd: 400,
+      sourceTxHash: 'tx-hash', sourceTxUrl: 'https://solscan.io/tx/tx-hash', firstTransferTs: '2026-07-13T01:00:00.000Z',
+      lastTransferTs: '2026-07-13T01:00:00.000Z', tokens: [{ address: '33333333333333333333333333333333', symbol: 'NEW', firstBuyTs: '2026-07-13T01:05:00.000Z', fundingToBuyDelaySec: 300 }],
+      rotations: ['SOLANA:44444444444444444444444444444444'], confidence: 0.9, fresh: true, dormant: false,
+      safeEntityLink: true, entityKey: 'entity:1'
+    }]
   };
 }
 
@@ -45,13 +48,22 @@ describe('Telegram command handlers', () => {
     const service = {
       getPendingSession: vi.fn().mockResolvedValue({ workflow: 'wallet', session: { id: 'pending1' } }),
       validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn().mockResolvedValue(1),
-      createSession: vi.fn().mockResolvedValue({ id: 'session1' }), walletSummary: vi.fn().mockResolvedValue(walletSummary())
+      createSession: vi.fn().mockResolvedValue({ id: 'session1' }), scanWalletCapital: vi.fn().mockResolvedValue({}),
+      walletCapitalSummary: vi.fn().mockResolvedValue(walletCapitalSummary()), watch: vi.fn().mockResolvedValue({})
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 2, message: { message_id: 2, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: ADDRESS } });
     expect(service.validateWorkflowTarget).toHaveBeenCalledWith('wallet', ADDRESS);
     expect(service.clearPendingSession).toHaveBeenCalledWith('123', '123');
-    expect(service.walletSummary).toHaveBeenCalledWith(ADDRESS);
-    expect(api.sendMessage).toHaveBeenCalledWith('123', expect.stringContaining('<b>Wallet'), expect.any(Object));
+    expect(service.scanWalletCapital).toHaveBeenCalledWith(ADDRESS);
+    expect(service.walletCapitalSummary).toHaveBeenCalledWith(ADDRESS);
+    expect(service.watch).toHaveBeenCalledWith('123', '123', ADDRESS);
+    expect(api.sendMessage).toHaveBeenCalledWith('123', expect.stringContaining('<b>WALLET CAPITAL TRACE</b>'), expect.any(Object));
+    const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[0]!;
+    expect(text).toContain('Direct receivers');
+    expect(text).toContain('<code>22222222222222222222222222222222</code>');
+    expect(text).toContain('NEW');
+    expect(text).not.toContain('Wallet DNA');
+    expect(keyboard?.inline_keyboard[0]?.[0]?.copy_text).toEqual({ text: '22222222222222222222222222222222' });
   });
 
   it('clears pending state on /cancel and Back', async () => {

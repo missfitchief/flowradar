@@ -43,7 +43,7 @@ export async function expandWalletCapitalGraph(
   const now = input.now ?? new Date();
   const sourceWallet = normalizeAddress(input.chain, input.walletAddress);
   if (!validAddress(input.chain, sourceWallet)) throw new Error(`Invalid ${input.chain} wallet address`);
-  const maxDepth = Math.max(1, Math.min(input.maxDepth ?? 3, 3));
+  const maxDepth = Math.max(1, Math.min(input.maxDepth ?? 4, 4));
   const maxNodes = Math.max(1, Math.min(input.maxNodes ?? 100, 500));
   const maxEvents = Math.max(10, Math.min(input.maxEventsPerNode ?? 250, 2_000));
   const sourceEntity = await prisma.unifiedEntityAddress.findUnique({
@@ -194,7 +194,11 @@ export async function expandWalletCapitalGraph(
       if (current) current.buyEvents += 1;
       else byToken.set(buy.assetAddress, { tokenAddress: buy.assetAddress, firstBuyTs: buy.ts.toISOString(), buyEvents: 1 });
     }
-    const tradedTokens = [...byToken.values()];
+    const tradedTokens = [...byToken.values()].map((token) => {
+      const buyTs = new Date(token.firstBuyTs);
+      const funding = relation.events.filter((event) => event.ts <= buyTs).sort((a, b) => b.ts.getTime() - a.ts.getTime())[0];
+      return { ...token, fundingToBuyDelaySec: funding ? Math.max(0, Math.round((buyTs.getTime() - funding.ts.getTime()) / 1_000)) : null };
+    });
     const role = infra ? 'service_router_cex_node'
       : relation.route === 'exact_bridge' ? 'bridge_linked_receiver'
       : returnedToSource > 0 && !tradedTokens.length ? 'profit_collection_wallet'
@@ -245,7 +249,11 @@ export async function expandWalletCapitalGraph(
       safeEntityLink: item.safeEntityLink,
       transferReceiptIds: receipts,
       bridgeCorrelationIds: [...new Set(relation.bridgeCorrelationIds)],
-      supportingEvidenceJson: json({ evidence: relation.supporting, freshAtReceipt: item.fresh, dormantAtReceipt: item.dormant, monitoringEnrolled: item.monitoring }),
+      supportingEvidenceJson: json({
+        evidence: relation.supporting, freshAtReceipt: item.fresh, dormantAtReceipt: item.dormant, monitoringEnrolled: item.monitoring,
+        knownAmountUsd: minimumKnownAmount(relation.events.map((event) => event.amountUsd)),
+        sourceEventId: relation.events.slice().sort((a, b) => a.ts.getTime() - b.ts.getTime())[0]?.eventId ?? null
+      }),
       contradictingEvidenceJson: json({ evidence: relation.contradicting, inferenceOnly: !item.safeEntityLink, cexNeverOwnership: relation.route === 'cex_correlation' }),
       tradedTokensJson: json(item.tradedTokens),
       pnlMetricsJson: json(item.dna ? {
@@ -329,11 +337,20 @@ export async function expandWalletCapitalGraph(
 function addRelation(relations: Map<string, RelationAccumulator>, incoming: RelationAccumulator) {
   const key = `${incoming.relatedChain}:${incoming.relatedWallet}:${incoming.route}`;
   const current = relations.get(key);
-  if (!current) { relations.set(key, incoming); return; }
-  current.events.push(...incoming.events);
-  current.bridgeCorrelationIds.push(...incoming.bridgeCorrelationIds);
-  current.supporting.push(...incoming.supporting);
-  current.contradicting.push(...incoming.contradicting);
+  if (!current) {
+    relations.set(key, {
+      ...incoming,
+      events: [...incoming.events],
+      bridgeCorrelationIds: [...incoming.bridgeCorrelationIds],
+      supporting: [...incoming.supporting],
+      contradicting: [...incoming.contradicting]
+    });
+    return;
+  }
+  for (const event of incoming.events) current.events.push(event);
+  for (const correlationId of incoming.bridgeCorrelationIds) current.bridgeCorrelationIds.push(correlationId);
+  for (const evidence of incoming.supporting) current.supporting.push(evidence);
+  for (const evidence of incoming.contradicting) current.contradicting.push(evidence);
   current.hops = Math.min(current.hops, incoming.hops);
 }
 function eventReceipt(event: { eventId: string; ts: Date; safeEntityLink: boolean; amountUsd: Prisma.Decimal | null }) {
@@ -364,4 +381,5 @@ function bridgeChain(value: Prisma.JsonValue | null): ChainId | null {
   return chain && ['SOLANA', 'ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'].includes(chain) ? chain as ChainId : null;
 }
 function decimal(value: Prisma.Decimal | number | null | undefined) { if (value == null) return null; const result = Number(value); return Number.isFinite(result) ? result : null; }
+function minimumKnownAmount(values: Array<number | null>) { const known = values.filter((value): value is number => value !== null && value >= 0); return known.length ? Math.min(...known) : null; }
 function json(value: unknown): Prisma.InputJsonValue { return value as Prisma.InputJsonValue; }

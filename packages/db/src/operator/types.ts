@@ -41,6 +41,43 @@ export interface WalletSummary {
   coverageWarnings: string[];
 }
 
+export interface WalletCapitalToken {
+  address: string;
+  symbol: string | null;
+  firstBuyTs: string;
+  fundingToBuyDelaySec: number | null;
+}
+
+export interface WalletCapitalRelation {
+  sourceChain: ChainId;
+  chain: ChainId;
+  address: string;
+  role: string;
+  route: 'direct_transfer' | 'multi_hop_transfer' | 'exact_bridge' | 'bridge_inference' | 'cex_correlation';
+  hops: number;
+  amount: string | null;
+  amountSymbol: string | null;
+  amountUsd: number | null;
+  sourceTxHash: string | null;
+  sourceTxUrl: string | null;
+  firstTransferTs: string;
+  lastTransferTs: string;
+  tokens: WalletCapitalToken[];
+  rotations: string[];
+  confidence: number;
+  fresh: boolean;
+  dormant: boolean;
+  safeEntityLink: boolean;
+  entityKey: string | null;
+}
+
+export interface WalletCapitalSummary {
+  address: string;
+  scannedChains: ChainId[];
+  entityKey: string | null;
+  relations: WalletCapitalRelation[];
+}
+
 export type ProfitableSort = 'pnl' | 'win_rate' | 'ev' | 'repeat_runners' | 'entry_mcap' | 'one_winner' | 'dormancy' | 'confidence';
 export type TokenTraderSort = 'pnl' | 'roi' | 'entry_mcap' | 'repeat_runners' | 'dormancy' | 'confidence';
 

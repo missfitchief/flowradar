@@ -115,6 +115,7 @@ describe('backend wallet intelligence', () => {
     await prisma.addressRegistry.create({ data: { chain: 'BASE', address: BASE_CEX, category: 'CEX', label: 'test cex', source: 'test' } });
     await prisma.massTransactionEvent.createMany({ data: [
       massEvent({ id: '101', from: BASE_SOURCE, to: BASE_DIRECT, ts: base, safe: true }),
+      massEvent({ id: '101-repeat', from: BASE_SOURCE, to: BASE_DIRECT, ts: new Date(base.getTime() + 500), safe: true }),
       massEvent({ id: '102', from: BASE_DIRECT, to: BASE_MULTIHOP, ts: new Date(base.getTime() + 1_000), safe: true }),
       massEvent({ id: '103', from: BASE_SOURCE, to: BASE_CEX, ts: new Date(base.getTime() + 2_000), safe: true }),
       massEvent({ id: '104', from: BASE_SOURCE, to: BASE_CEX, ts: new Date(base.getTime() + 3_000), kind: 'bridge_source', safe: false, bridgeJson: { recipient: ARB_BRIDGE, destinationChain: 'ARBITRUM' } }),
@@ -137,6 +138,7 @@ describe('backend wallet intelligence', () => {
 
     expect(report).toMatchObject({ direct: 1, multiHop: 1, exactBridge: 1, cexInference: 1, tokenBuysObserved: 1 });
     expect(rows.find((row) => row.relatedWallet === BASE_MULTIHOP && row.route === 'multi_hop_transfer')?.safeEntityLink).toBe(true);
+    expect(rows.find((row) => row.relatedWallet === BASE_MULTIHOP && row.route === 'multi_hop_transfer')?.transferReceiptIds).toHaveLength(2);
     expect(bridge).toMatchObject({ safeEntityLink: true, role: 'bridge_linked_receiver' });
     expect(cex).toMatchObject({ safeEntityLink: false, role: 'service_router_cex_node' });
     expect(sourceEntity?.entityId).not.toBe(cexEntity?.entityId);
