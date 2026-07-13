@@ -73,7 +73,7 @@ export default async function CapitalPage() {
                       <td className="px-3 py-2 font-mono text-xs">{c.receiverWallet ? shortAddr(c.receiverWallet) : '—'}</td>
                       <td className="px-3 py-2"><Link href={`/token/${c.tokenBought}`} className="text-sky-400 hover:underline">{c.tokenBoughtSymbol ? `$${c.tokenBoughtSymbol}` : shortAddr(c.tokenBought ?? '')}</Link></td>
                       <td className="px-3 py-2 text-right">{c.knownValueUsd === null ? 'unknown' : fmtUsd(Number(c.knownValueUsd))}</td>
-                      <td className="px-3 py-2 text-right">{c.independentEntitiesOnToken}</td>
+                      <td className="px-3 py-2 text-right">{c.independentEntitiesOnToken ?? 'unknown'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -102,7 +102,7 @@ export default async function CapitalPage() {
                       <td className="px-3 py-2"><Link href={`/token/${c.sourceToken}`} className="font-mono text-xs text-sky-400 hover:underline">{shortAddr(c.sourceToken ?? '')}</Link></td>
                       <td className="px-3 py-2 text-right text-emerald-400">{c.realizedProfitUsd === null ? 'unknown' : fmtUsd(Number(c.realizedProfitUsd))}</td>
                       <td className="px-3 py-2"><Link href={`/token/${c.tokenBought}`} className="text-sky-400 hover:underline">{c.tokenBoughtSymbol ? `$${c.tokenBoughtSymbol}` : shortAddr(c.tokenBought ?? '')}</Link></td>
-                      <td className="px-3 py-2 text-right">{c.independentEntitiesOnToken}</td>
+                      <td className="px-3 py-2 text-right">{c.independentEntitiesOnToken ?? 'unknown'}</td>
                     </tr>
                   ))}
                 </tbody>

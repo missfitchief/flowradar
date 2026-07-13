@@ -89,15 +89,17 @@ export async function buildTopPnlExtractionStatus(
       // has not been fetched yet is 'incomplete_coverage', not 'unavailable'.
       let status: string;
       const reasons: string[] = [];
-      if (walletCount > 0 && (cands?.verified ?? 0) > 0) {
+      if (!hasTokenRow) {
+        // Nothing local to work with — precedes any candidate branch (a
+        // locally_verified claim is impossible without the token).
+        status = 'unavailable';
+        reasons.push('no_local_token_row');
+      } else if (walletCount > 0 && (cands?.verified ?? 0) > 0) {
         status = 'local_reconstruction_ok';
         reasons.push(`locally_verified_wallets:${cands?.verified}`);
       } else if (walletCount > 0) {
         status = 'incomplete_coverage';
         reasons.push('candidates_exist_but_none_locally_verified');
-      } else if (!hasTokenRow) {
-        status = 'unavailable';
-        reasons.push('no_local_token_row');
       } else if (hasLocalTrades) {
         status = 'no_valid_wallets';
         reasons.push('local_trades_exist_but_no_extractable_top_pnl_wallets');
@@ -329,38 +331,63 @@ export async function buildCapitalChains(
   //     a buy into ANOTHER token. Realized profit must be PROVEN — a token
   //     with any unpriced BUY/SELL leg (unknown cost basis) or a truncated
   //     profile is excluded. Entity-adjusted; per-profile error isolation. ---
-  const dnaWallets = (
-    await prisma.walletDnaProfile.findMany({ where: { chain }, select: { walletAddress: true }, orderBy: { walletAddress: 'asc' }, take: 20_000 })
-  ).map((w) => w.walletAddress);
+  const DNA_CAP = 20_000;
+  const RUNNER_CAP = 20_000;
+  const PROFILE_CAP = 20_000;
+  const UNPRICED_CAP = 100_000;
+  const dnaRowsAll = await prisma.walletDnaProfile.findMany({ where: { chain }, select: { walletAddress: true }, orderBy: { walletAddress: 'asc' }, take: DNA_CAP + 1 });
+  if (dnaRowsAll.length > DNA_CAP) truncated = true;
+  const dnaWallets = dnaRowsAll.slice(0, DNA_CAP).map((w) => w.walletAddress);
   const entityOf = await entityKeysFor(prisma, chain, dnaWallets);
-  const runnerMints = new Set(
-    (await prisma.tokenLifecycle.findMany({ where: { runnerClass: 'verified_above_10m' }, select: { mint: true }, take: 20_000 })).map((r) => r.mint)
-  );
-  const profiles = await prisma.walletBehaviorProfile.findMany({
+  const runnerRows = await prisma.tokenLifecycle.findMany({ where: { runnerClass: 'verified_above_10m' }, select: { mint: true }, take: RUNNER_CAP + 1 });
+  if (runnerRows.length > RUNNER_CAP) truncated = true;
+  const runnerMints = new Set(runnerRows.slice(0, RUNNER_CAP).map((r) => r.mint));
+  const profilesAll = await prisma.walletBehaviorProfile.findMany({
     where: { chain, walletAddress: { in: dnaWallets } },
-    select: { walletAddress: true, profileJson: true }
+    orderBy: { walletAddress: 'asc' },
+    select: { walletAddress: true, profileJson: true },
+    take: PROFILE_CAP + 1
   });
+  if (profilesAll.length > PROFILE_CAP) truncated = true;
+  const profiles = profilesAll.slice(0, PROFILE_CAP);
   // Per-wallet tokens with an unpriced BUY/SELL leg (unknown cost basis).
+  // Deterministically ordered so, on truncation, only wallets at/after the
+  // boundary walletId are uncertain — those become rotation-INELIGIBLE.
   const dnaWalletRows = await prisma.wallet.findMany({ where: { chain, address: { in: dnaWallets } }, select: { id: true, address: true } });
   const addrOfId = new Map(dnaWalletRows.map((w) => [w.id, w.address]));
-  const unpricedTokensOf = new Map<string, Set<string>>();
-  for (const t of await prisma.walletTokenTrade.findMany({
+  const unpricedLegRows = await prisma.walletTokenTrade.findMany({
     where: { chain, walletId: { in: dnaWalletRows.map((w) => w.id) }, action: { in: ['BUY', 'SELL'] }, amountUsd: 0 },
+    orderBy: [{ walletId: 'asc' }, { tokenId: 'asc' }],
     select: { walletId: true, token: { select: { address: true } } },
     distinct: ['walletId', 'tokenId'],
-    take: 100_000
-  })) {
+    take: UNPRICED_CAP + 1
+  });
+  const unpricedTruncated = unpricedLegRows.length > UNPRICED_CAP;
+  if (unpricedTruncated) truncated = true;
+  const usableUnpriced = unpricedLegRows.slice(0, UNPRICED_CAP);
+  const unpricedTokensOf = new Map<string, Set<string>>();
+  for (const t of usableUnpriced) {
     const a = addrOfId.get(t.walletId);
     if (!a) continue;
     const s = unpricedTokensOf.get(a) ?? new Set<string>();
     s.add(t.token.address);
     unpricedTokensOf.set(a, s);
   }
+  // Boundary walletId: on truncation only wallets with id < boundary are fully
+  // loaded and rotation-eligible (their unpriced set is complete).
+  const boundaryWalletId = unpricedTruncated ? usableUnpriced[usableUnpriced.length - 1]?.walletId ?? null : null;
+  const rotationEligible = new Set(
+    unpricedTruncated && boundaryWalletId !== null
+      ? dnaWalletRows.filter((w) => w.id < boundaryWalletId).map((w) => w.address)
+      : dnaWalletRows.map((w) => w.address)
+  );
 
   for (const p of profiles) {
     try {
       const truncatedProfile = (p.profileJson as { localViewTruncated?: boolean } | null)?.localViewTruncated === true;
-      if (truncatedProfile) continue; // missing older buys could fabricate profit
+      // Truncated profile OR a wallet past the unpriced-leg boundary -> cost
+      // basis may be incomplete, so no realized profit can be asserted.
+      if (truncatedProfile || !rotationEligible.has(p.walletAddress)) continue;
       const positions = ((p.profileJson as { local?: { tokenPositions?: Position[] } } | null)?.local?.tokenPositions ?? []);
       const unpriced = unpricedTokensOf.get(p.walletAddress) ?? new Set<string>();
       const entityKey = entityOf.get(p.walletAddress) ?? p.walletAddress;
