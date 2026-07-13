@@ -64,6 +64,7 @@ export interface TokenTopTrader {
   totalPnlUsd?: number | null;
   volumeBuyUsd?: number | null;
   volumeSellUsd?: number | null;
+  remainingUsd?: number | null;
   tradeBuy?: number | null;
   tradeSell?: number | null;
   tags?: string[];

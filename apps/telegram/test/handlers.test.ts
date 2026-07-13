@@ -72,19 +72,46 @@ describe('Telegram command handlers', () => {
     expect(keyboard?.inline_keyboard[0]?.map((button) => button.text)).toEqual(['Analiziraj kao wallet', 'Analiziraj kao token']);
   });
 
-  it('shows token coverage and deep-scan control when top-PnL is empty', async () => {
+  it('runs the real token scan and returns one short empty message only after zero results', async () => {
     const api = apiMock();
     const service = {
       validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'session1' }),
+      scanTokenTopPnl: vi.fn().mockResolvedValue({ chains: ['SOLANA'], candidateCount: 0 }),
       tokenSummary: vi.fn().mockResolvedValue({ tokens: [], metadata: [], universe: [{ chain: 'SOLANA', coverage: 'unavailable', processingStatus: 'unavailable' }], topPnl: { items: [], page: 1, pageSize: 10, total: 0, hasNext: false }, coverageWarnings: ['Provider coverage nije dostupan.'] })
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 6, message: { message_id: 6, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
     const [chatId, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[0]!;
     expect(chatId).toBe('123');
-    expect(text).toContain('Top-PnL rezultati još ne postoje.');
-    expect(text).toContain('Provereno:');
-    expect(text).toContain('Coverage: SOLANA unavailable/unavailable');
-    expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual(['Pokreni dublji scan', 'Izvoz']);
+    expect(service.scanTokenTopPnl).toHaveBeenCalledWith(ADDRESS);
+    expect(text).toBe('Nije pronađen nijedan top-PnL wallet za ovaj token.');
+    expect(keyboard?.inline_keyboard).toEqual([]);
+  });
+
+  it('renders full top-PnL wallet details with copy and explorer buttons', async () => {
+    const api = apiMock();
+    const wallet = '22222222222222222222222222222222';
+    const service = {
+      validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'session1' }),
+      scanTokenTopPnl: vi.fn().mockResolvedValue({ chains: ['SOLANA'], candidateCount: 1 }),
+      tokenSummary: vi.fn().mockResolvedValue({
+        tokens: [], metadata: [], universe: [], coverageWarnings: [],
+        topPnl: { page: 1, pageSize: 10, total: 1, hasNext: false, items: [{
+          chain: 'SOLANA', walletAddress: wallet, realizedPnlUsd: 125_400, roi: 6.4, boughtUsd: 20_000,
+          soldUsd: 145_400, remainingPositionUsd: null, firstBuyTs: '2026-07-13T10:00:00.000Z',
+          dormancy: { days7: true, days14: true, days30: false, days90: null }, validation: 'locally_verified'
+        }] }
+      })
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 7, message: { message_id: 7, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
+    const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[0]!;
+    expect(text).toContain('TOP 10 PNL WALLETS');
+    expect(text).toContain('+$125,400 PnL · 640% ROI');
+    expect(text).toContain(`<code>${wallet}</code>`);
+    expect(text).not.toContain('Coverage:');
+    expect(keyboard?.inline_keyboard[0]).toEqual([
+      { text: 'Copy wallet', copy_text: { text: wallet } },
+      { text: 'Explorer', url: `https://solscan.io/account/${wallet}` }
+    ]);
   });
 
   it('does not edit an unchanged Telegram message', async () => {

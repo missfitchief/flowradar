@@ -1,5 +1,6 @@
 import { Prisma, type ChainId, type OperatorSession, type PrismaClient } from '@prisma/client';
-import { normalizeAddress, validAddress } from '../discovery/unified';
+import { normalizeAddress, runUnifiedProfitableWalletDiscovery, validAddress, type HistoricalTraderProvider } from '../discovery/unified';
+import { analyzeTokenWalletIntelligence } from '../intelligence/token';
 import { toCsv, toJsonDocument } from './export';
 import type {
   BridgeRow, CapitalFlowRow, OperatorPage, OperatorSessionState, OperatorWorkflow, ProfitableSort, ProfitableWalletRow, TokenTraderSort, WalletSummary
@@ -11,8 +12,12 @@ const DEFAULT_ALERTS = ['funded_new_wallet', 'bridge_transfer', 'dormant_wallet_
 const PENDING_WORKFLOWS: OperatorWorkflow[] = ['wallet', 'token', 'entity', 'flow', 'bridges'];
 const pendingWorkflowKey = (workflow: OperatorWorkflow) => `pending:${workflow}`;
 
+export interface OperatorServiceOptions {
+  tokenTopTraderProviders?: Partial<Record<ChainId, HistoricalTraderProvider>>;
+}
+
 export class OperatorService {
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(private readonly prisma: PrismaClient, private readonly options: OperatorServiceOptions = {}) {}
 
   async walletSummary(addressInput: string): Promise<WalletSummary> {
     const target = await this.resolveTarget(addressInput);
@@ -82,6 +87,67 @@ export class OperatorService {
     };
   }
 
+  async scanTokenTopPnl(addressInput: string) {
+    const inferred = inferredAddressRefs(addressInput);
+    if (!inferred.length) throw new Error('Token CA nije validan');
+    const normalized = inferred.map((ref) => ref.address);
+    const [tokens, universe, candidates] = await Promise.all([
+      this.prisma.token.findMany({ where: { address: { in: normalized } }, select: { chain: true, address: true } }),
+      this.prisma.historicalTokenUniverse.findMany({ where: { tokenAddress: { in: normalized } } }),
+      this.prisma.tokenTopPnlCandidate.findMany({ where: { mint: { in: normalized } }, distinct: ['chain'], select: { chain: true, mint: true } })
+    ]);
+    const knownChains = new Set<ChainId>([...tokens.map((row) => row.chain), ...universe.map((row) => row.chain), ...candidates.map((row) => row.chain)]);
+    let refs = knownChains.size ? inferred.filter((ref) => knownChains.has(ref.chain)) : inferred;
+    if (!knownChains.size && /^0x/i.test(addressInput.trim()) && this.options.tokenTopTraderProviders?.BSC) {
+      refs = inferred.filter((ref) => ref.chain === 'BSC');
+    }
+    refs = uniqueRefs(refs);
+    const now = new Date();
+    const universeBy = new Map(universe.map((row) => [`${row.chain}:${row.tokenAddress}`, row]));
+    for (const ref of refs) {
+      const existing = universeBy.get(`${ref.chain}:${ref.address}`);
+      const data = {
+        sources: [...new Set([...(existing?.sources ?? []), 'telegram_token_scan'])].sort(),
+        historicalWinnerStatus: existing?.historicalWinnerStatus ?? 'candidate',
+        coverage: existing?.coverage ?? 'unavailable',
+        processingStatus: 'pending',
+        evidenceJson: json({ priorEvidence: existing?.evidenceJson ?? null, telegramTokenScan: { requestedAt: now.toISOString() } }),
+        lastError: null,
+        nextRetryAt: null
+      };
+      await this.prisma.historicalTokenUniverse.upsert({
+        where: { chain_tokenAddress: { chain: ref.chain, tokenAddress: ref.address } },
+        create: { chain: ref.chain, tokenAddress: ref.address, ...data },
+        update: data
+      });
+    }
+    const providers = Object.fromEntries(refs.flatMap((ref) => {
+      const provider = this.options.tokenTopTraderProviders?.[ref.chain];
+      return provider ? [[ref.chain, provider]] : [];
+    })) as Partial<Record<ChainId, HistoricalTraderProvider>>;
+    await runUnifiedProfitableWalletDiscovery(this.prisma, {
+      chains: refs.map((ref) => ref.chain),
+      tokenAddresses: [...new Set(refs.map((ref) => ref.address))],
+      limit: refs.length,
+      perTokenLocalCap: 10,
+      perTokenProviderCap: 10,
+      maxTradesPerToken: 100_000,
+      requestBudget: Object.keys(providers).length,
+      retryUnavailable: true,
+      providers,
+      buildDna: false,
+      forceProviderRefresh: true,
+      now
+    });
+    let candidateCount = 0;
+    for (const ref of refs) {
+      const count = await this.prisma.tokenTopPnlCandidate.count({ where: { chain: ref.chain, mint: ref.address, validation: { not: 'invalid' } } });
+      candidateCount += count;
+      if (count > 0) await analyzeTokenWalletIntelligence(this.prisma, { chain: ref.chain, tokenAddress: ref.address, topLimit: 10, now });
+    }
+    return { chains: refs.map((ref) => ref.chain), candidateCount };
+  }
+
   async tokenSummary(addressInput: string, page = 1, pageSize = 10, sort: TokenTraderSort = 'pnl') {
     const refs = inferredAddressRefs(addressInput);
     const normalized = refs.map((x) => x.address);
@@ -92,16 +158,19 @@ export class OperatorService {
       this.prisma.tokenTopPnlCandidate.findMany({ where: { mint: { in: normalized } }, orderBy: [{ chain: 'asc' }, { walletAddress: 'asc' }, { localRealizedProxyUsd: 'desc' }, { claimedRealizedPnlUsd: 'desc' }, { confidence: 'desc' }], take: 5_000, distinct: ['chain', 'walletAddress'] })
     ]);
     const walletRefs = candidates.map((x) => ({ chain: x.chain, address: x.walletAddress }));
-    const [entityAddresses, rootRows, dnaRows, dormancyRows] = walletRefs.length ? await Promise.all([
+    const [entityAddresses, rootRows, dnaRows, dormancyRows, intelligenceRows] = walletRefs.length ? await Promise.all([
       this.prisma.unifiedEntityAddress.findMany({ where: { OR: walletRefs.map((x) => ({ chain: x.chain, address: x.address })) }, include: { entity: { select: { entityKey: true } } }, take: 100 }),
       this.prisma.lineageRoot.findMany({ where: { wallet: { OR: walletRefs.map((x) => ({ chain: x.chain, address: x.address })) } }, select: { wallet: { select: { chain: true, address: true } } }, take: 5_000 }),
       this.prisma.walletDnaProfile.findMany({ where: { OR: walletRefs.map((x) => ({ chain: x.chain, walletAddress: x.address })) }, take: 5_000 }),
-      this.prisma.addressDormancyObservation.groupBy({ by: ['chain', 'walletAddress'], where: { OR: walletRefs.map((x) => ({ chain: x.chain, walletAddress: x.address })), overallClass: { in: ['covered_dormant', 'apparently_dormant_incomplete_history'] } }, _count: { _all: true } })
-    ]) : [[], [], [], []];
+      this.prisma.addressDormancyObservation.groupBy({ by: ['chain', 'walletAddress'], where: { OR: walletRefs.map((x) => ({ chain: x.chain, walletAddress: x.address })), overallClass: { in: ['covered_dormant', 'apparently_dormant_incomplete_history'] } }, _count: { _all: true } }),
+      this.prisma.tokenWalletIntelligence.findMany({ where: { tokenAddress: { in: normalized }, OR: walletRefs.map((x) => ({ chain: x.chain, walletAddress: x.address })) }, orderBy: { computedAt: 'desc' }, take: 5_000 })
+    ]) : [[], [], [], [], []];
     const entityBy = new Map(entityAddresses.map((x) => [`${x.chain}:${x.address}`, { entityKey: x.entity.entityKey, role: x.role }]));
     const roots = new Set(rootRows.map((x) => `${x.wallet.chain}:${x.wallet.address}`));
     const dnaBy = new Map(dnaRows.map((x) => [`${x.chain}:${x.walletAddress}`, x]));
     const dormancyBy = new Map(dormancyRows.map((x) => [`${x.chain}:${x.walletAddress}`, x._count._all]));
+    const intelligenceBy = new Map<string, typeof intelligenceRows[number]>();
+    for (const row of intelligenceRows) if (!intelligenceBy.has(`${row.chain}:${row.walletAddress}`)) intelligenceBy.set(`${row.chain}:${row.walletAddress}`, row);
     const traderCandidates = candidates
       .filter((x) => !roots.has(`${x.chain}:${x.walletAddress}`) && entityBy.get(`${x.chain}:${x.walletAddress}`)?.role !== 'root_main')
       .map((x) => {
@@ -126,9 +195,13 @@ export class OperatorService {
       universe: universe.map((x) => ({ chain: x.chain, sources: x.sources, historicalWinnerStatus: x.historicalWinnerStatus, athMcapUsd: decimal(x.athMcapUsd), coverage: x.coverage, processingStatus: x.processingStatus })),
       topPnl: pageResult(pageCandidates.map(({ candidate: x, roi, entryMcap, repeatRunners, dormancy, entity }) => ({
         chain: x.chain, walletAddress: x.walletAddress, providerRank: x.providerRank, source: x.source, validation: x.validation,
-        realizedPnlUsd: decimal(x.localRealizedProxyUsd), claimedRealizedPnlUsd: decimal(x.claimedRealizedPnlUsd), roi, entryMcapUsd: entryMcap, repeatRunnerCount: repeatRunners, dormancyReactivations: dormancy,
-        firstBuyTs: x.localFirstBuyTs?.toISOString() ?? null, firstSellTs: x.localFirstSellTs?.toISOString() ?? null,
-        dormancy: null, confidence: normalizeConfidence(x.confidence), coverage: x.coverage,
+        realizedPnlUsd: decimal(x.localRealizedProxyUsd) ?? decimal(x.claimedRealizedPnlUsd) ?? decimal(x.claimedTotalPnlUsd),
+        boughtUsd: decimal(x.localBoughtUsd) ?? decimal(x.claimedBoughtUsd), soldUsd: decimal(x.localSoldUsd) ?? decimal(x.claimedSoldUsd),
+        remainingPositionUsd: decimal(x.claimedRemainingUsd), claimedRealizedPnlUsd: decimal(x.claimedRealizedPnlUsd), roi,
+        entryMcapUsd: entryMcap, repeatRunnerCount: repeatRunners, dormancyReactivations: dormancy,
+        firstBuyTs: x.localFirstBuyTs?.toISOString() ?? providerEntryTime(x.providerJson), firstSellTs: x.localFirstSellTs?.toISOString() ?? null,
+        dormancy: (() => { const row = intelligenceBy.get(`${x.chain}:${x.walletAddress}`); return row ? { days7: row.dormant7d, days14: row.dormant14d, days30: row.dormant30d, days90: row.dormant90d } : null; })(),
+        confidence: normalizeConfidence(x.confidence), coverage: x.coverage,
         entityKey: entity?.entityKey ?? null, role: entity?.role ?? 'unknown_related_wallet'
       })), page, pageSize, traderCandidates.length, warnings),
       coverageWarnings: warnings
@@ -466,6 +539,20 @@ function pageResult<T>(items: T[], page: number, pageSize: number, total: number
 function decimal(value: Prisma.Decimal | number | string | null | undefined) { if (value == null) return null; const number = Number(value); return Number.isFinite(number) ? number : null; }
 function normalizeConfidence(value: number) { return Math.max(0, Math.min(1, value > 1 ? value / 100 : value)); }
 function json(value: unknown): Prisma.InputJsonValue { return value as Prisma.InputJsonValue; }
+function providerEntryTime(value: Prisma.JsonValue | null): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = (value as Record<string, unknown>).start_holding_at ?? (value as Record<string, unknown>).first_buy_at;
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    const date = new Date(raw < 10_000_000_000 ? raw * 1_000 : raw);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  if (typeof raw === 'string' && raw.length > 0) {
+    const numeric = Number(raw);
+    const date = Number.isFinite(numeric) ? new Date(numeric < 10_000_000_000 ? numeric * 1_000 : numeric) : new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  return null;
+}
 function extractPositions(value: Prisma.JsonValue): unknown[] { const profile = value as { local?: { tokenPositions?: unknown[] } }; return Array.isArray(profile?.local?.tokenPositions) ? profile.local.tokenPositions : []; }
 function extractDiscoveryMints(value: Prisma.JsonValue | null): string[] { if (!value || typeof value !== 'object') return []; const object = value as Record<string, unknown>; const direct = object.mints; if (Array.isArray(direct)) return direct.filter((x): x is string => typeof x === 'string'); return Object.values(object).flatMap((x) => Array.isArray(x) ? x.filter((v): v is string => typeof v === 'string') : []); }
 function dormancyFlags(value: Prisma.JsonValue | undefined) { const text = JSON.stringify(value ?? {}).toLowerCase(); const has = (days: number) => text.includes(`"days":${days}`) || text.includes(`"windowdays":${days}`) ? text.includes('covered_dormant') || text.includes('dormant') : null; return { days7: has(7), days14: has(14), days30: has(30), days90: has(90) }; }

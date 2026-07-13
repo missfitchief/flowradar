@@ -195,20 +195,15 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
     return { text: renderWallet(value), keyboard: navKeyboard(sessionId, 1, false, [[{ text: 'Capital flow', callback_data: callback('view', sessionId, 'flow') }, { text: 'Entity / alts', callback_data: callback('view', sessionId, 'entity') }], [{ text: 'Bridges', callback_data: callback('view', sessionId, 'bridges') }, { text: 'Watch wallet', callback_data: callback('watch', sessionId, 'on') }]]) };
   }
   if (workflow === 'token') {
-    const value = await service.tokenSummary(required(state), page, size, state.tokenSort ?? 'pnl');
-    const tokenLines = value.tokens.map((x) => `${h(x.chain)} <b>${h(x.symbol)}</b> ${h(x.name)} · mcap ${h(x.latestMcapUsd ?? 'n/a')}`);
-    const traderLines = value.topPnl.items.map((x, i) => `${(page - 1) * size + i + 1}. ${h(x.chain)} <code>${h(short(x.walletAddress, 7))}</code> · local ${h(x.realizedPnlUsd ?? 'n/a')} · ${h(x.validation)}`);
-    const emptyLines = value.topPnl.total === 0 ? [
-      '<b>Top-PnL rezultati još ne postoje.</b>',
-      'Provereno: canonical token, metadata, historical universe i lokalni/provider top-PnL zapisi.',
-      `Zašto: ${h(value.coverageWarnings.join(' ') || 'Nema potvrđenih trader zapisa za ovaj token.')}`,
-      `Coverage: ${h(value.universe.length ? value.universe.map((x) => `${x.chain} ${x.coverage}/${x.processingStatus}`).join(', ') : 'historical-universe red ne postoji')}`
-    ] : [];
-    const text = [`<b>Token</b> ${h(short(required(state), 9))}`, ...tokenLines, ...traderLines, ...emptyLines, value.coverageWarnings.length && value.topPnl.total > 0 ? `<i>Coverage:</i> ${value.coverageWarnings.map(h).join(' ')}` : ''].filter(Boolean).join('\n');
-    const controls = value.topPnl.total === 0
-      ? [[{ text: 'Pokreni dublji scan', callback_data: callback('deepscan', sessionId, 'queue') }]]
-      : [[{ text: 'PnL', callback_data: callback('tokensort', sessionId, 'pnl') }, { text: 'ROI', callback_data: callback('tokensort', sessionId, 'roi') }, { text: 'Entry MC', callback_data: callback('tokensort', sessionId, 'entry_mcap') }], [{ text: 'Repeat', callback_data: callback('tokensort', sessionId, 'repeat_runners') }, { text: 'Dormancy', callback_data: callback('tokensort', sessionId, 'dormancy') }, { text: 'Confidence', callback_data: callback('tokensort', sessionId, 'confidence') }]];
-    return { text, keyboard: navKeyboard(sessionId, page, value.topPnl.hasNext, controls) };
+    const tokenAddress = required(state);
+    await service.scanTokenTopPnl(tokenAddress);
+    const value = await service.tokenSummary(tokenAddress, 1, 10, 'pnl');
+    const rows = value.topPnl.items.slice(0, 10) as TokenPnlTelegramRow[];
+    if (!rows.length) return { text: 'Nije pronađen nijedan top-PnL wallet za ovaj token.', keyboard: EMPTY_KEYBOARD };
+    return {
+      text: [`<b>TOP 10 PNL WALLETS — ${h(tokenAddress)}</b>`, ...rows.map(renderTokenPnlWallet)].join('\n\n'),
+      keyboard: tokenPnlKeyboard(rows)
+    };
   }
   if (workflow === 'profitable') {
     const value = await service.profitable({ chain: state.chain, sort: state.sort, page, pageSize: size });
@@ -248,6 +243,55 @@ function invalidTargetMessage(workflow: OperatorWorkflow) {
   if (workflow === 'wallet') return 'Wallet adresa nije validna. Pošalji validnu wallet adresu.';
   return 'Vrednost nije validna. Pošalji validan wallet ili postojeći entity ID.';
 }
+interface TokenPnlTelegramRow {
+  chain: string;
+  walletAddress: string;
+  realizedPnlUsd: number | null;
+  roi: number | null;
+  boughtUsd: number | null;
+  soldUsd: number | null;
+  remainingPositionUsd: number | null;
+  firstBuyTs: string | null;
+  dormancy: { days7: boolean | null; days14: boolean | null; days30: boolean | null; days90: boolean | null } | null;
+  validation: string;
+}
+function renderTokenPnlWallet(row: TokenPnlTelegramRow, index: number) {
+  const dormancy = row.dormancy && Object.values(row.dormancy).some((value) => value !== null)
+    ? `Dormancy 7d/14d/30d/90d: ${dormancyFlag(row.dormancy.days7)}/${dormancyFlag(row.dormancy.days14)}/${dormancyFlag(row.dormancy.days30)}/${dormancyFlag(row.dormancy.days90)}`
+    : null;
+  return [
+    `${index + 1}. <b>${signedMoney(row.realizedPnlUsd)} PnL · ${roi(row.roi)} ROI</b>`,
+    `<code>${h(row.walletAddress)}</code>`,
+    `Bought ${plainMoney(row.boughtUsd)} · Sold ${plainMoney(row.soldUsd)} · Remaining ${plainMoney(row.remainingPositionUsd)}`,
+    `Entry ${h(row.firstBuyTs ?? 'n/a')}`,
+    dormancy,
+    `Validation: ${h(tokenValidation(row.validation))}`
+  ].filter(Boolean).join('\n');
+}
+
+function tokenValidation(value: string) {
+  if (value === 'locally_verified') return 'locally verified';
+  if (value === 'provider_only') return 'provider only';
+  return 'incomplete';
+}
+function tokenPnlKeyboard(rows: TokenPnlTelegramRow[]): InlineKeyboard {
+  return { inline_keyboard: rows.map((row) => [
+    { text: 'Copy wallet', copy_text: { text: row.walletAddress } },
+    { text: 'Explorer', url: walletExplorer(row.chain, row.walletAddress) }
+  ]) };
+}
+function walletExplorer(chain: string, address: string) {
+  const base = chain === 'SOLANA' ? 'https://solscan.io/account/'
+    : chain === 'ETHEREUM' ? 'https://etherscan.io/address/'
+    : chain === 'BASE' ? 'https://basescan.org/address/'
+    : chain === 'ARBITRUM' ? 'https://arbiscan.io/address/'
+    : 'https://bscscan.com/address/';
+  return `${base}${encodeURIComponent(address)}`;
+}
+function plainMoney(value: number | null) { return value == null ? 'n/a' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value); }
+function signedMoney(value: number | null) { if (value == null) return 'n/a'; return `${value >= 0 ? '+' : '-'}${plainMoney(Math.abs(value))}`; }
+function roi(value: number | null) { return value == null ? 'n/a' : `${Math.round(value * 100).toLocaleString('en-US')}%`; }
+function dormancyFlag(value: boolean | null) { return value == null ? '?' : value ? 'yes' : 'no'; }
 function parseCommand(text: string) { const match = text.trim().match(/^\/([a-z_]+)(?:@[a-z0-9_]+)?(?:\s+([\s\S]+))?$/i); return { command: match?.[1]?.toLowerCase() ?? '', argument: match?.[2]?.trim() ?? '' }; }
 function parseCallback(value: string | undefined) { const parts = value?.split('|'); return parts?.length === 4 && parts[0] === 'v1' ? { action: parts[1], sessionId: parts[2], value: parts[3] } : null; }
 function required(state: OperatorSessionState) { if (!state.target) throw new Error('Target is required'); return state.target; }

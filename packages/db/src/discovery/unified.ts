@@ -39,6 +39,9 @@ export interface UnifiedDiscoveryOptions {
   perTokenProviderCap?: number;
   maxTradesPerToken?: number;
   requestBudget?: number;
+  /** Operator-triggered exact-CA scans may refresh an existing fetched/empty
+   * provider receipt instead of treating it as a permanent cache entry. */
+  forceProviderRefresh?: boolean;
   retryUnavailable?: boolean;
   providers?: Partial<Record<ChainId, HistoricalTraderProvider>>;
   buildDna?: boolean;
@@ -296,7 +299,7 @@ export async function runUnifiedProfitableWalletDiscovery(
           const fetchState = await prisma.topPnlFetchState.findUnique({
             where: { chain_mint_provider: { chain: member.chain, mint: member.tokenAddress, provider: provider.name } }
           });
-          if (!fetchState || fetchState.status === 'provider_error') {
+          if (options.forceProviderRefresh || !fetchState || fetchState.status === 'provider_error') {
             providerRequests += 1;
             try {
               const items = await provider.adapter.getTopTraders(member.chain as Chain, member.tokenAddress, {
@@ -473,7 +476,7 @@ async function persistCandidate(prisma: PrismaClient, input: {
     chain: input.chain, mint: input.tokenAddress, walletAddress: input.wallet, source: input.source, providerRank: input.rank,
     claimedRealizedPnlUsd: finiteOrNull(item?.realizedPnlUsd), claimedUnrealizedPnlUsd: finiteOrNull(item?.unrealizedPnlUsd),
     claimedTotalPnlUsd: finiteOrNull(item?.totalPnlUsd ?? item?.pnlUsd), claimedBoughtUsd: finiteOrNull(item?.volumeBuyUsd), claimedSoldUsd: finiteOrNull(item?.volumeSellUsd),
-    claimedRemainingUsd: null, claimedRoi, claimedTradeCount: item?.tradeCount ?? null, providerTags: item?.tags ?? [], providerTimeFrame: input.providerWindow,
+    claimedRemainingUsd: finiteOrNull(item?.remainingUsd), claimedRoi, claimedTradeCount: item?.tradeCount ?? null, providerTags: item?.tags ?? [], providerTimeFrame: input.providerWindow,
     providerJson: item?.raw == null ? Prisma.JsonNull : json(item.raw), localBuyCount: view?.buyCount ?? 0, localSellCount: view?.sellCount ?? 0,
     localBoughtUsd: view?.boughtUsd ?? null, localSoldUsd: view?.soldUsd ?? null, localRealizedProxyUsd: view?.realizedProxyUsd ?? null,
     localFirstBuyTs: view?.firstBuyTs ?? null, localFirstSellTs: view?.firstSellTs ?? null, localLastSellTs: view?.lastSellTs ?? null,
