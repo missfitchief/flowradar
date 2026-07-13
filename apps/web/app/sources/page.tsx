@@ -39,6 +39,18 @@ function worstMode(modes: SourceMode[]): SourceMode {
   return modes.reduce((worst, m) => (MODE_SEVERITY[m] < MODE_SEVERITY[worst] ? m : worst), modes[0]);
 }
 
+/** Seed/mock rows carry a synthetic `lastError` ("simulated provider failure").
+ *  With MOCK_MODE=false the dashboard shows REAL execution only, so these
+ *  simulated failure records must never surface — suppress them to null. */
+const IS_MOCK = process.env.MOCK_MODE === 'true';
+const SIMULATED_ERROR_MARKERS = ['simulated provider failure', 'simulated', 'mock provider'];
+function realLastError(lastError: string | null): string | null {
+  if (!lastError) return null;
+  if (IS_MOCK) return lastError;
+  const lc = lastError.toLowerCase();
+  return SIMULATED_ERROR_MARKERS.some((m) => lc.includes(m)) ? null : lastError;
+}
+
 export default async function SourcesPage() {
   const [sources, candidateGroups] = await Promise.all([
     prisma.externalWalletSource.findMany({ orderBy: { name: 'asc' } }),
@@ -135,7 +147,7 @@ export default async function SourcesPage() {
       // fmtAge() there directly would hydration-mismatch.
       lastSyncAgeLabel: source.lastSyncAt ? `${fmtAge(source.lastSyncAt)} ago` : 'never',
       rateLimitPerMinute: source.rateLimitPerMinute,
-      lastError: source.lastError,
+      lastError: realLastError(source.lastError),
       found: counts.pending + counts.validating + counts.promoted + counts.rejected,
       validated: counts.promoted + counts.rejected,
       promoted: counts.promoted,
