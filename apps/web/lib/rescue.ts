@@ -32,10 +32,17 @@ export const STATE_BADGE_CLASS: Record<string, string> = {
 };
 
 export const CLASSIFICATION_LABEL: Record<string, string> = {
-  true_positive: 'Caught it — real runner, signaled in time',
-  false_positive: 'False alarm — signaled but did not run',
-  miss: 'Missed — it ran, but the evidence never qualified',
-  true_negative: 'Correctly quiet — control token, no signal'
+  true_positive: 'Caught',
+  false_positive: 'False alert',
+  miss: 'Missed',
+  true_negative: 'Correct rejection'
+};
+
+export const CLASSIFICATION_LONG: Record<string, string> = {
+  true_positive: 'Caught — a real historical $10M+ runner that FlowRadar would have flagged at the evaluation moment.',
+  false_positive: 'False alert — a control token FlowRadar would have flagged, but it did not run.',
+  miss: 'Missed — a real runner FlowRadar did NOT flag; the evidence never met the rule.',
+  true_negative: 'Correct rejection — a control token FlowRadar correctly did not flag.'
 };
 
 export const CLASSIFICATION_BADGE_CLASS: Record<string, string> = {

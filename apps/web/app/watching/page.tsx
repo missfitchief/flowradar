@@ -1,79 +1,84 @@
-import Link from 'next/link';
 import { prisma } from '@/lib/db';
 import { fmtUsd } from '@/lib/format';
-import { shortAddr, missingEvidence, STATE_LABEL, STATE_BADGE_CLASS } from '@/lib/rescue';
+import { missingEvidence, STATE_LABEL, STATE_BADGE_CLASS } from '@/lib/rescue';
+import { SortableTable, TokenCellInner } from '@/components/SortableTable';
+import type { Column } from '@/components/SortableTable';
+import { resolveTokenIdentity } from '@/lib/tokenIdentity';
 
-// FlowRadar — Watching (rescue sprint): every discovered candidate that does
-// NOT yet qualify, with exactly what evidence each one is missing. This is
-// where score-zero and insufficient-data records live — never in /setups.
+// FlowRadar — Watching: discovered candidates that don't yet qualify, sortable
+// + searchable, with what evidence each is missing. Score-zero / insufficient
+// records live here — never in Live Opportunities. Real persisted data.
 export const dynamic = 'force-dynamic';
 
+interface Row {
+  id: string;
+  mint: string;
+  display: string;
+  logoUri: string | null;
+  isUnknown: boolean;
+  state: string;
+  mcap: number | null;
+  buyers: number;
+  missing: string;
+}
+
 export default async function WatchingPage() {
-  const rows = await prisma.tokenCandidateScore.findMany({
+  const cands = await prisma.tokenCandidateScore.findMany({
     where: { state: { in: ['WATCHING', 'INVALIDATED'] } },
     orderBy: [{ confidence: 'desc' }, { qualifiedBuyerCount: 'desc' }, { mint: 'asc' }],
-    take: 150
+    take: 200
   });
-  const tokenRows = await prisma.token.findMany({
-    where: { chain: 'SOLANA', address: { in: rows.map((r) => r.mint) } },
-    select: { address: true, symbol: true }
+  const metaRows = await prisma.tokenMetadata.findMany({
+    where: { chain: 'SOLANA', mint: { in: cands.map((r) => r.mint) } },
+    select: { mint: true, name: true, symbol: true, logoUri: true, availability: true }
   });
-  const symbolOf = new Map(tokenRows.map((t) => [t.address, t.symbol]));
+  const metaOf = new Map(metaRows.map((m) => [m.mint, m]));
+
+  const rows: Row[] = cands.map((c) => {
+    const id = resolveTokenIdentity(c.mint, metaOf.get(c.mint));
+    return {
+      id: c.id,
+      mint: c.mint,
+      display: id.display,
+      logoUri: id.logoUri,
+      isUnknown: id.isUnknown,
+      state: c.state,
+      mcap: c.currentMcapUsd === null ? null : Number(c.currentMcapUsd),
+      buyers: c.qualifiedBuyerCount,
+      missing:
+        c.state === 'INVALIDATED'
+          ? 'token outcome was a rug or failed launch — kept for the record'
+          : missingEvidence(c).join(' · ') || 'a second independent qualified entity'
+    };
+  });
+
+  const columns: Column<Row>[] = [
+    { key: 'token', label: 'Token', value: (r) => (r.isUnknown ? r.mint : r.display), searchable: true, render: (r) => <TokenCellInner mint={r.mint} display={r.display} logoUri={r.logoUri} isUnknown={r.isUnknown} /> },
+    { key: 'state', label: 'State', value: (r) => r.state, searchable: true, render: (r) => <span className={`inline-block rounded px-1.5 py-0.5 text-[11px] ${STATE_BADGE_CLASS[r.state] ?? ''}`}>{STATE_LABEL[r.state] ?? r.state}</span> },
+    { key: 'mcap', label: 'Market cap', align: 'right', type: 'number', value: (r) => r.mcap, render: (r) => (r.mcap === null ? <span className="text-zinc-500">unknown</span> : fmtUsd(r.mcap)) },
+    { key: 'buyers', label: 'Qualified buyers', align: 'right', type: 'number', value: (r) => r.buyers },
+    { key: 'missing', label: "What's missing", value: (r) => r.missing, render: (r) => <span className="text-xs text-zinc-400">{r.missing}</span> }
+  ];
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">Watching</h1>
         <p className="mt-1 max-w-3xl text-sm text-zinc-400">
-          Tokens with SOME qualified-wallet activity that don&apos;t yet meet the setup bar. Each row says
-          exactly what evidence is missing. Invalidated tokens (rug/failed outcome) are kept for the record.
+          Tokens with SOME qualified-wallet activity that don&apos;t yet meet the setup bar. Each row says exactly
+          what evidence is missing. Invalidated tokens (rug/failed outcome) are kept for the record. Click a heading
+          to sort, or search by token / mint / state.
         </p>
       </div>
-
-      {rows.length === 0 ? (
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6 text-sm text-zinc-400">
-          Nothing is being watched — run the candidate pipeline first.
-        </div>
-      ) : (
-        <div className="overflow-x-auto rounded-xl border border-zinc-800">
-          <table className="w-full text-left text-sm">
-            <thead className="border-b border-zinc-800 bg-zinc-900/70 text-xs text-zinc-400">
-              <tr>
-                <th className="px-3 py-2">Token</th>
-                <th className="px-3 py-2">State</th>
-                <th className="px-3 py-2 text-right">Market cap</th>
-                <th className="px-3 py-2 text-right">Qualified buyers</th>
-                <th className="px-3 py-2">What&apos;s missing</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-zinc-800/60">
-              {rows.map((c) => (
-                <tr key={c.id} className="align-top hover:bg-zinc-900/40">
-                  <td className="px-3 py-2 whitespace-nowrap">
-                    <Link href={`/token/${c.mint}`} className="text-sky-400 hover:underline">
-                      {symbolOf.get(c.mint) ? `$${symbolOf.get(c.mint)}` : shortAddr(c.mint)}
-                    </Link>
-                  </td>
-                  <td className="px-3 py-2">
-                    <span className={`inline-block rounded px-1.5 py-0.5 text-[11px] ${STATE_BADGE_CLASS[c.state] ?? ''}`}>
-                      {STATE_LABEL[c.state] ?? c.state}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap">
-                    {c.currentMcapUsd === null ? <span className="text-zinc-500">unknown</span> : fmtUsd(Number(c.currentMcapUsd))}
-                  </td>
-                  <td className="px-3 py-2 text-right">{c.qualifiedBuyerCount}</td>
-                  <td className="px-3 py-2 text-xs text-zinc-400">
-                    {c.state === 'INVALIDATED'
-                      ? 'token outcome was a rug or failed launch — kept for the record'
-                      : missingEvidence(c).join(' · ') || 'a second independent qualified entity'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <SortableTable
+        rows={rows}
+        columns={columns}
+        rowKey={(r) => r.id}
+        rowHref={(r) => `/token/${r.mint}`}
+        initialSort={{ key: 'buyers', dir: 'desc' }}
+        searchPlaceholder="Search token / mint / state…"
+        emptyText="Nothing is being watched — run the candidate pipeline first."
+      />
     </div>
   );
 }

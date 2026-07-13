@@ -10,6 +10,8 @@ import {
   shortAddr,
   fmtPct
 } from '@/lib/rescue';
+import { resolveTokenIdentity, solscanTokenUrl } from '@/lib/tokenIdentity';
+import { CopyButton } from '@/components/CopyButton';
 
 // FlowRadar — Token detail (rescue sprint): plain-English summary first,
 // evidence grouped by independent entity, receipts under Advanced.
@@ -32,6 +34,11 @@ export default async function TokenDetailPage({ params }: { params: Promise<{ mi
     where: { chain_address: { chain: 'SOLANA', address: mint } },
     select: { id: true, symbol: true, name: true }
   });
+  const meta = await prisma.tokenMetadata.findUnique({
+    where: { chain_mint: { chain: 'SOLANA', mint } },
+    select: { mint: true, name: true, symbol: true, logoUri: true, availability: true }
+  });
+  const identity = resolveTokenIdentity(mint, meta);
   const lifecycle = await prisma.tokenLifecycle.findUnique({
     where: { mint },
     select: { runnerClass: true, outcomeLabels: true }
@@ -97,15 +104,26 @@ export default async function TokenDetailPage({ params }: { params: Promise<{ mi
     <div className="max-w-4xl space-y-6">
       <div>
         <h1 className="flex flex-wrap items-center gap-3 text-xl font-semibold">
-          {token?.symbol ? `$${token.symbol}` : shortAddr(mint)}
-          {token?.name && token.name !== token.symbol && <span className="text-base font-normal text-zinc-400">{token.name}</span>}
+          {identity.logoUri && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={identity.logoUri} alt="" width={28} height={28} className="rounded-full" />
+          )}
+          {identity.isUnknown ? <span className="text-zinc-300">Unknown token</span> : identity.display}
+          {identity.name && !identity.isUnknown && <span className="text-base font-normal text-zinc-400">{identity.name}</span>}
           {candidate && (
             <span className={`inline-block rounded px-2 py-0.5 text-sm ${STATE_BADGE_CLASS[candidate.state] ?? ''}`}>
               {STATE_LABEL[candidate.state] ?? candidate.state}
             </span>
           )}
         </h1>
-        <p className="mt-1 font-mono text-xs text-zinc-500">{mint}</p>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <span className="font-mono text-xs text-zinc-500">{mint}</span>
+          <CopyButton value={mint} label="Copy CA" />
+          <a href={solscanTokenUrl(mint)} target="_blank" rel="noopener noreferrer" className="text-xs text-sky-400 hover:underline">
+            Solscan ↗
+          </a>
+          {identity.isUnknown && <span className="text-xs text-zinc-500">(name/symbol not yet resolved — provider quota)</span>}
+        </div>
         {candidate && (
           <p className="mt-2 max-w-3xl text-sm">
             {STATE_DESCRIPTION[candidate.state]} {candidate.reasonCodes.map(explainReason).join('; ')}.

@@ -38,9 +38,10 @@ export default async function ProofPage() {
       <div>
         <h1 className="text-xl font-semibold">Historical Proof</h1>
         <p className="mt-1 max-w-3xl text-sm text-zinc-400">
-          A no-lookahead replay over the golden cohort: at each historical evaluation moment the engine saw ONLY
-          evidence available at that moment; what happened afterwards is recorded separately. Failures and
-          controls are shown alongside the catches — this is validation, not marketing.
+          This page checks what FlowRadar would have known at that historical moment, before the later outcome
+          occurred. At each evaluation moment the engine saw ONLY evidence available then; what happened afterwards is
+          recorded separately. Catches, misses, false alerts and correct rejections are all shown — this is
+          validation, not marketing. Click any case for the full explanation.
         </p>
       </div>
 
@@ -96,9 +97,25 @@ export default async function ProofPage() {
                   {e.independentEntitiesAtEvent} independent · {e.buyersAtEvent} buyers
                 </div>
               </div>
-              <p className="mt-2 text-xs text-zinc-400">
-                {e.reasonCodes.slice(0, 3).map(explainReason).join('; ')}
+              <p className="mt-2 text-sm text-zinc-300">
+                {(() => {
+                  const at = e.mcapAtSignalUsd === null ? null : Number(e.mcapAtSignalUsd);
+                  const peak = e.maxLaterMcapUsd === null ? null : Number(e.maxLaterMcapUsd);
+                  const flagged = e.eventKind === 'signal';
+                  const moved = at !== null && peak !== null ? `It later moved from ${fmtUsd(at)} to ${fmtUsd(peak)}.` : '';
+                  if (e.classification === 'miss') {
+                    return `FlowRadar did not flag this token. ${moved} Only ${e.independentEntitiesAtEvent} qualified independent ${e.independentEntitiesAtEvent === 1 ? 'entity was' : 'entities were'} observed; the rule required 2.`;
+                  }
+                  if (e.classification === 'true_positive') {
+                    return `FlowRadar would have flagged this at ${STATE_LABEL[e.stateAtEvent] ?? e.stateAtEvent} on ${e.independentEntitiesAtEvent} independent qualified entities. ${moved}`;
+                  }
+                  if (e.classification === 'false_positive') {
+                    return `FlowRadar would have flagged this control token on ${e.independentEntitiesAtEvent} entities, but it did not run. ${moved}`;
+                  }
+                  return `FlowRadar correctly did not flag this control token (${e.independentEntitiesAtEvent} entities, below the rule). ${moved}`;
+                })()}
               </p>
+              <p className="mt-1 text-xs text-zinc-500">{e.reasonCodes.slice(0, 3).map(explainReason).join('; ')}</p>
             </Link>
           );
         })}

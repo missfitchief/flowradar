@@ -143,12 +143,99 @@ export default async function SourcesPage() {
     };
   });
 
+  // --- TRUTHFUL Solana-product source execution (live-recovery sprint) ------
+  // Real recent execution from persisted tables, not just key presence.
+  const recentCutoff = new Date(Date.now() - 7 * 86_400_000);
+  const [
+    birdeyeFetch,
+    birdeyeQuota,
+    metaResolved,
+    metaRetryable,
+    metaUnavailable,
+    metaLastErr,
+    topPnlRows,
+    topPnlVerified,
+    candidateRows
+  ] = await Promise.all([
+    prisma.topPnlFetchState.groupBy({ by: ['status'], _count: { _all: true } }),
+    prisma.topPnlFetchState.count({ where: { status: 'provider_error', lastError: { contains: 'usage', mode: 'insensitive' }, updatedAt: { gte: recentCutoff } } }),
+    prisma.tokenMetadata.count({ where: { chain: 'SOLANA', availability: 'resolved' } }),
+    prisma.tokenMetadata.count({ where: { chain: 'SOLANA', availability: 'retryable' } }),
+    prisma.tokenMetadata.count({ where: { chain: 'SOLANA', availability: 'unavailable' } }),
+    prisma.tokenMetadata.findFirst({ where: { chain: 'SOLANA', lastError: { not: null } }, orderBy: { updatedAt: 'desc' }, select: { lastError: true, updatedAt: true } }),
+    prisma.tokenTopPnlCandidate.count({ where: { chain: 'SOLANA' } }),
+    prisma.tokenTopPnlCandidate.count({ where: { chain: 'SOLANA', validation: 'locally_verified' } }),
+    prisma.tokenCandidateScore.count({ where: { chain: 'SOLANA' } })
+  ]);
+  const birdeyeByStatus = Object.fromEntries(birdeyeFetch.map((g) => [g.status, g._count._all]));
+  const productSources = [
+    {
+      name: 'Local on-chain reconstruction',
+      credential: 'n/a (local DB)',
+      status: topPnlRows > 0 ? 'Healthy' : 'Degraded',
+      detail: `${topPnlRows} historical top-PnL candidate rows persisted · ${topPnlVerified} locally verified · ${candidateRows} automatic token candidates`
+    },
+    {
+      name: 'Helius (token metadata / wallet activity)',
+      credential: 'configured',
+      status: metaRetryable > 0 && metaResolved === 0 ? 'Quota limited' : metaResolved > 0 ? 'Healthy' : 'Degraded',
+      detail: `token metadata: ${metaResolved} resolved · ${metaRetryable} retryable · ${metaUnavailable} unavailable${metaLastErr?.lastError ? ` · last error: ${metaLastErr.lastError.slice(0, 60)}` : ''}`
+    },
+    {
+      name: 'Birdeye (top traders / historical)',
+      credential: 'configured',
+      status: birdeyeQuota > 0 ? 'Quota limited' : (birdeyeByStatus.fetched ?? 0) > 0 ? 'Healthy' : 'Degraded',
+      detail: `fetch states — ${Object.entries(birdeyeByStatus).map(([s, n]) => `${s}: ${n}`).join(' · ') || 'none'}${birdeyeQuota > 0 ? ` · ${birdeyeQuota} calls blocked by compute-unit quota in last 7d` : ''}`
+    },
+    { name: 'GMGN', credential: 'no verified endpoint', status: 'Stub / not implemented', detail: 'typed stub — no verified public API; returns no candidates' }
+  ];
+  const STATUS_CLASS: Record<string, string> = {
+    Healthy: 'bg-emerald-500/15 text-emerald-300',
+    'Quota limited': 'bg-amber-500/15 text-amber-300',
+    Degraded: 'bg-orange-500/15 text-orange-300',
+    Error: 'bg-red-500/15 text-red-300',
+    'Stub / not implemented': 'bg-zinc-500/15 text-zinc-300'
+  };
+
   return (
     <div>
       <h1 className="text-2xl font-semibold tracking-tight">Source Health</h1>
       <p className="mt-2 text-sm text-muted-foreground">
-        External candidate-wallet feeders — enabled state, live/mock/stub status, and candidate counts. Candidates
-        never influence signals or counts until promoted (see Wallets).
+        Real execution state of the Solana product data sources, from persisted fetch/metadata results — not merely
+        whether an API key is present. The legacy connector-health table (mock/stub feeders) is under Advanced below.
+      </p>
+
+      <div className="mt-4 overflow-x-auto rounded-xl border border-zinc-800">
+        <table className="w-full text-left text-sm">
+          <thead className="border-b border-zinc-800 bg-zinc-900/70 text-xs text-zinc-400">
+            <tr>
+              <th className="px-3 py-2">Source</th>
+              <th className="px-3 py-2">Status</th>
+              <th className="px-3 py-2">Credential</th>
+              <th className="px-3 py-2">Real execution result</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-800/60">
+            {productSources.map((s) => (
+              <tr key={s.name}>
+                <td className="px-3 py-2 font-medium">{s.name}</td>
+                <td className="px-3 py-2"><span className={`inline-block rounded px-2 py-0.5 text-xs ${STATUS_CLASS[s.status] ?? 'bg-zinc-500/15 text-zinc-300'}`}>{s.status}</span></td>
+                <td className="px-3 py-2 text-xs text-zinc-400">{s.credential}</td>
+                <td className="px-3 py-2 text-xs text-zinc-400">{s.detail}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-2 text-xs text-zinc-500">
+        Historical top-PnL candidates ({topPnlRows}) and automatic token candidates ({candidateRows}) are distinct from
+        the legacy provider-discovery candidate count below.
+      </p>
+
+      <h2 className="mt-8 text-lg font-semibold tracking-tight text-zinc-400">Advanced — legacy connector health</h2>
+      <p className="mt-2 text-sm text-muted-foreground">
+        External candidate-wallet feeders (Wave 4.5). Stub/mock feeders are labeled; they never influence signals or
+        counts until promoted (see Wallets).
       </p>
 
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
