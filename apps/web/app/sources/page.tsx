@@ -188,13 +188,21 @@ export default async function SourcesPage() {
     {
       name: 'Helius (wallet-activity polling)',
       credential: heliusKey ? 'configured' : 'missing credential',
-      status: !heliusKey ? 'Missing credential' : 'Degraded',
-      detail: 'driven by the live shadow-run worker (separate process); recent polls are Helius rate-limited (429) — see the shadow run status'
+      status: !heliusKey ? 'Missing credential' : 'Disabled',
+      detail: 'driven by the live shadow-run worker, a separate process — its real health is on the Shadow page, not measured here'
     },
     {
       name: 'Birdeye (top traders / historical)',
       credential: birdeyeKey ? 'configured' : 'missing credential',
-      status: !birdeyeKey ? 'Missing credential' : birdeyeQuota > 0 ? 'Quota limited' : (birdeyeByStatus.fetched ?? 0) > 0 ? 'Healthy' : 'Degraded',
+      status: !birdeyeKey
+        ? 'Missing credential'
+        : birdeyeQuota > 0
+          ? 'Quota limited'
+          : (birdeyeByStatus.provider_error ?? 0) > 0
+            ? 'Degraded'
+            : (birdeyeByStatus.fetched ?? 0) > 0
+              ? 'Healthy'
+              : 'Degraded',
       detail: `fetch states — ${Object.entries(birdeyeByStatus).map(([s, n]) => `${s}: ${n}`).join(' · ') || 'none'}${birdeyeQuota > 0 ? ` · ${birdeyeQuota} calls blocked by compute-unit quota in last 7d` : ''}`
     },
     { name: 'GMGN', credential: 'no verified endpoint', status: 'Stub / not implemented', detail: 'typed stub — no verified public API; returns no candidates' }
@@ -205,6 +213,7 @@ export default async function SourcesPage() {
     Degraded: 'bg-orange-500/15 text-orange-300',
     Error: 'bg-red-500/15 text-red-300',
     'Missing credential': 'bg-red-500/15 text-red-300',
+    Disabled: 'bg-zinc-500/15 text-zinc-300',
     'Stub / not implemented': 'bg-zinc-500/15 text-zinc-300'
   };
 

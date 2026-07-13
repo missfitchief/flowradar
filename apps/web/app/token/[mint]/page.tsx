@@ -126,10 +126,12 @@ export default async function TokenDetailPage({ params }: { params: Promise<{ mi
             <span className="text-xs text-zinc-500">
               (name/symbol{' '}
               {meta?.availability === 'retryable'
-                ? 'not yet resolved — provider quota, retryable'
-                : meta?.availability === 'unavailable' || meta?.availability === 'placeholder_only'
-                  ? 'unavailable from the metadata provider'
-                  : 'not yet fetched'}
+                ? 'not yet resolved — provider quota / rate-limited, retryable'
+                : meta?.availability === 'missing_credential'
+                  ? 'unresolved — metadata provider credential not configured'
+                  : meta?.availability === 'unavailable' || meta?.availability === 'placeholder_only'
+                    ? 'unavailable from the metadata provider'
+                    : 'not yet fetched'}
               )
             </span>
           )}

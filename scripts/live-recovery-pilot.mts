@@ -36,7 +36,7 @@ async function main() {
   // Data-driven honest gaps — computed from THIS run's real results.
   const gaps: string[] = [];
   if (meta.resolved === 0 && (meta.retryable > 0 || meta.unavailable > 0)) {
-    gaps.push(`token metadata unresolved this run (${meta.retryable} retryable / ${meta.unavailable} unavailable of ${meta.mintsConsidered}) — provider quota/limits, retryable, never fabricated`);
+    gaps.push(`token metadata unresolved this run (${meta.retryable} retryable / ${meta.unavailable} unavailable of ${meta.mintsConsidered}) — provider quota/rate-limit (or missing credential), retryable, never fabricated`);
   } else if (meta.resolved > 0) {
     gaps.push(`token metadata: ${meta.resolved} resolved, ${meta.retryable} retryable, ${meta.unavailable} unavailable`);
   }

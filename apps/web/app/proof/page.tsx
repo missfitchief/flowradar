@@ -19,6 +19,7 @@ export const dynamic = 'force-dynamic';
 
 export default async function ProofPage() {
   const events = await prisma.replaySignalEvent.findMany({
+    where: { chain: 'SOLANA' },
     orderBy: [{ eventKind: 'asc' }, { scoreAtEvent: 'desc' }, { mint: 'asc' }],
     take: 100
   });

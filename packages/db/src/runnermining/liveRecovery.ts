@@ -68,11 +68,12 @@ export async function buildReceiverActivityBackfill(
 
   for (const r of receivers) {
     try {
-      const wallet = await activity.wallet.findUnique({
-        where: { address_chain: { address: r.receiverAddress, chain } },
-        select: { id: true }
-      });
-      const hasLiveWalletRow = wallet !== null;
+      // Merge LOCAL (main client) + LIVE (activityClient) so a buy present in
+      // either is never missed. When activityClient === prisma the two reads
+      // are identical (deduped below).
+      const clients = activity === prisma ? [prisma] : [prisma, activity];
+      let hasLiveWalletRow = false;
+      let tradeInspected = false; // any trade row (any time) proves the trade poller ran
       let postTx = 0;
       let postEdges = 0;
       let firstActivityTs: Date | null = null;
@@ -80,61 +81,49 @@ export async function buildReceiverActivityBackfill(
       let firstBuyMint: string | null = null;
       let boughtKnownUsd: number | null = null;
 
-      if (wallet) {
-        const [buys, sells, edges] = await Promise.all([
-          activity.walletTokenTrade.findMany({
-            where: { walletId: wallet.id, chain, action: 'BUY', ts: { gt: r.firstReceiptTs } },
-            orderBy: [{ ts: 'asc' }, { id: 'asc' }],
-            take: 200,
-            select: { ts: true, amountUsd: true, token: { select: { address: true } } }
-          }),
-          activity.walletTokenTrade.count({ where: { walletId: wallet.id, chain, action: 'SELL', ts: { gt: r.firstReceiptTs } } }),
-          activity.moneyFlowEdge.findMany({
-            where: {
-              OR: [
-                { sourceAddress: r.receiverAddress, sourceChain: chain },
-                { destinationAddress: r.receiverAddress, destinationChain: chain }
-              ],
-              ts: { gt: r.firstReceiptTs }
-            },
-            orderBy: [{ ts: 'asc' }, { id: 'asc' }],
-            take: 500,
-            select: { ts: true }
-          })
+      for (const client of clients) {
+        const wallet = await client.wallet.findUnique({ where: { address_chain: { address: r.receiverAddress, chain } }, select: { id: true } });
+        if (!wallet) continue;
+        hasLiveWalletRow = true;
+        const [anyTrade, buys, sells, edges] = await Promise.all([
+          client.walletTokenTrade.count({ where: { walletId: wallet.id, chain } }),
+          client.walletTokenTrade.findMany({ where: { walletId: wallet.id, chain, action: 'BUY', ts: { gt: r.firstReceiptTs } }, orderBy: [{ ts: 'asc' }, { id: 'asc' }], take: 200, select: { ts: true, amountUsd: true, token: { select: { address: true } } } }),
+          client.walletTokenTrade.count({ where: { walletId: wallet.id, chain, action: 'SELL', ts: { gt: r.firstReceiptTs } } }),
+          client.moneyFlowEdge.count({ where: { OR: [{ sourceAddress: r.receiverAddress, sourceChain: chain }, { destinationAddress: r.receiverAddress, destinationChain: chain }], ts: { gt: r.firstReceiptTs } } })
         ]);
-        postTx = buys.length + sells;
-        postEdges = edges.length;
-        const firstTsCandidates = [buys[0]?.ts, edges[0]?.ts].filter((x): x is Date => x !== undefined);
-        firstActivityTs = firstTsCandidates.length ? new Date(Math.min(...firstTsCandidates.map((d) => d.getTime()))) : null;
+        if (anyTrade > 0) tradeInspected = true;
+        postTx = Math.max(postTx, buys.length + sells);
+        postEdges = Math.max(postEdges, edges);
         if (buys.length > 0) {
-          firstBuyTs = buys[0].ts;
-          firstBuyMint = buys[0].token.address;
-          const usd = Number(buys[0].amountUsd);
-          boughtKnownUsd = usd > 0 ? usd : null;
+          const b = buys[0];
+          if (firstBuyTs === null || b.ts < firstBuyTs) {
+            firstBuyTs = b.ts;
+            firstBuyMint = b.token.address;
+            const usd = Number(b.amountUsd);
+            boughtKnownUsd = usd > 0 ? usd : null;
+          }
+          if (firstActivityTs === null || b.ts < firstActivityTs) firstActivityTs = b.ts;
         }
       }
 
-      // Honest terminal status. A mere wallet row is NOT proof the receiver's
-      // history was inspected (enrollment can create the row without polling).
-      // "covered" therefore requires OBSERVED post-receipt activity.
+      // Honest terminal status. A mere wallet row — or a money-flow EDGE alone
+      // (edges are ingested by a DIFFERENT path than trade polling) — is NOT
+      // proof the trade history was inspected. "covered" therefore requires
+      // evidence the trade poller ran (any trade row) AND no post-receipt buy.
       let status: string;
       const reasons: string[] = [];
       if (firstBuyTs !== null) {
         status = 'deployment_found';
         reasons.push('post_receipt_token_buy_observed');
-      } else if (postEdges > 0 || postTx > 0) {
-        // Real post-receipt activity was observed (transfers/sells) but no buy
-        // — an honest negative, never unknown.
+      } else if (tradeInspected) {
         status = 'covered_no_post_receipt_buy';
-        reasons.push('post_receipt_activity_observed_but_no_token_buy');
+        reasons.push(postEdges > 0 ? 'trade_history_polled_post_receipt_transfers_but_no_buy' : 'trade_history_polled_no_post_receipt_buy');
       } else if (hasLiveWalletRow) {
-        // Wallet row exists but NO post-receipt activity was observed — cannot
-        // distinguish "genuinely quiet" from "not yet polled", so not covered.
+        // Wallet row (and maybe edges) but NO trade-poll evidence — cannot
+        // rule out an unobserved buy, so not covered.
         status = 'partial_coverage';
-        reasons.push('wallet_row_exists_but_no_post_receipt_activity_observed');
+        reasons.push(postEdges > 0 ? 'post_receipt_edges_but_trade_history_not_confirmed_polled' : 'wallet_row_only_no_trade_poll_evidence');
       } else {
-        // No local/live wallet row: the live run has not yet collected this
-        // receiver (Helius rate-limited) — retryable as coverage grows.
         status = 'retryable_provider_failure';
         reasons.push('no_local_or_live_wallet_row_provider_saturated');
       }
@@ -177,6 +166,40 @@ export async function buildReceiverActivityBackfill(
     } catch (err) {
       report.errors += 1;
       if (report.errorReceipts.length < ERROR_RECEIPTS_MAX) report.errorReceipts.push(toErrorReceipt(r.receiverAddress, err));
+      // A read failure must NOT leave a prior 'covered' row standing as if
+      // still valid — write an honest retryable status for this receiver.
+      try {
+        const fail = {
+          chain,
+          receiverAddress: r.receiverAddress,
+          sourceEntityKey: [...r.sourceEntityKeys].sort()[0] ?? r.receiverAddress,
+          sourceWallets: r.sourceWallets.slice(0, 25),
+          firstReceiptTs: r.firstReceiptTs,
+          backfillStart: r.firstReceiptTs,
+          backfillEnd: now,
+          status: 'retryable_provider_failure',
+          source: opts.activityClient ? 'live_shadow_db + local' : 'local',
+          hasLiveWalletRow: false,
+          postReceiptTxObserved: 0,
+          postReceiptEdges: 0,
+          firstActivityTs: null,
+          firstBuyTs: null,
+          firstBuyMint: null,
+          fundingToBuyDelaySec: null,
+          boughtKnownUsd: null,
+          entryMcapUsd: null,
+          receiverClass: r.receiverClass,
+          relationshipTier: null,
+          reasonCodes: ['activity_read_failed_this_pass'],
+          receiptsJson: { error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) } as unknown as Prisma.InputJsonValue,
+          caveats: ['activity read failed this pass — status reset to retryable so a stale covered result never lingers'],
+          engineVersion: LIVE_RECOVERY_ENGINE_VERSION,
+          computedAt: now
+        };
+        await prisma.receiverActivityBackfill.upsert({ where: { chain_receiverAddress: { chain, receiverAddress: r.receiverAddress } }, create: fail, update: fail });
+      } catch {
+        /* give up on this receiver this pass */
+      }
     }
   }
   return report;
@@ -274,8 +297,16 @@ export async function buildTokenMetadata(
   };
 
   if (!opts.heliusApiKey) {
-    // No provider — record honest retryable for everything not yet resolved.
-    for (const mint of todo) await write(mint, { name: null, symbol: null, logoUri: null, source: 'unavailable', availability: 'retryable', reasons: ['no_helius_key_configured'], lastError: 'HELIUS_API_KEY not configured' });
+    // No provider key — honest 'missing_credential' availability (distinct
+    // from quota 'retryable'), per-item isolated.
+    for (const mint of todo) {
+      try {
+        await write(mint, { name: null, symbol: null, logoUri: null, source: 'unavailable', availability: 'missing_credential', reasons: ['no_helius_key_configured'], lastError: 'HELIUS_API_KEY not configured' });
+      } catch (err) {
+        report.errors += 1;
+        if (report.errorReceipts.length < ERROR_RECEIPTS_MAX) report.errorReceipts.push(toErrorReceipt(mint, err));
+      }
+    }
     return report;
   }
 
@@ -325,14 +356,25 @@ export async function buildTokenMetadata(
         const name = a?.content?.metadata?.name?.trim() || null;
         const symbol = a?.content?.metadata?.symbol?.trim() || null;
         const logo = a?.content?.links?.image ?? a?.content?.files?.find((f) => f.uri)?.uri ?? null;
-        if (name || symbol) {
-          // A DAS symbol/name that is still just the mint prefix is a
-          // placeholder, not a real resolution.
-          if (isPlaceholderSymbol(mint, symbol, name)) {
-            await write(mint, { name: null, symbol: null, logoUri: logo ?? null, source: 'helius_das', availability: 'placeholder_only', reasons: ['das_metadata_is_mint_prefix_placeholder'] });
-          } else {
-            await write(mint, { name, symbol, logoUri: logo ?? null, source: 'helius_das', availability: 'resolved', reasons: ['das_metadata_resolved'] });
-          }
+        // Evaluate symbol and name INDEPENDENTLY for placeholder-ness — a
+        // real name-only result must still resolve (not be hidden). A DAS
+        // result carrying a LOGO is a real project, so trust it even if its
+        // (short) symbol coincidentally prefixes the mint.
+        const hasLogo = Boolean(logo);
+        const symbolReal = symbol !== null && (hasLogo || !isPlaceholderSymbol(mint, symbol, name));
+        const nameReal = name !== null && (hasLogo || !isPlaceholderSymbol(mint, name, name));
+        if (symbolReal || nameReal) {
+          await write(mint, {
+            name: nameReal ? name : null,
+            symbol: symbolReal ? symbol : null,
+            logoUri: logo ?? null,
+            source: 'helius_das',
+            availability: 'resolved',
+            reasons: [symbolReal ? 'das_symbol_resolved' : 'das_name_only_resolved']
+          });
+        } else if (name || symbol) {
+          // Something came back but it is a mint-prefix placeholder.
+          await write(mint, { name: null, symbol: null, logoUri: logo ?? null, source: 'helius_das', availability: 'placeholder_only', reasons: ['das_metadata_is_mint_prefix_placeholder'] });
         } else {
           await write(mint, { name: null, symbol: null, logoUri: null, source: 'helius_das', availability: 'unavailable', reasons: ['das_returned_no_name_or_symbol'] });
         }
