@@ -117,6 +117,15 @@ enum SignalSeverity {
   CRITICAL
 }
 
+/// Cluster-intelligence conviction. This is deliberately separate from the
+/// legacy A-G signal severity: it is produced only by multi-wallet/entity
+/// activation, never by one wallet buying on its own.
+enum IntelligenceSignalLevel {
+  WATCH
+  STRONG_WATCH
+  HIGH_CONVICTION
+}
+
 /// Alert.type
 enum AlertType {
   SIGNAL
@@ -273,6 +282,7 @@ model Wallet {
   relationshipsAsSender   WalletRelationship[]          @relation("RelationshipSender")
   relationshipsAsReceiver WalletRelationship[]          @relation("RelationshipReceiver")
   observationSnapshots    ObservationProviderSnapshot[]
+  intelligenceProfile     WalletIntelligenceProfile?
 
   @@unique([address, chain])
   @@index([status])
@@ -2750,19 +2760,19 @@ model HistoricalTokenUniverse {
   sources                String[]
   /// verified_above_10m | operator_core | candidate | conflicting | invalid
   historicalWinnerStatus String
-  athMcapUsd              Decimal?  @db.Decimal(24, 4)
-  athTs                   DateTime?
+  athMcapUsd             Decimal?  @db.Decimal(24, 4)
+  athTs                  DateTime?
   /// covered | partially_covered | unavailable | conflicting | invalid
-  coverage                String
+  coverage               String
   /// pending | processing | processed | partial | retryable | unavailable | invalid
-  processingStatus        String
-  evidenceJson            Json
-  retryCount              Int       @default(0)
-  lastError               String?
-  nextRetryAt             DateTime?
-  lastProcessedAt         DateTime?
-  createdAt               DateTime  @default(now())
-  updatedAt               DateTime  @updatedAt
+  processingStatus       String
+  evidenceJson           Json
+  retryCount             Int       @default(0)
+  lastError              String?
+  nextRetryAt            DateTime?
+  lastProcessedAt        DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
 
   @@unique([chain, tokenAddress])
   @@index([historicalWinnerStatus, processingStatus])
@@ -2773,22 +2783,22 @@ model HistoricalTokenUniverse {
 /// One bounded/resumable discovery execution receipt. This is operational
 /// evidence only and never grants signal eligibility.
 model ProfitableWalletDiscoveryRun {
-  id                  String    @id
-  startedAt           DateTime
-  completedAt         DateTime?
-  status              String
-  universeConsidered  Int       @default(0)
-  tokensProcessed     Int       @default(0)
-  tokensPartial       Int       @default(0)
-  tokensUnavailable   Int       @default(0)
-  localCandidates     Int       @default(0)
-  providerCandidates  Int       @default(0)
-  walletsObserved     Int       @default(0)
-  retryableFailures   Int       @default(0)
-  peakHeapBytes       BigInt    @default(0)
-  throughputPerSec    Float     @default(0)
-  error               String?
-  metadataJson        Json
+  id                 String    @id
+  startedAt          DateTime
+  completedAt        DateTime?
+  status             String
+  universeConsidered Int       @default(0)
+  tokensProcessed    Int       @default(0)
+  tokensPartial      Int       @default(0)
+  tokensUnavailable  Int       @default(0)
+  localCandidates    Int       @default(0)
+  providerCandidates Int       @default(0)
+  walletsObserved    Int       @default(0)
+  retryableFailures  Int       @default(0)
+  peakHeapBytes      BigInt    @default(0)
+  throughputPerSec   Float     @default(0)
+  error              String?
+  metadataJson       Json
 
   @@index([startedAt])
   @@index([status])
@@ -2799,17 +2809,17 @@ model ProfitableWalletDiscoveryRun {
 /// probable/strong entities, identical EVM account addresses, and verified
 /// official bridge correlations. It is a relationship graph, not identity.
 model UnifiedEntity {
-  id            String   @id @default(cuid())
-  entityKey     String   @unique
+  id            String    @id @default(cuid())
+  entityKey     String    @unique
   chains        ChainId[]
-  memberCount   Int      @default(0)
+  memberCount   Int       @default(0)
   confidence    Float
   evidenceJson  Json
   caveats       String[]
   engineVersion Int
   computedAt    DateTime
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   addresses UnifiedEntityAddress[]
 
@@ -2840,20 +2850,20 @@ model UnifiedEntityAddress {
 /// Persisted CA -> ranked wallet intelligence. Historical-token analysis is
 /// discovery evidence only and never turns the source token into a live alert.
 model TokenWalletIntelligence {
-  id                        String   @id @default(cuid())
+  id                        String    @id @default(cuid())
   chain                     ChainId
   tokenAddress              String
   walletAddress             String
   rank                      Int
-  status                    String   @default("observation_only")
+  status                    String    @default("observation_only")
   role                      String
   entityKey                 String?
   qualityScore              Float
   evidenceConfidence        Float
-  localBuyCount             Int      @default(0)
-  localSellCount            Int      @default(0)
-  localTransferCount        Int      @default(0)
-  localRealizedPnlUsd       Decimal? @db.Decimal(24, 4)
+  localBuyCount             Int       @default(0)
+  localSellCount            Int       @default(0)
+  localTransferCount        Int       @default(0)
+  localRealizedPnlUsd       Decimal?  @db.Decimal(24, 4)
   entryTs                   DateTime?
   exitTs                    DateTime?
   dormant7d                 Boolean?
@@ -2862,10 +2872,10 @@ model TokenWalletIntelligence {
   dormant90d                Boolean?
   funderAddress             String?
   funderTxHash              String?
-  completedPositions        Int      @default(0)
-  winCount                  Int      @default(0)
-  lossCount                 Int      @default(0)
-  unresolvedPositions       Int      @default(0)
+  completedPositions        Int       @default(0)
+  winCount                  Int       @default(0)
+  lossCount                 Int       @default(0)
+  unresolvedPositions       Int       @default(0)
   winRate                   Float?
   evUsd                     Float?
   repeatRunnerCount         Int?
@@ -2873,11 +2883,11 @@ model TokenWalletIntelligence {
   coverage                  String
   supportingEvidenceJson    Json
   contradictingEvidenceJson Json
-  monitoringEnrolled        Boolean  @default(false)
+  monitoringEnrolled        Boolean   @default(false)
   engineVersion             Int
   computedAt                DateTime
-  createdAt                 DateTime @default(now())
-  updatedAt                 DateTime @updatedAt
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
 
   @@unique([chain, tokenAddress, walletAddress])
   @@index([chain, tokenAddress, qualityScore])
@@ -2925,26 +2935,26 @@ model WalletFlowRelationship {
 /// New activity alert built only from new token-buy events by monitored
 /// wallets/entities. Historical membership alone can never create a row.
 model TrackedTokenActivationAlert {
-  id                String   @id @default(cuid())
-  dedupeKey         String   @unique
-  chain             ChainId
-  tokenAddress      String
-  alertType         String
-  activatedAt       DateTime
-  trackedWallets    String[]
-  entityKeys        String[]
-  trackedWalletCount Int     @default(0)
-  independentEntityCount Int @default(0)
-  sourceEventIds    String[]
-  confidence        Float
-  historicalToken  Boolean  @default(false)
-  evidenceJson      Json
-  caveats           String[]
-  status            String   @default("active")
-  engineVersion     Int
-  computedAt        DateTime
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id                     String   @id @default(cuid())
+  dedupeKey              String   @unique
+  chain                  ChainId
+  tokenAddress           String
+  alertType              String
+  activatedAt            DateTime
+  trackedWallets         String[]
+  entityKeys             String[]
+  trackedWalletCount     Int      @default(0)
+  independentEntityCount Int      @default(0)
+  sourceEventIds         String[]
+  confidence             Float
+  historicalToken        Boolean  @default(false)
+  evidenceJson           Json
+  caveats                String[]
+  status                 String   @default("active")
+  engineVersion          Int
+  computedAt             DateTime
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
 
   @@index([chain, tokenAddress, activatedAt])
   @@index([status, activatedAt])
@@ -2954,18 +2964,18 @@ model TrackedTokenActivationAlert {
 /// Operational receipt for continuous activation scans, including honest
 /// empty runs and historical rows skipped for lack of new activity.
 model TrackedActivationScanRun {
-  id                       String   @id
-  startedAt                DateTime
-  completedAt              DateTime?
-  status                   String
-  sinceTs                  DateTime
-  trackedWallets           Int      @default(0)
-  newBuyEvents             Int      @default(0)
-  tokensConsidered         Int      @default(0)
-  alertsCreated            Int      @default(0)
-  historicalWithoutActivitySkipped Int @default(0)
-  errorCount               Int      @default(0)
-  metadataJson             Json
+  id                               String    @id
+  startedAt                        DateTime
+  completedAt                      DateTime?
+  status                           String
+  sinceTs                          DateTime
+  trackedWallets                   Int       @default(0)
+  newBuyEvents                     Int       @default(0)
+  tokensConsidered                 Int       @default(0)
+  alertsCreated                    Int       @default(0)
+  historicalWithoutActivitySkipped Int       @default(0)
+  errorCount                       Int       @default(0)
+  metadataJson                     Json
 
   @@index([startedAt])
   @@index([status])
@@ -3180,4 +3190,287 @@ model WalletInvestigationDeployment {
   @@index([chain, tokenAddress, buyTs])
   @@index([buyerAddress, buyTs])
   @@map("wallet_investigation_deployments")
+}
+
+/// Stable, accumulating intelligence cluster. A cluster is never deleted when
+/// new evidence changes its membership: superseded clusters are retained with
+/// status='merged' and an append-only IntelligenceClusterMerge receipt.
+model IntelligenceCluster {
+  id                String   @id @default(cuid())
+  clusterKey        String   @unique
+  entityKey         String?
+  status            String   @default("active")
+  confidence        Float
+  walletCount       Int      @default(0)
+  firstDiscoveredAt DateTime
+  lastEvidenceAt    DateTime
+  evidenceJson      Json
+  mergedIntoId      String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  mergedInto     IntelligenceCluster?             @relation("IntelligenceClusterMergeTarget", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+  mergedClusters IntelligenceCluster[]            @relation("IntelligenceClusterMergeTarget")
+  profiles       WalletIntelligenceProfile[]
+  observations   IntelligenceClusterObservation[]
+  mergesFrom     IntelligenceClusterMerge[]       @relation("IntelligenceClusterMergeFrom")
+  mergesInto     IntelligenceClusterMerge[]       @relation("IntelligenceClusterMergeInto")
+
+  @@index([entityKey])
+  @@index([status, lastEvidenceAt])
+  @@map("intelligence_clusters")
+}
+
+/// Current materialized intelligence for one wallet. Every mutation is backed
+/// by an immutable WalletIntelligenceObservation, so confidence may rise or
+/// fall without losing the prior conclusion.
+model WalletIntelligenceProfile {
+  id                        String             @id @default(cuid())
+  walletId                  String             @unique
+  chain                     ChainId
+  address                   String
+  clusterId                 String
+  entityKey                 String?
+  role                      String
+  evidenceScore             Float
+  historicalAlphaScore      Float
+  wakeUpPotential           Float
+  confidence                Float
+  tier                      String
+  discoverySource           String
+  lastDiscoverySource       String
+  firstDiscoveredAt         DateTime
+  lastObservedAt            DateTime
+  lastActivityAt            DateTime?
+  monitoringPriority        MonitoringPriority
+  reasonAdded               String
+  observationCount          Int                @default(0)
+  independentSignals        Int                @default(0)
+  evidenceSignals           String[]
+  supportingEvidenceJson    Json
+  contradictingEvidenceJson Json
+  scoreVersion              Int
+  createdAt                 DateTime           @default(now())
+  updatedAt                 DateTime           @updatedAt
+
+  wallet       Wallet                          @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  cluster      IntelligenceCluster             @relation(fields: [clusterId], references: [id], onDelete: Restrict)
+  observations WalletIntelligenceObservation[]
+  events       WalletIntelligenceEvent[]
+
+  @@unique([chain, address])
+  @@index([clusterId, confidence])
+  @@index([monitoringPriority, lastObservedAt])
+  @@index([tier, historicalAlphaScore])
+  @@map("wallet_intelligence_profiles")
+}
+
+/// Append-only conclusion history for a wallet.
+model WalletIntelligenceObservation {
+  id                        String   @id @default(cuid())
+  observationKey            String   @unique
+  profileId                 String
+  investigationId           String?
+  discoverySource           String
+  entityKey                 String?
+  role                      String
+  evidenceScore             Float
+  historicalAlphaScore      Float
+  wakeUpPotential           Float
+  confidence                Float
+  previousConfidence        Float?
+  confidenceDelta           Float
+  tier                      String
+  independentSignals        Int
+  evidenceSignals           String[]
+  supportingEvidenceJson    Json
+  contradictingEvidenceJson Json
+  reasonJson                Json
+  evidenceHash              String
+  scoreVersion              Int
+  observedAt                DateTime
+  createdAt                 DateTime @default(now())
+
+  profile WalletIntelligenceProfile @relation(fields: [profileId], references: [id], onDelete: Restrict)
+
+  @@index([profileId, observedAt])
+  @@index([investigationId])
+  @@map("wallet_intelligence_observations")
+}
+
+/// Append-only cluster snapshot written by every qualifying investigation.
+model IntelligenceClusterObservation {
+  id                        String   @id @default(cuid())
+  observationKey            String   @unique
+  clusterId                 String
+  investigationId           String?
+  confidence                Float
+  walletCount               Int
+  supportingEvidenceJson    Json
+  contradictingEvidenceJson Json
+  observedAt                DateTime
+  createdAt                 DateTime @default(now())
+
+  cluster IntelligenceCluster @relation(fields: [clusterId], references: [id], onDelete: Restrict)
+
+  @@index([clusterId, observedAt])
+  @@map("intelligence_cluster_observations")
+}
+
+/// Immutable audit receipt when two persistent clusters are reconciled.
+model IntelligenceClusterMerge {
+  id              String   @id @default(cuid())
+  mergeKey        String   @unique
+  fromClusterId   String
+  intoClusterId   String
+  investigationId String?
+  confidence      Float
+  reason          String
+  evidenceJson    Json
+  mergedAt        DateTime
+  createdAt       DateTime @default(now())
+
+  fromCluster IntelligenceCluster @relation("IntelligenceClusterMergeFrom", fields: [fromClusterId], references: [id], onDelete: Restrict)
+  intoCluster IntelligenceCluster @relation("IntelligenceClusterMergeInto", fields: [intoClusterId], references: [id], onDelete: Restrict)
+
+  @@index([fromClusterId])
+  @@index([intoClusterId])
+  @@map("intelligence_cluster_merges")
+}
+
+/// Canonical append-only activity stream for permanently monitored intelligence
+/// wallets. One mass-tracker event may create one row per participating profile.
+model WalletIntelligenceEvent {
+  id                  String   @id @default(cuid())
+  eventKey            String   @unique
+  profileId           String
+  clusterKey          String
+  chain               ChainId
+  walletAddress       String
+  eventType           String
+  sourceEventId       String?
+  txHash              String?
+  counterpartyAddress String?
+  tokenAddress        String?
+  amountUsd           Decimal? @db.Decimal(24, 4)
+  occurredAt          DateTime
+  evidenceJson        Json
+  createdAt           DateTime @default(now())
+
+  profile WalletIntelligenceProfile @relation(fields: [profileId], references: [id], onDelete: Restrict)
+
+  @@index([profileId, occurredAt])
+  @@index([clusterKey, eventType, occurredAt])
+  @@index([chain, tokenAddress, occurredAt])
+  @@map("wallet_intelligence_events")
+}
+
+/// Immutable token-quality receipt evaluated at cluster-signal time. Unknown
+/// inputs stay unknown and lower coverage; they are never treated as safe.
+model TokenQualityAssessment {
+  id                 String   @id @default(cuid())
+  assessmentKey      String   @unique
+  chain              ChainId
+  tokenAddress       String
+  passed             Boolean
+  score              Float
+  coverage           String
+  liquidityUsd       Decimal? @db.Decimal(24, 4)
+  marketCapUsd       Decimal? @db.Decimal(24, 4)
+  holderCount        Int?
+  riskPenalty        Float?
+  holderDistribution String
+  deployerQuality    String
+  ownershipStatus    String
+  lpStatus           String
+  tradingBehavior    String
+  checksJson         Json
+  reasonCodes        String[]
+  assessedAt         DateTime
+  createdAt          DateTime @default(now())
+
+  signals       IntelligenceSignal[]
+  buyCandidates IntelligenceBuyCandidate[]
+
+  @@index([chain, tokenAddress, assessedAt])
+  @@index([passed, score])
+  @@map("token_quality_assessments")
+}
+
+/// Cluster-level signal. The engine structurally requires at least two
+/// participating intelligence wallets/entities; a lone wallet buy cannot write
+/// this row.
+model IntelligenceSignal {
+  id                  String                  @id @default(cuid())
+  dedupeKey           String                  @unique
+  chain               ChainId
+  tokenAddress        String
+  signalType          String
+  level               IntelligenceSignalLevel
+  score               Float
+  status              String                  @default("active")
+  activatedAt         DateTime
+  clusterKeys         String[]
+  entityKeys          String[]
+  walletAddresses     String[]
+  sourceEventIds      String[]
+  reasons             String[]
+  evidenceJson        Json
+  historySupportJson  Json
+  explanation         String
+  qualityAssessmentId String?
+  engineVersion       Int
+  createdAt           DateTime                @default(now())
+
+  qualityAssessment TokenQualityAssessment?   @relation(fields: [qualityAssessmentId], references: [id], onDelete: SetNull)
+  buyCandidate      IntelligenceBuyCandidate?
+
+  @@index([level, activatedAt])
+  @@index([chain, tokenAddress, activatedAt])
+  @@index([clusterKeys])
+  @@map("intelligence_signals")
+}
+
+/// Research-only Buy Candidate. Creation requires BOTH a STRONG/HIGH cluster
+/// signal and a passing TokenQualityAssessment. It never signs or trades.
+model IntelligenceBuyCandidate {
+  id                  String   @id @default(cuid())
+  dedupeKey           String   @unique
+  signalId            String   @unique
+  qualityAssessmentId String
+  chain               ChainId
+  tokenAddress        String
+  status              String   @default("active")
+  confidence          Float
+  reasonCodes         String[]
+  evidenceJson        Json
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  signal            IntelligenceSignal     @relation(fields: [signalId], references: [id], onDelete: Restrict)
+  qualityAssessment TokenQualityAssessment @relation(fields: [qualityAssessmentId], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@index([chain, tokenAddress])
+  @@map("intelligence_buy_candidates")
+}
+
+/// Cursor/metrics receipt for the continuous intelligence lifecycle worker.
+model IntelligenceLifecycleRun {
+  id                   String    @id
+  startedAt            DateTime
+  completedAt          DateTime?
+  sinceObservedAt      DateTime
+  status               String
+  profilesTracked      Int       @default(0)
+  eventsProcessed      Int       @default(0)
+  dormantAwakenings    Int       @default(0)
+  signalsCreated       Int       @default(0)
+  buyCandidatesCreated Int       @default(0)
+  errorCount           Int       @default(0)
+  metadataJson         Json
+
+  @@index([startedAt])
+  @@index([status])
+  @@map("intelligence_lifecycle_runs")
 }

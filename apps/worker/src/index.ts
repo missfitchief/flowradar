@@ -229,9 +229,10 @@ async function main(): Promise<void> {
       run: monitoringScheduler.run,
       intervalSec: settings.intervals.walletActivitySec
     },
-    // Reads only newly persisted token-buy events from the observation
-    // universe. Historical winners choose wallets; fresh transactions choose
-    // tokens. The scanner persists both alerts and honest empty run receipts.
+    // Permanent intelligence lifecycle: consumes newly persisted funding,
+    // bridge, LP, execution and buy events, records dormant awakenings, and
+    // emits only cluster-level WATCH/STRONG/HIGH signals. Buy Candidates need
+    // a second, passing token-quality assessment.
     {
       name: 'trackedActivation',
       run: trackedActivation.run,

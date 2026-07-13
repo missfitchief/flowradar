@@ -17,7 +17,7 @@ const TOKENS = ['61', '62', '63', '64', '65', '66'].map((byte) => `0x${byte.repe
 const ALL_WALLETS = [BASE_SOURCE, BASE_DIRECT, BASE_MULTIHOP, BASE_CEX, ARB_BRIDGE, ...ACTIVATION_WALLETS];
 
 async function cleanup() {
-  await prisma.trackedTokenActivationAlert.deleteMany({ where: { OR: [{ dedupeKey: { startsWith: PREFIX } }, { tokenAddress: { in: TOKENS } }] } });
+  await prisma.trackedTokenActivationAlert.deleteMany({ where: { OR: [{ dedupeKey: { startsWith: PREFIX } }, { tokenAddress: { in: [TOKEN_CA, ...TOKENS] } }] } });
   await prisma.trackedActivationScanRun.deleteMany({ where: { startedAt: { gte: new Date('2034-12-01T00:00:00Z') } } });
   await prisma.profitableWalletDiscoveryRun.deleteMany({ where: { startedAt: { gte: new Date('2034-12-01T00:00:00Z') } } });
   await prisma.massTrackerTrace.deleteMany({ where: { traceId: { startsWith: PREFIX } } });
@@ -202,9 +202,9 @@ describe('backend wallet intelligence', () => {
 
     const report = await scanTrackedTokenActivations(prisma, { since, now });
     const alertTypes = new Set((await prisma.trackedTokenActivationAlert.findMany({ where: { tokenAddress: { in: TOKENS } } })).map((row) => row.alertType));
-    for (const expectedType of [
-      'same_cluster_multi_wallet_buy', 'dormant_funded_wallet_buy', 'tracked_entity_receiver_buy', 'independent_entity_confluence'
-    ]) expect(alertTypes.has(expectedType)).toBe(true);
+    for (const expectedType of ['same_cluster_multi_wallet_buy', 'independent_entity_confluence']) expect(alertTypes.has(expectedType)).toBe(true);
+    expect(alertTypes.has('dormant_funded_wallet_buy')).toBe(false);
+    expect(alertTypes.has('tracked_entity_receiver_buy')).toBe(false);
     expect(report.newBuyEvents).toBe(10);
     expect(await prisma.trackedTokenActivationAlert.count({ where: { tokenAddress: TOKEN_CA, status: 'active' } })).toBeGreaterThanOrEqual(1);
     expect(report.historicalWithoutNewActivitySkipped).toBeGreaterThanOrEqual(1);

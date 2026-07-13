@@ -23,6 +23,8 @@
     "discovery:run": "tsx scripts/operator-discovery.mts",
     "operator:pilot": "tsx scripts/operator-service-pilot.mts",
     "backend:pilot": "tsx scripts/backend-intelligence-pilot.mts",
+    "intelligence:pilot": "tsx scripts/intelligence-platform-pilot.mts",
+    "intelligence:daemon": "tsx scripts/intelligence-lifecycle-daemon.mts",
     "telegram:smoke": "tsx scripts/telegram-smoke.mts",
     "test": "vitest run",
     "typecheck": "tsc -b apps/worker apps/telegram packages/core packages/db packages/providers && npm run typecheck -w apps/web",

@@ -617,9 +617,38 @@ export class OperatorService {
         const result = await this.prisma.operatorWatchAlert.createMany({ data: [{ watchId: watch.id, eventKey: event.eventId, alertType, payloadJson: json({ chain: event.chain, kind: event.kind, source: event.fromAddress, destination: event.toAddress, amountUsd: decimal(event.amountUsd), ts: event.ts.toISOString(), txHash: event.txHash }) }], skipDuplicates: true });
         created += result.count;
       }
+      if (watch.alertTypes.includes('dormant_wallet_reactivated')) {
+        const dormantEvents = await this.prisma.walletIntelligenceEvent.findMany({
+          where: {
+            eventType: 'Dormant Wallet Awakened', occurredAt: { gte: since },
+            OR: [
+              ...(refs.length ? [{ OR: refs.map((ref) => ({ chain: ref.chain, walletAddress: ref.address })) }] : []),
+              { clusterKey: watch.targetKey },
+              ...(target.entity ? [{ profile: { entityKey: target.entity.entityKey } }] : [])
+            ]
+          },
+          include: { profile: { include: { cluster: true } } }, orderBy: { occurredAt: 'asc' }, take: 1_000
+        });
+        for (const event of dormantEvents) {
+          const result = await this.prisma.operatorWatchAlert.createMany({ data: [{
+            watchId: watch.id,
+            eventKey: `intelligence-dormant:${event.eventKey}`,
+            alertType: 'dormant_wallet_reactivated',
+            payloadJson: json({
+              title: 'Dormant Wallet Awakened', chain: event.chain, wallet: event.walletAddress,
+              cluster: event.profile.cluster.clusterKey, entity: event.profile.entityKey, role: event.profile.role,
+              evidenceScore: event.profile.evidenceScore, historicalAlphaScore: event.profile.historicalAlphaScore,
+              wakeUpPotential: event.profile.wakeUpPotential, confidence: event.profile.confidence,
+              sourceEventId: event.sourceEventId, txHash: event.txHash, tokenAddress: event.tokenAddress,
+              occurredAt: event.occurredAt.toISOString(), evidence: event.evidenceJson
+            })
+          }], skipDuplicates: true });
+          created += result.count;
+        }
+      }
       if (watch.alertTypes.includes('receiver_bought_token')) {
         for (const activation of activations) {
-          if (activation.alertType !== 'same_cluster_multi_wallet_buy' || activation.trackedWalletCount < 2) continue;
+          if ((activation.alertType !== 'same_cluster_multi_wallet_buy' && !activation.alertType.startsWith('cluster_intelligence_')) || activation.trackedWalletCount < 2) continue;
           const watchedAddresses = new Set(refs.filter((ref) => ref.chain === activation.chain).map((ref) => ref.address));
           const entityMatch = target.entity ? activation.entityKeys.includes(target.entity.entityKey) : activation.entityKeys.includes(watch.targetKey);
           const walletMatch = activation.trackedWallets.some((wallet) => watchedAddresses.has(wallet));
@@ -642,6 +671,7 @@ export class OperatorService {
             const status = support?.freshAtReceipt === true ? 'fresh' : support?.dormantAtReceipt === true ? 'dormant' : role.role;
             return `${role.relatedWallet}:${status}`;
           });
+          const activationEvidence = objectJson(activation.evidenceJson);
           const result = await this.prisma.operatorWatchAlert.createMany({ data: [{
             watchId: watch.id,
             eventKey: `tracked-activation:${activation.dedupeKey}`,
@@ -654,7 +684,12 @@ export class OperatorService {
               amounts: (fundingEvents.length ? fundingEvents : buyEvents).map((event) => decimal(event.amountUsd) != null ? `$${decimal(event.amountUsd)}` : `${event.amountToken} ${event.assetSymbol ?? ''}`.trim()),
               receiverStatus,
               fundingToBuy: traces.length ? traces.map((trace) => `${trace.terminalWallet}:${trace.fundingToBuyDelaySec}s`) : roles.flatMap((role) => parsedTradedTokens(role.tradedTokensJson).filter((item) => item.address === activation.tokenAddress && item.fundingToBuyDelaySec !== null).map((item) => `${role.relatedWallet}:${item.fundingToBuyDelaySec}s`)),
-              activationType: activation.alertType, activatedAt: activation.activatedAt.toISOString()
+              activationType: activation.alertType, activatedAt: activation.activatedAt.toISOString(),
+              explanation: activationEvidence?.explanation ?? null,
+              reasons: activationEvidence?.reasons ?? [],
+              intelligenceSignalId: activationEvidence?.intelligenceSignalId ?? null,
+              qualityAssessmentId: activationEvidence?.qualityAssessmentId ?? null,
+              evidence: activationEvidence
             })
           }], skipDuplicates: true });
           created += result.count;
@@ -692,7 +727,12 @@ export class OperatorService {
       where: { OR: [{ entityKey: trimmed }, { addresses: { some: { address: normalizeMaybe(trimmed) } } }] },
       include: { addresses: { orderBy: [{ chain: 'asc' }, { address: 'asc' }] } }
     });
-    return { entity, addresses: entity?.addresses.map((x) => ({ chain: x.chain, address: x.address })) ?? [] };
+    if (entity) return { entity, addresses: entity.addresses.map((x) => ({ chain: x.chain, address: x.address })) };
+    const cluster = await this.prisma.intelligenceCluster.findFirst({
+      where: { OR: [{ clusterKey: trimmed }, { profiles: { some: { address: normalizeMaybe(trimmed) } } }] },
+      include: { profiles: { orderBy: [{ chain: 'asc' }, { address: 'asc' }] } }
+    });
+    return { entity: null, addresses: cluster?.profiles.map((profile) => ({ chain: profile.chain, address: profile.address })) ?? [] };
   }
 }
 

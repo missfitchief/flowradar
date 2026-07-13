@@ -3,6 +3,7 @@ import type { InfrastructureCategory, MassTransactionEvent } from '@flowradar/co
 import type { WalletBridgeScanProvider, WalletCapitalScanProvider } from '@flowradar/providers';
 import { normalizeAddress, validAddress } from '../discovery/unified';
 import { expandWalletCapitalGraph } from '../intelligence/walletFlows';
+import { persistInvestigationKnowledge } from '../intelligence/knowledge';
 import { enrollObservationWallet } from '../intelligence/monitoring';
 import { createMassTrackerSession } from '../tracker/massTracker';
 import { enrichWalletInvestigation, WALLET_INTELLIGENCE_SCORE_VERSION } from './intelligence';
@@ -52,7 +53,7 @@ export class WalletInvestigationService {
     const investigationKey = `${addressKind}:${rootAddress}`;
     const maxDepth = Math.max(1, Math.min(Math.trunc(options.maxDepth ?? 4), 4));
     const existing = await this.loadRecord({ investigationKey });
-    if (existing && !options.refresh && existing.status === 'completed' && existing.maxDepth >= maxDepth) return mapRecord(existing);
+    if (existing && !options.refresh && existing.status === 'completed' && existing.maxDepth >= maxDepth) return this.mapIntelligence(existing);
     if (!this.options.walletScanner) throw new Error('Real wallet investigation scanner nije konfigurisan');
 
     const startedAt = new Date();
@@ -128,7 +129,9 @@ export class WalletInvestigationService {
           }
         });
       }, { timeout: 120_000 });
-      return (await this.loadById(investigation.id))!;
+      const enriched = (await this.loadById(investigation.id))!;
+      await persistInvestigationKnowledge(this.prisma, enriched, { now: completedAt });
+      return enriched;
     } catch (error) {
       await this.prisma.walletInvestigation.update({
         where: { id: investigation.id }, data: { status: 'failed', completedAt: new Date(), lastError: errorMessage(error) }
@@ -142,7 +145,7 @@ export class WalletInvestigationService {
     if (refs.length) return this.loadByKey(`${refs[0].chain === 'SOLANA' ? 'solana' : 'evm'}:${refs[0].address}`);
     const trimmed = targetInput.trim();
     const record = await this.loadRecord({ OR: [{ id: trimmed }, { entityKey: trimmed }, { investigationKey: trimmed }] });
-    return record ? mapRecord(record) : null;
+    return record ? this.mapIntelligence(record) : null;
   }
 
   async getOrInvestigate(targetInput: string, options: { refresh?: boolean; maxDepth?: number } = {}) {

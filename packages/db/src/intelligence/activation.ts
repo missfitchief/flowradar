@@ -140,6 +140,11 @@ export async function scanTrackedTokenActivations(
         walletEvents.set(wallet, bucket);
       }
       const wallets = [...walletEvents.keys()].sort();
+      // Legacy compatibility scanner shares the platform-wide invariant: one
+      // wallet buying can never produce an activation signal. Funding→execution
+      // and dormant sequences with a second tracked profile are handled by the
+      // permanent intelligence lifecycle, which can prove both participants.
+      if (wallets.length < 2) continue;
       const entities = new Map<string, string[]>();
       for (const wallet of wallets) {
         const entityKey = entityOf.get(`${chain}:${wallet}`) ?? tracked.get(`${chain}:${wallet}`)?.entityKey ?? `wallet:${chain}:${wallet}`;

@@ -45,7 +45,7 @@ export interface LiveWalletCapitalEnv {
 }
 
 /** Live-only capital scanner. No mock fallback is used by this operator path. */
-export function createLiveWalletCapitalScanner(env: LiveWalletCapitalEnv = process.env): WalletCapitalScanProvider {
+export function createLiveWalletCapitalScanner(env: LiveWalletCapitalEnv = process.env as LiveWalletCapitalEnv): WalletCapitalScanProvider {
   const helius = createHeliusActivityProvider(env);
   return {
     async scanAddress(chain, address, options = {}) {
