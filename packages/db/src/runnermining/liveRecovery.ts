@@ -15,13 +15,18 @@ import type { WalletErrorReceipt } from '../dormancy/activity';
 
 export const LIVE_RECOVERY_ENGINE_VERSION = 1;
 
-/** The ingest stored `symbol`/`name` as a prefix of the mint — that is a
- *  placeholder, NOT a real symbol. */
+/** The ingest stored `symbol`/`name` as the first ~4 chars of the mint — that
+ *  is a placeholder, NOT a real symbol. Detected precisely so a legitimate
+ *  short symbol (e.g. "D") that merely coincides with the mint's first letter
+ *  is NOT rejected: require a >=3-char prefix match, and — the ingest
+ *  signature — name === symbol. */
 export function isPlaceholderSymbol(mint: string, symbol: string | null | undefined, name?: string | null): boolean {
   if (!symbol) return true;
-  if (mint.startsWith(symbol)) return true;
-  if (name && name === symbol && mint.startsWith(name)) return true;
-  return false;
+  const prefixMatch = symbol.length >= 3 && mint.startsWith(symbol);
+  if (!prefixMatch) return false;
+  // A real symbol usually differs from the token name; the ingest placeholder
+  // set name === symbol === mint prefix.
+  return name === undefined || name === null || name === symbol;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,17 +114,24 @@ export async function buildReceiverActivityBackfill(
         }
       }
 
-      // Honest terminal status.
+      // Honest terminal status. A mere wallet row is NOT proof the receiver's
+      // history was inspected (enrollment can create the row without polling).
+      // "covered" therefore requires OBSERVED post-receipt activity.
       let status: string;
       const reasons: string[] = [];
       if (firstBuyTs !== null) {
         status = 'deployment_found';
         reasons.push('post_receipt_token_buy_observed');
-      } else if (hasLiveWalletRow) {
-        // We had coverage (the wallet is tracked and its post-receipt trades
-        // were inspected) and found NO buy — an honest negative, never unknown.
+      } else if (postEdges > 0 || postTx > 0) {
+        // Real post-receipt activity was observed (transfers/sells) but no buy
+        // — an honest negative, never unknown.
         status = 'covered_no_post_receipt_buy';
-        reasons.push(postEdges > 0 ? 'post_receipt_transfers_but_no_token_buy' : 'no_post_receipt_activity_observed');
+        reasons.push('post_receipt_activity_observed_but_no_token_buy');
+      } else if (hasLiveWalletRow) {
+        // Wallet row exists but NO post-receipt activity was observed — cannot
+        // distinguish "genuinely quiet" from "not yet polled", so not covered.
+        status = 'partial_coverage';
+        reasons.push('wallet_row_exists_but_no_post_receipt_activity_observed');
       } else {
         // No local/live wallet row: the live run has not yet collected this
         // receiver (Helius rate-limited) — retryable as coverage grows.
@@ -228,11 +240,13 @@ export async function buildTokenMetadata(
 
   const report: TokenMetadataReport = { mintsConsidered: mints.length, written: 0, resolved: 0, placeholderOnly: 0, retryable: 0, unavailable: 0, requestsUsed: 0, errors: 0, errorReceipts: [] };
 
-  // Skip mints already RESOLVED unless reresolve (resume-friendly).
+  // Skip mints in a TERMINAL state (resolved | unavailable | placeholder_only)
+  // — only 'retryable' rows and never-attempted mints are (re)fetched, so a
+  // block of unavailable rows never starves later mints of the request budget.
   const already = new Set(
     opts.reresolve
       ? []
-      : (await prisma.tokenMetadata.findMany({ where: { chain, mint: { in: mints }, availability: 'resolved' }, select: { mint: true } })).map((m) => m.mint)
+      : (await prisma.tokenMetadata.findMany({ where: { chain, mint: { in: mints }, availability: { in: ['resolved', 'unavailable', 'placeholder_only'] } }, select: { mint: true } })).map((m) => m.mint)
   );
   const todo = mints.filter((m) => !already.has(m));
 
@@ -280,9 +294,10 @@ export async function buildTokenMetadata(
       });
       if (!res.ok) {
         lastError = `http_${res.status}`;
+        if (res.status === 429) lastError = 'http_429_rate_limited';
       } else {
         const j = (await res.json()) as { result?: DasAsset[]; error?: { message?: string } };
-        if (j.result) assets = j.result;
+        if (Array.isArray(j.result)) assets = j.result;
         else lastError = j.error?.message ?? 'no_result';
       }
     } catch (e) {
@@ -292,19 +307,38 @@ export async function buildTokenMetadata(
     if (assets === null) {
       // Provider failure (quota/rate-limit/network) — retryable for the batch.
       const retryable = /max usage|429|rate|quota/i.test(lastError ?? '');
-      for (const mint of batch) await write(mint, { name: null, symbol: null, logoUri: null, source: 'unavailable', availability: retryable ? 'retryable' : 'unavailable', lastError, reasons: [retryable ? 'provider_quota_or_rate_limited' : 'provider_error'] });
+      for (const mint of batch) {
+        try {
+          await write(mint, { name: null, symbol: null, logoUri: null, source: 'unavailable', availability: retryable ? 'retryable' : 'unavailable', lastError, reasons: [retryable ? 'provider_quota_or_rate_limited' : 'provider_error'] });
+        } catch (err) {
+          report.errors += 1;
+          if (report.errorReceipts.length < ERROR_RECEIPTS_MAX) report.errorReceipts.push(toErrorReceipt(mint, err));
+        }
+      }
       continue;
     }
-    const byId = new Map(assets.filter((a) => a.id).map((a) => [a.id!, a]));
+    const byId = new Map(assets.filter((a): a is DasAsset & { id: string } => Boolean(a && a.id)).map((a) => [a.id, a]));
     for (const mint of batch) {
-      const a = byId.get(mint);
-      const name = a?.content?.metadata?.name?.trim() || null;
-      const symbol = a?.content?.metadata?.symbol?.trim() || null;
-      const logo = a?.content?.links?.image ?? a?.content?.files?.find((f) => f.uri)?.uri ?? null;
-      if (name || symbol) {
-        await write(mint, { name, symbol, logoUri: logo ?? null, source: 'helius_das', availability: 'resolved', reasons: ['das_metadata_resolved'] });
-      } else {
-        await write(mint, { name: null, symbol: null, logoUri: null, source: 'helius_das', availability: 'unavailable', reasons: ['das_returned_no_name_or_symbol'] });
+      // Per-ITEM isolation: one bad upsert never aborts the rest of the batch.
+      try {
+        const a = byId.get(mint);
+        const name = a?.content?.metadata?.name?.trim() || null;
+        const symbol = a?.content?.metadata?.symbol?.trim() || null;
+        const logo = a?.content?.links?.image ?? a?.content?.files?.find((f) => f.uri)?.uri ?? null;
+        if (name || symbol) {
+          // A DAS symbol/name that is still just the mint prefix is a
+          // placeholder, not a real resolution.
+          if (isPlaceholderSymbol(mint, symbol, name)) {
+            await write(mint, { name: null, symbol: null, logoUri: logo ?? null, source: 'helius_das', availability: 'placeholder_only', reasons: ['das_metadata_is_mint_prefix_placeholder'] });
+          } else {
+            await write(mint, { name, symbol, logoUri: logo ?? null, source: 'helius_das', availability: 'resolved', reasons: ['das_metadata_resolved'] });
+          }
+        } else {
+          await write(mint, { name: null, symbol: null, logoUri: null, source: 'helius_das', availability: 'unavailable', reasons: ['das_returned_no_name_or_symbol'] });
+        }
+      } catch (err) {
+        report.errors += 1;
+        if (report.errorReceipts.length < ERROR_RECEIPTS_MAX) report.errorReceipts.push(toErrorReceipt(mint, err));
       }
     }
   }

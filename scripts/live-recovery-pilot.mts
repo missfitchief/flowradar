@@ -28,10 +28,23 @@ async function main() {
   const meta = await buildTokenMetadata(prisma, { chain: 'SOLANA', heliusApiKey: process.env.HELIUS_API_KEY, maxRequests: 3 });
   console.log('[live-recovery] token metadata', JSON.stringify({ considered: meta.mintsConsidered, resolved: meta.resolved, retryable: meta.retryable, unavailable: meta.unavailable, requests: meta.requestsUsed }));
 
-  // Recompute capital chains (deployment picks up any newly observed buys).
+  // Recompute capital chains + candidates from the refreshed evidence.
   const chains = await buildCapitalChains(prisma, { chain: 'SOLANA', limit: 5000 });
   const cands = await buildTokenCandidateScores(prisma, { chain: 'SOLANA', limit: 500 });
   console.log('[live-recovery] chains', JSON.stringify({ staging: chains.staging, deployment: chains.deployment, rotation: chains.profitRotation }), 'candidates', JSON.stringify(cands.byState));
+
+  // Data-driven honest gaps — computed from THIS run's real results.
+  const gaps: string[] = [];
+  if (meta.resolved === 0 && (meta.retryable > 0 || meta.unavailable > 0)) {
+    gaps.push(`token metadata unresolved this run (${meta.retryable} retryable / ${meta.unavailable} unavailable of ${meta.mintsConsidered}) — provider quota/limits, retryable, never fabricated`);
+  } else if (meta.resolved > 0) {
+    gaps.push(`token metadata: ${meta.resolved} resolved, ${meta.retryable} retryable, ${meta.unavailable} unavailable`);
+  }
+  if (backfill.deploymentsFound === 0) {
+    gaps.push(`receiver deployment chains remain ${chains.deployment}: 0/${backfill.written} receivers show a post-receipt token buy in local+live data (${backfill.byStatus['covered_no_post_receipt_buy'] ?? 0} covered-no-buy, ${backfill.byStatus['retryable_provider_failure'] ?? 0} not yet polled)`);
+  } else {
+    gaps.push(`${backfill.deploymentsFound} receiver deployment(s) found from live-collected activity`);
+  }
 
   const report = {
     ts: new Date().toISOString(),
@@ -40,10 +53,7 @@ async function main() {
     tokenMetadata: { considered: meta.mintsConsidered, resolved: meta.resolved, placeholderOnly: meta.placeholderOnly, retryable: meta.retryable, unavailable: meta.unavailable, requestsUsed: meta.requestsUsed },
     capitalChains: { staging: chains.staging, deployment: chains.deployment, profitRotation: chains.profitRotation },
     candidates: cands.byState,
-    honestGaps: [
-      'Helius + Birdeye quota are exhausted this session — token metadata resolution is retryable, not fabricated',
-      'receiver deployment chains remain 0: receivers are pass-through wallets (0/151 post-receipt token buys in local+live data, verified direct and 2-hop)'
-    ]
+    honestGaps: gaps
   };
   mkdirSync('data/runner-mining', { recursive: true });
   writeFileSync('data/runner-mining/live-recovery-report.json', JSON.stringify(report, null, 2));

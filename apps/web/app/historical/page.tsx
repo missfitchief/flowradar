@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { fmtUsd } from '@/lib/format';
-import { SortableTable, TokenCellInner } from '@/components/SortableTable';
-import type { Column } from '@/components/SortableTable';
+import { SortableTable } from '@/components/SortableTable';
+import type { SortColumn, SortRow } from '@/components/SortableTable';
 import { resolveTokenIdentity } from '@/lib/tokenIdentity';
 import { CLASSIFICATION_LABEL } from '@/lib/rescue';
 
@@ -10,32 +10,24 @@ import { CLASSIFICATION_LABEL } from '@/lib/rescue';
 // token identity (never a mint prefix). Real persisted data.
 export const dynamic = 'force-dynamic';
 
-interface Row {
-  mint: string;
-  display: string;
-  logoUri: string | null;
-  isUnknown: boolean;
-  ath: number | null;
-  athDate: string | null;
-  extraction: string;
-  candTotal: number;
-  candVerified: number;
-  replay: string | null;
-  coverage: string;
-}
+const COLUMNS: SortColumn[] = [
+  { key: 'token', label: 'Token', searchable: true },
+  { key: 'ath', label: 'ATH market cap', align: 'right' },
+  { key: 'athDate', label: 'ATH date' },
+  { key: 'extraction', label: 'Extraction', searchable: true },
+  { key: 'candTotal', label: 'Candidates', align: 'right' },
+  { key: 'candVerified', label: 'Verified', align: 'right' },
+  { key: 'replay', label: 'Replay outcome' },
+  { key: 'coverage', label: 'Coverage' }
+];
 
 export default async function HistoricalPage() {
   const totalRunners = await prisma.tokenLifecycle.count({ where: { runnerClass: 'verified_above_10m' } });
-  const runners = await prisma.tokenLifecycle.findMany({
-    where: { runnerClass: 'verified_above_10m' },
-    orderBy: { mint: 'asc' },
-    take: 2000,
-    select: { mint: true }
-  });
+  const runners = await prisma.tokenLifecycle.findMany({ where: { runnerClass: 'verified_above_10m' }, orderBy: { mint: 'asc' }, take: 2000, select: { mint: true } });
   const mints = runners.map((r) => r.mint);
 
   const [enrichments, metaRows, candGroups, replayEvents, extractionRows] = await Promise.all([
-    prisma.tokenEnrichment.findMany({ where: { mint: { in: mints } }, select: { mint: true, athMcapUsd: true, athTs: true, status: true, confidence: true } }),
+    prisma.tokenEnrichment.findMany({ where: { mint: { in: mints } }, select: { mint: true, athMcapUsd: true, athTs: true, status: true } }),
     prisma.tokenMetadata.findMany({ where: { chain: 'SOLANA', mint: { in: mints } }, select: { mint: true, name: true, symbol: true, logoUri: true, availability: true } }),
     prisma.tokenTopPnlCandidate.groupBy({ by: ['mint', 'validation'], where: { chain: 'SOLANA', mint: { in: mints } }, _count: { _all: true } }),
     prisma.replaySignalEvent.findMany({ where: { chain: 'SOLANA', mint: { in: mints } }, orderBy: [{ mint: 'asc' }, { eventKind: 'asc' }], select: { mint: true, eventKind: true, classification: true } }),
@@ -56,59 +48,44 @@ export default async function HistoricalPage() {
   const replayOf = new Map<string, string>();
   for (const e of replayEvents) if (e.eventKind === 'signal' || !replayOf.has(e.mint)) replayOf.set(e.mint, e.classification);
 
-  const rows: Row[] = mints.map((mint) => {
+  const rows: SortRow[] = mints.map((mint) => {
     const id = resolveTokenIdentity(mint, metaOf.get(mint));
     const enr = enrichOf.get(mint);
+    const ath = enr?.athMcapUsd ? Number(enr.athMcapUsd) : null;
     const c = candsOf.get(mint) ?? { total: 0, verified: 0 };
+    const replay = replayOf.get(mint) ?? null;
     return {
-      mint,
-      display: id.display,
-      logoUri: id.logoUri,
-      isUnknown: id.isUnknown,
-      ath: enr?.athMcapUsd ? Number(enr.athMcapUsd) : null,
-      athDate: enr?.athTs ? enr.athTs.toISOString().slice(0, 10) : null,
-      extraction: extractionOf.get(mint) ?? 'pending',
-      candTotal: c.total,
-      candVerified: c.verified,
-      replay: replayOf.get(mint) ?? null,
-      coverage: enr?.status ?? 'no enrichment'
+      id: mint,
+      href: `/token/${mint}`,
+      cells: {
+        token: { kind: 'token', mint, display: id.display, logoUri: id.logoUri, isUnknown: id.isUnknown },
+        ath: { kind: 'usd', value: ath, display: ath === null ? 'unenriched' : fmtUsd(ath) },
+        athDate: { kind: 'text', text: enr?.athTs ? enr.athTs.toISOString().slice(0, 10) : '—', muted: true },
+        extraction: { kind: 'text', text: (extractionOf.get(mint) ?? 'pending').replaceAll('_', ' '), muted: true },
+        candTotal: { kind: 'number', value: c.total, display: String(c.total) },
+        candVerified: { kind: 'number', value: c.verified, display: String(c.verified) },
+        replay: { kind: 'text', text: replay ? CLASSIFICATION_LABEL[replay] ?? replay.replaceAll('_', ' ') : '—', muted: true },
+        coverage: { kind: 'text', text: enr?.status ?? 'no enrichment', muted: true }
+      }
     };
   });
-  const withCandidates = rows.filter((r) => r.candTotal > 0).length;
-
-  const columns: Column<Row>[] = [
-    { key: 'token', label: 'Token', value: (r) => (r.isUnknown ? r.mint : r.display), searchable: true, render: (r) => <TokenCellInner mint={r.mint} display={r.display} logoUri={r.logoUri} isUnknown={r.isUnknown} /> },
-    { key: 'ath', label: 'ATH market cap', align: 'right', type: 'number', value: (r) => r.ath, render: (r) => (r.ath === null ? <span className="text-zinc-500">unenriched</span> : fmtUsd(r.ath)) },
-    { key: 'athDate', label: 'ATH date', type: 'date', value: (r) => r.athDate, render: (r) => <span className="text-xs">{r.athDate ?? '—'}</span> },
-    { key: 'extraction', label: 'Extraction', value: (r) => r.extraction, searchable: true, render: (r) => <span className="text-xs">{r.extraction.replaceAll('_', ' ')}</span> },
-    { key: 'candTotal', label: 'Candidates', align: 'right', type: 'number', value: (r) => r.candTotal },
-    { key: 'candVerified', label: 'Verified', align: 'right', type: 'number', value: (r) => r.candVerified },
-    { key: 'replay', label: 'Replay outcome', value: (r) => r.replay, render: (r) => <span className="text-xs">{r.replay ? CLASSIFICATION_LABEL[r.replay] ?? r.replay.replaceAll('_', ' ') : '—'}</span> },
-    { key: 'coverage', label: 'Coverage', value: (r) => r.coverage, render: (r) => <span className="text-xs text-zinc-400">{r.coverage}</span> }
-  ];
+  const withCandidates = rows.filter((r) => (r.cells.candTotal as { value: number }).value > 0).length;
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">Historical Winners</h1>
         <p className="mt-1 max-w-3xl text-sm text-zinc-400">
-          All {totalRunners} verified historical $10M+ Solana tokens in the covered universe; {withCandidates} have
-          top-PnL wallet candidates extracted. Click any row for the token&apos;s top-PnL wallets, dormant/fresh
-          entries, funding paths and whether the same entities are active again. Click a column heading to sort.
+          {totalRunners} verified historical $10M+ Solana tokens ({rows.length} loaded); {withCandidates} have top-PnL
+          wallet candidates extracted. Click any row for the token&apos;s top-PnL wallets, dormant/fresh entries and
+          funding paths. Click a column heading to sort.
         </p>
         <p className="mt-2 text-xs text-zinc-400">
           <span className="font-medium text-zinc-300">Extraction outcomes: </span>
           {Object.entries(extractionCounts).sort((a, b) => b[1] - a[1]).map(([s, n]) => `${s.replaceAll('_', ' ')}: ${n}`).join(' · ') || 'not computed'}
         </p>
       </div>
-      <SortableTable
-        rows={rows}
-        columns={columns}
-        rowKey={(r) => r.mint}
-        rowHref={(r) => `/token/${r.mint}`}
-        initialSort={{ key: 'ath', dir: 'desc' }}
-        searchPlaceholder="Search token / mint / extraction status…"
-      />
+      <SortableTable rows={rows} columns={COLUMNS} initialSort={{ key: 'ath', dir: 'desc' }} searchPlaceholder="Search token / mint / extraction status…" />
     </div>
   );
 }

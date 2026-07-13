@@ -168,6 +168,10 @@ export default async function SourcesPage() {
     prisma.tokenCandidateScore.count({ where: { chain: 'SOLANA' } })
   ]);
   const birdeyeByStatus = Object.fromEntries(birdeyeFetch.map((g) => [g.status, g._count._all]));
+  // Credential presence — boolean only, values never leave the server.
+  const heliusKey = Boolean(process.env.HELIUS_API_KEY);
+  const birdeyeKey = Boolean(process.env.BIRDEYE_API_KEY);
+  const metaAttempted = metaResolved + metaRetryable + metaUnavailable;
   const productSources = [
     {
       name: 'Local on-chain reconstruction',
@@ -176,15 +180,21 @@ export default async function SourcesPage() {
       detail: `${topPnlRows} historical top-PnL candidate rows persisted · ${topPnlVerified} locally verified · ${candidateRows} automatic token candidates`
     },
     {
-      name: 'Helius (token metadata / wallet activity)',
-      credential: 'configured',
-      status: metaRetryable > 0 && metaResolved === 0 ? 'Quota limited' : metaResolved > 0 ? 'Healthy' : 'Degraded',
-      detail: `token metadata: ${metaResolved} resolved · ${metaRetryable} retryable · ${metaUnavailable} unavailable${metaLastErr?.lastError ? ` · last error: ${metaLastErr.lastError.slice(0, 60)}` : ''}`
+      name: 'Helius (token metadata)',
+      credential: heliusKey ? 'configured' : 'missing credential',
+      status: !heliusKey ? 'Missing credential' : metaResolved > 0 && metaRetryable === 0 ? 'Healthy' : metaRetryable > 0 ? 'Quota limited' : metaAttempted === 0 ? 'Degraded' : metaUnavailable > 0 ? 'Degraded' : 'Healthy',
+      detail: metaAttempted === 0 ? 'no metadata fetch attempted yet' : `token metadata: ${metaResolved} resolved · ${metaRetryable} retryable · ${metaUnavailable} unavailable${metaLastErr?.lastError ? ` · last error: ${metaLastErr.lastError.slice(0, 60)}` : ''}`
+    },
+    {
+      name: 'Helius (wallet-activity polling)',
+      credential: heliusKey ? 'configured' : 'missing credential',
+      status: !heliusKey ? 'Missing credential' : 'Degraded',
+      detail: 'driven by the live shadow-run worker (separate process); recent polls are Helius rate-limited (429) — see the shadow run status'
     },
     {
       name: 'Birdeye (top traders / historical)',
-      credential: 'configured',
-      status: birdeyeQuota > 0 ? 'Quota limited' : (birdeyeByStatus.fetched ?? 0) > 0 ? 'Healthy' : 'Degraded',
+      credential: birdeyeKey ? 'configured' : 'missing credential',
+      status: !birdeyeKey ? 'Missing credential' : birdeyeQuota > 0 ? 'Quota limited' : (birdeyeByStatus.fetched ?? 0) > 0 ? 'Healthy' : 'Degraded',
       detail: `fetch states — ${Object.entries(birdeyeByStatus).map(([s, n]) => `${s}: ${n}`).join(' · ') || 'none'}${birdeyeQuota > 0 ? ` · ${birdeyeQuota} calls blocked by compute-unit quota in last 7d` : ''}`
     },
     { name: 'GMGN', credential: 'no verified endpoint', status: 'Stub / not implemented', detail: 'typed stub — no verified public API; returns no candidates' }
@@ -194,6 +204,7 @@ export default async function SourcesPage() {
     'Quota limited': 'bg-amber-500/15 text-amber-300',
     Degraded: 'bg-orange-500/15 text-orange-300',
     Error: 'bg-red-500/15 text-red-300',
+    'Missing credential': 'bg-red-500/15 text-red-300',
     'Stub / not implemented': 'bg-zinc-500/15 text-zinc-300'
   };
 

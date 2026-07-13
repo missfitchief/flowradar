@@ -122,7 +122,17 @@ export default async function TokenDetailPage({ params }: { params: Promise<{ mi
           <a href={solscanTokenUrl(mint)} target="_blank" rel="noopener noreferrer" className="text-xs text-sky-400 hover:underline">
             Solscan ↗
           </a>
-          {identity.isUnknown && <span className="text-xs text-zinc-500">(name/symbol not yet resolved — provider quota)</span>}
+          {identity.isUnknown && (
+            <span className="text-xs text-zinc-500">
+              (name/symbol{' '}
+              {meta?.availability === 'retryable'
+                ? 'not yet resolved — provider quota, retryable'
+                : meta?.availability === 'unavailable' || meta?.availability === 'placeholder_only'
+                  ? 'unavailable from the metadata provider'
+                  : 'not yet fetched'}
+              )
+            </span>
+          )}
         </div>
         {candidate && (
           <p className="mt-2 max-w-3xl text-sm">

@@ -9,6 +9,7 @@ import {
   shortAddr,
   fmtMult
 } from '@/lib/rescue';
+import { resolveTokenIdentity } from '@/lib/tokenIdentity';
 
 // FlowRadar — Historical Proof (rescue sprint): what the system WOULD have
 // shown at the historical moment, evaluated with no lookahead, with the
@@ -21,13 +22,8 @@ export default async function ProofPage() {
     orderBy: [{ eventKind: 'asc' }, { scoreAtEvent: 'desc' }, { mint: 'asc' }],
     take: 100
   });
-  const symbolOf = new Map(
-    (
-      await prisma.token.findMany({
-        where: { chain: 'SOLANA', address: { in: events.map((e) => e.mint) } },
-        select: { address: true, symbol: true }
-      })
-    ).map((t) => [t.address, t.symbol])
+  const metaOf = new Map(
+    (await prisma.tokenMetadata.findMany({ where: { chain: 'SOLANA', mint: { in: events.map((e) => e.mint) } }, select: { mint: true, name: true, symbol: true, logoUri: true, availability: true } })).map((m) => [m.mint, m])
   );
 
   const counts: Record<string, number> = {};
@@ -67,9 +63,7 @@ export default async function ProofPage() {
               className="block rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 transition-colors hover:bg-zinc-900"
             >
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-semibold">
-                  {symbolOf.get(e.mint) ? `$${symbolOf.get(e.mint)}` : shortAddr(e.mint)}
-                </span>
+                <span className="font-semibold">{resolveTokenIdentity(e.mint, metaOf.get(e.mint)).display}</span>
                 <span className="font-mono text-xs text-zinc-500">{shortAddr(e.mint)}</span>
                 <span className={`inline-block rounded px-2 py-0.5 text-xs ${CLASSIFICATION_BADGE_CLASS[e.classification] ?? ''}`}>
                   {CLASSIFICATION_LABEL[e.classification] ?? e.classification}
@@ -104,7 +98,10 @@ export default async function ProofPage() {
                   const flagged = e.eventKind === 'signal';
                   const moved = at !== null && peak !== null ? `It later moved from ${fmtUsd(at)} to ${fmtUsd(peak)}.` : '';
                   if (e.classification === 'miss') {
-                    return `FlowRadar did not flag this token. ${moved} Only ${e.independentEntitiesAtEvent} qualified independent ${e.independentEntitiesAtEvent === 1 ? 'entity was' : 'entities were'} observed; the rule required 2.`;
+                    const why = e.independentEntitiesAtEvent < 2
+                      ? `Only ${e.independentEntitiesAtEvent} qualified independent ${e.independentEntitiesAtEvent === 1 ? 'entity was' : 'entities were'} observed; the rule required 2.`
+                      : `${e.independentEntitiesAtEvent} independent entities were observed, but another requirement blocked the signal (${e.reasonCodes.slice(0, 2).map(explainReason).join('; ') || 'see reason codes'}).`;
+                    return `FlowRadar did not flag this token. ${moved} ${why}`;
                   }
                   if (e.classification === 'true_positive') {
                     return `FlowRadar would have flagged this at ${STATE_LABEL[e.stateAtEvent] ?? e.stateAtEvent} on ${e.independentEntitiesAtEvent} independent qualified entities. ${moved}`;
@@ -112,7 +109,7 @@ export default async function ProofPage() {
                   if (e.classification === 'false_positive') {
                     return `FlowRadar would have flagged this control token on ${e.independentEntitiesAtEvent} entities, but it did not run. ${moved}`;
                   }
-                  return `FlowRadar correctly did not flag this control token (${e.independentEntitiesAtEvent} entities, below the rule). ${moved}`;
+                  return `FlowRadar correctly did not flag this control token. ${e.independentEntitiesAtEvent} independent ${e.independentEntitiesAtEvent === 1 ? 'entity' : 'entities'} observed; it did not meet the signal rule. ${moved}`;
                 })()}
               </p>
               <p className="mt-1 text-xs text-zinc-500">{e.reasonCodes.slice(0, 3).map(explainReason).join('; ')}</p>

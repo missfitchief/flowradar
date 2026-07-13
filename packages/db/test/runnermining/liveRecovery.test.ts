@@ -27,6 +27,7 @@ async function cleanup() {
   await prisma.tokenMetadata.deleteMany({ where: { mint: { startsWith: PREFIX } } });
   await prisma.receiverEnrollment.deleteMany({ where: { receiverAddress: { startsWith: PREFIX } } });
   await prisma.walletTokenTrade.deleteMany({ where: { txHash: { startsWith: PREFIX } } });
+  await prisma.moneyFlowEdge.deleteMany({ where: { txHash: { startsWith: PREFIX } } });
   await prisma.wallet.deleteMany({ where: { address: { startsWith: PREFIX } } });
   await prisma.token.deleteMany({ where: { address: { startsWith: PREFIX } } });
 }
@@ -50,24 +51,30 @@ describe.skipIf(!dbReachable)('buildReceiverActivityBackfill', () => {
     const w1 = await prisma.wallet.create({ data: { address: addr('R1'), chain: 'SOLANA', firstSeenAt: T0, lastActiveAt: T0 }, select: { id: true } });
     await prisma.walletTokenTrade.create({ data: { walletId: w1.id, tokenId: tok.id, chain: 'SOLANA', action: 'BUY', amountToken: '1', amountUsd: '200', txHash: addr('TX1'), blockOrSlot: 1n, ts: at(500), priceUsd: '1', marketCapAtTrade: '1', walletScoreAtTime: 50, provider: 'test' } });
     await prisma.receiverEnrollment.create({ data: { chain: 'SOLANA', receiverAddress: addr('R1'), receiverClass: 'fresh_receiver', sourceEntityKeys: [addr('E1')], sourceWallets: [addr('S1')], evidenceTiers: ['direct_transfer'], firstReceiptTs: at(100), deploymentsJson: [], reasonCodes: [], receiptsJson: {}, caveats: [], engineVersion: 1 } });
-    // R2: wallet row but NO post-receipt buy -> covered_no_post_receipt_buy
+    // R2: wallet row but NO observed post-receipt activity -> partial_coverage
+    // (a wallet row alone is NOT proof the history was inspected).
     await prisma.wallet.create({ data: { address: addr('R2'), chain: 'SOLANA', firstSeenAt: T0, lastActiveAt: T0 } });
     await prisma.receiverEnrollment.create({ data: { chain: 'SOLANA', receiverAddress: addr('R2'), receiverClass: 'dormant_reactivated', sourceEntityKeys: [addr('E2')], sourceWallets: [addr('S2')], evidenceTiers: ['direct_transfer'], firstReceiptTs: at(100), deploymentsJson: [], reasonCodes: [], receiptsJson: {}, caveats: [], engineVersion: 1 } });
     // R3: no wallet row -> retryable_provider_failure
     await prisma.receiverEnrollment.create({ data: { chain: 'SOLANA', receiverAddress: addr('R3'), receiverClass: 'fresh_receiver', sourceEntityKeys: [addr('E3')], sourceWallets: [addr('S3')], evidenceTiers: ['direct_transfer'], firstReceiptTs: at(100), deploymentsJson: [], reasonCodes: [], receiptsJson: {}, caveats: [], engineVersion: 1 } });
+    // R4: wallet row + a post-receipt transfer EDGE but no buy -> covered_no_post_receipt_buy
+    await prisma.wallet.create({ data: { address: addr('R4'), chain: 'SOLANA', firstSeenAt: T0, lastActiveAt: T0 } });
+    await prisma.moneyFlowEdge.create({ data: { sourceAddress: addr('R4'), destinationAddress: addr('X4'), sourceChain: 'SOLANA', destinationChain: 'SOLANA', asset: 'SOL', amountToken: 1, amountUsd: 0, ts: at(500), txHash: addr('EDG4'), actionType: 'transfer', confidence: 100, providerSource: 'test', metadata: {}, valuedUsd: '50' } });
+    await prisma.receiverEnrollment.create({ data: { chain: 'SOLANA', receiverAddress: addr('R4'), receiverClass: 'fresh_receiver', sourceEntityKeys: [addr('E4')], sourceWallets: [addr('S4')], evidenceTiers: ['direct_transfer'], firstReceiptTs: at(100), deploymentsJson: [], reasonCodes: [], receiptsJson: {}, caveats: [], engineVersion: 1 } });
 
     const r = await buildReceiverActivityBackfill(prisma, { chain: 'SOLANA' });
     expect(r.errors).toBe(0);
-    expect(r.written).toBe(3);
+    expect(r.written).toBe(4);
     const statusOf = new Map((await prisma.receiverActivityBackfill.findMany({ where: { receiverAddress: { startsWith: PREFIX } } })).map((x) => [x.receiverAddress, x]));
     expect(statusOf.get(addr('R1'))?.status).toBe('deployment_found');
     expect(statusOf.get(addr('R1'))?.firstBuyMint).toBe(tok.address);
     expect(Number(statusOf.get(addr('R1'))?.boughtKnownUsd)).toBe(200);
-    expect(statusOf.get(addr('R2'))?.status).toBe('covered_no_post_receipt_buy');
+    expect(statusOf.get(addr('R2'))?.status).toBe('partial_coverage');
     expect(statusOf.get(addr('R3'))?.status).toBe('retryable_provider_failure');
+    expect(statusOf.get(addr('R4'))?.status).toBe('covered_no_post_receipt_buy');
 
     const r2 = await buildReceiverActivityBackfill(prisma, { chain: 'SOLANA' });
-    expect(r2.written).toBe(3); // idempotent upsert
+    expect(r2.written).toBe(4); // idempotent upsert
   });
 });
 

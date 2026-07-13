@@ -22,13 +22,19 @@ export interface ResolvedIdentity {
   isUnknown: boolean;
 }
 
-/** Resolve a token's display identity. `meta` is a token_metadata row (or
- *  null); `ingestSymbol` is the placeholder from the tokens table. */
-export function resolveTokenIdentity(mint: string, meta: TokenMeta | null | undefined, ingestSymbol?: string | null): ResolvedIdentity {
-  if (meta && meta.availability === 'resolved' && meta.symbol && !isPlaceholderSymbol(mint, meta.symbol, meta.name)) {
-    return { display: `$${meta.symbol}`, symbol: meta.symbol, name: meta.name, logoUri: meta.logoUri, mint, isUnknown: false };
+/** Resolve a token's display identity from a token_metadata row. Never falls
+ *  back to the ingest placeholder (a mint prefix). Uses a real symbol, or a
+ *  real name when only the name resolved, else "Unknown token". */
+export function resolveTokenIdentity(mint: string, meta: TokenMeta | null | undefined): ResolvedIdentity {
+  if (meta && meta.availability === 'resolved') {
+    if (meta.symbol && !isPlaceholderSymbol(mint, meta.symbol, meta.name)) {
+      return { display: `$${meta.symbol}`, symbol: meta.symbol, name: meta.name, logoUri: meta.logoUri, mint, isUnknown: false };
+    }
+    // Name-only resolution (real name, no symbol) — still a real identity.
+    if (meta.name && !isPlaceholderSymbol(mint, meta.name, meta.name)) {
+      return { display: meta.name, symbol: null, name: meta.name, logoUri: meta.logoUri, mint, isUnknown: false };
+    }
   }
-  // Never fall back to the ingest placeholder — it is a mint prefix.
   return { display: 'Unknown token', symbol: null, name: null, logoUri: meta?.logoUri ?? null, mint, isUnknown: true };
 }
 

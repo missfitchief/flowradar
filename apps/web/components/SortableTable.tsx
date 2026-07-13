@@ -4,72 +4,144 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 
 // FlowRadar — one reusable sortable + searchable table (live-recovery sprint).
-// Applied to every important operator table so sorting is consistent:
+// FULLY SERIALIZABLE: Server Components pass only plain data (no functions, no
+// elements) across the RSC boundary. Each cell is a tagged PlainCell the
+// client renders by `kind`; sort/search values are derived from the cell.
 //   - click a heading to sort DESC, click again ASC, arrow shows direction;
 //   - numeric/date columns sort numerically/chronologically, text alphabetically;
 //   - null/unknown values always sort LAST regardless of direction;
-//   - optional per-row href makes the whole row clickable (keyboard-accessible);
-//   - optional search box filters across the searchable columns.
+//   - optional per-row href makes the whole row clickable (keyboard-accessible),
+//     without hijacking clicks/Enter on inner links or buttons.
 
-export interface Column<T> {
+export type PlainCell =
+  | { kind: 'token'; mint: string; display: string; logoUri: string | null; isUnknown: boolean }
+  | { kind: 'text'; text: string; muted?: boolean }
+  | { kind: 'badge'; text: string; className?: string }
+  | { kind: 'number'; value: number | null; display: string }
+  | { kind: 'usd'; value: number | null; display: string }
+  | { kind: 'link'; href: string; text: string; external?: boolean };
+
+export interface SortColumn {
   key: string;
   label: string;
-  /** Sort/compare value. Return null for unknown (always sorts last). */
-  value: (row: T) => number | string | null;
-  /** Cell renderer (defaults to the raw value). */
-  render?: (row: T) => React.ReactNode;
   align?: 'left' | 'right';
-  type?: 'number' | 'text' | 'date';
-  /** Include this column's text in the search filter. */
   searchable?: boolean;
 }
 
-interface SortableTableProps<T> {
-  rows: T[];
-  columns: Column<T>[];
-  rowKey: (row: T) => string;
-  /** Whole-row link (internal navigation). Controls inside cells still work. */
-  rowHref?: (row: T) => string | null;
+export interface SortRow {
+  id: string;
+  href?: string | null;
+  cells: Record<string, PlainCell>;
+}
+
+function sortValue(cell: PlainCell | undefined): number | string | null {
+  if (!cell) return null;
+  switch (cell.kind) {
+    case 'number':
+    case 'usd':
+      return cell.value;
+    case 'token':
+      return cell.isUnknown ? cell.mint : cell.display;
+    case 'text':
+      return cell.text;
+    case 'badge':
+      return cell.text;
+    case 'link':
+      return cell.text;
+  }
+}
+
+function searchText(cell: PlainCell | undefined): string {
+  if (!cell) return '';
+  switch (cell.kind) {
+    case 'token':
+      return `${cell.display} ${cell.mint}`;
+    case 'text':
+      return cell.text;
+    case 'badge':
+      return cell.text;
+    case 'link':
+      return cell.text;
+    default:
+      return '';
+  }
+}
+
+function CellView({ cell }: { cell: PlainCell | undefined }) {
+  if (!cell) return <span className="text-zinc-500">unknown</span>;
+  switch (cell.kind) {
+    case 'token':
+      return (
+        <span className="inline-flex items-center gap-2">
+          {cell.logoUri ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={cell.logoUri} alt="" width={18} height={18} className="rounded-full" />
+          ) : (
+            <span className="inline-block h-[18px] w-[18px] rounded-full bg-zinc-700" />
+          )}
+          <Link href={`/token/${cell.mint}`} className={cell.isUnknown ? 'text-zinc-300 hover:underline' : 'text-sky-400 hover:underline'}>
+            {cell.display}
+          </Link>
+        </span>
+      );
+    case 'text':
+      return <span className={cell.muted ? 'text-xs text-zinc-400' : ''}>{cell.text}</span>;
+    case 'badge':
+      return <span className={`inline-block rounded px-1.5 py-0.5 text-[11px] ${cell.className ?? 'bg-zinc-500/15 text-zinc-300'}`}>{cell.text}</span>;
+    case 'number':
+    case 'usd':
+      return cell.value === null ? <span className="text-zinc-500">{cell.display}</span> : <>{cell.display}</>;
+    case 'link':
+      return cell.external ? (
+        <a href={cell.href} target="_blank" rel="noopener noreferrer" className="text-sky-400 hover:underline">{cell.text}</a>
+      ) : (
+        <Link href={cell.href} className="text-sky-400 hover:underline">{cell.text}</Link>
+      );
+  }
+}
+
+export function SortableTable({
+  rows,
+  columns,
+  rowKey,
+  initialSort,
+  searchPlaceholder,
+  emptyText
+}: {
+  rows: SortRow[];
+  columns: SortColumn[];
+  rowKey?: string; // unused placeholder for API symmetry
   initialSort?: { key: string; dir: 'asc' | 'desc' };
   searchPlaceholder?: string;
   emptyText?: string;
-}
-
-export function SortableTable<T>({ rows, columns, rowKey, rowHref, initialSort, searchPlaceholder, emptyText }: SortableTableProps<T>) {
+}) {
+  void rowKey;
   const [sortKey, setSortKey] = useState<string | null>(initialSort?.key ?? null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>(initialSort?.dir ?? 'desc');
   const [query, setQuery] = useState('');
 
-  const colOf = useMemo(() => new Map(columns.map((c) => [c.key, c])), [columns]);
+  const searchable = columns.filter((c) => c.searchable).map((c) => c.key);
+  const hasSearch = searchable.length > 0;
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return rows;
-    const searchCols = columns.filter((c) => c.searchable);
-    return rows.filter((r) =>
-      searchCols.some((c) => {
-        const v = c.value(r);
-        return v !== null && String(v).toLowerCase().includes(q);
-      })
-    );
-  }, [rows, columns, query]);
+    return rows.filter((r) => searchable.some((k) => searchText(r.cells[k]).toLowerCase().includes(q)));
+  }, [rows, query, searchable]);
 
   const sorted = useMemo(() => {
     if (!sortKey) return filtered;
-    const col = colOf.get(sortKey);
-    if (!col) return filtered;
     const dirMul = sortDir === 'asc' ? 1 : -1;
     return [...filtered].sort((a, b) => {
-      const va = col.value(a);
-      const vb = col.value(b);
-      // null/unknown always last, both directions.
+      const va = sortValue(a.cells[sortKey]);
+      const vb = sortValue(b.cells[sortKey]);
       if (va === null && vb === null) return 0;
-      if (va === null) return 1;
+      if (va === null) return 1; // nulls last, both directions
       if (vb === null) return -1;
       if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dirMul;
       return String(va).localeCompare(String(vb)) * dirMul;
     });
-  }, [filtered, sortKey, sortDir, colOf]);
+  }, [filtered, sortKey, sortDir]);
 
   const toggleSort = (key: string) => {
     if (sortKey === key) setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'));
@@ -78,8 +150,6 @@ export function SortableTable<T>({ rows, columns, rowKey, rowHref, initialSort, 
       setSortDir('desc');
     }
   };
-
-  const hasSearch = columns.some((c) => c.searchable);
 
   return (
     <div className="space-y-2">
@@ -118,30 +188,29 @@ export function SortableTable<T>({ rows, columns, rowKey, rowHref, initialSort, 
               </tr>
             ) : (
               sorted.map((r) => {
-                const href = rowHref?.(r) ?? null;
                 const cells = columns.map((c) => (
                   <td key={c.key} className={`px-3 py-2 ${c.align === 'right' ? 'text-right' : ''}`}>
-                    {c.render ? c.render(r) : (c.value(r) ?? <span className="text-zinc-500">unknown</span>)}
+                    <CellView cell={r.cells[c.key]} />
                   </td>
                 ));
-                return href ? (
+                const isInner = (el: HTMLElement | null) => !!el?.closest('a,button,input');
+                return r.href ? (
                   <tr
-                    key={rowKey(r)}
+                    key={r.id}
                     className="cursor-pointer transition-colors hover:bg-zinc-900/60 focus-within:bg-zinc-900/60"
                     tabIndex={0}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') window.location.href = href;
+                      if (e.key === 'Enter' && !isInner(e.target as HTMLElement)) window.location.href = r.href!;
                     }}
                     onClick={(e) => {
-                      // Don't hijack clicks on inner links/buttons.
-                      if ((e.target as HTMLElement).closest('a,button')) return;
-                      window.location.href = href;
+                      if (isInner(e.target as HTMLElement)) return;
+                      window.location.href = r.href!;
                     }}
                   >
                     {cells}
                   </tr>
                 ) : (
-                  <tr key={rowKey(r)} className="hover:bg-zinc-900/40">
+                  <tr key={r.id} className="hover:bg-zinc-900/40">
                     {cells}
                   </tr>
                 );
@@ -151,33 +220,5 @@ export function SortableTable<T>({ rows, columns, rowKey, rowHref, initialSort, 
         </table>
       </div>
     </div>
-  );
-}
-
-/** Shared token-identity cell: logo + $SYMBOL / "Unknown token", short mint
- *  link, copy + explorer — used inside SortableTable render callbacks. */
-export function TokenCellInner({
-  mint,
-  display,
-  logoUri,
-  isUnknown
-}: {
-  mint: string;
-  display: string;
-  logoUri: string | null;
-  isUnknown: boolean;
-}) {
-  return (
-    <span className="inline-flex items-center gap-2">
-      {logoUri ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={logoUri} alt="" width={18} height={18} className="rounded-full" />
-      ) : (
-        <span className="inline-block h-[18px] w-[18px] rounded-full bg-zinc-700" />
-      )}
-      <Link href={`/token/${mint}`} className={isUnknown ? 'text-zinc-300 hover:underline' : 'text-sky-400 hover:underline'}>
-        {display}
-      </Link>
-    </span>
   );
 }
