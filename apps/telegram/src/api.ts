@@ -18,7 +18,13 @@ export function createTelegramApi(token: string, fetchImpl: typeof fetch = fetch
     async setMyCommands(commands) { await call('setMyCommands', { commands }); },
     getUpdates: (offset, signal) => call<TelegramUpdate[]>('getUpdates', { offset: Number(offset), limit: 100, timeout: 25, allowed_updates: ['message', 'callback_query'] }, signal),
     async sendMessage(chatId, text, keyboard) { await call('sendMessage', messageBody(chatId, text, keyboard)); },
-    async editMessage(chatId, messageId, text, keyboard) { await call('editMessageText', { ...messageBody(chatId, text, keyboard), message_id: messageId }); },
+    async editMessage(chatId, messageId, text, keyboard) {
+      try { await call('editMessageText', { ...messageBody(chatId, text, keyboard), message_id: messageId }); }
+      catch (error) {
+        if (error instanceof Error && error.message.toLowerCase().includes('message is not modified')) return;
+        throw error;
+      }
+    },
     async answerCallbackQuery(id, text) { await call('answerCallbackQuery', { callback_query_id: id, ...(text ? { text: text.slice(0, 200) } : {}) }); },
     async sendDocument(chatId, filename, content, mimeType, caption) {
       const form = new FormData();

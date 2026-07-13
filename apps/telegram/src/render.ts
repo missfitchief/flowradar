@@ -26,7 +26,11 @@ export function navKeyboard(sessionId: string, page: number, hasNext: boolean, e
   const nav = [];
   if (page > 1) nav.push({ text: '‹ Back', callback_data: callback('page', sessionId, String(page - 1)) });
   if (hasNext) nav.push({ text: 'Next ›', callback_data: callback('page', sessionId, String(page + 1)) });
-  return { inline_keyboard: [...(nav.length ? [nav] : []), ...extras, [{ text: 'CSV', callback_data: callback('export', sessionId, 'csv') }, { text: 'JSON', callback_data: callback('export', sessionId, 'json') }]] };
+  return { inline_keyboard: [...(nav.length ? [nav] : []), ...extras, [{ text: 'Izvoz', callback_data: callback('exportmenu', sessionId, 'open') }]] };
+}
+
+export function exportKeyboard(sessionId: string): InlineKeyboard {
+  return { inline_keyboard: [[{ text: 'CSV', callback_data: callback('export', sessionId, 'csv') }, { text: 'JSON', callback_data: callback('export', sessionId, 'json') }], [{ text: 'Back', callback_data: callback('exportback', sessionId, 'result') }]] };
 }
 
 export function callback(action: string, sessionId: string, value: string) { const data = `v1|${action}|${sessionId}|${value}`; if (Buffer.byteLength(data) > 64) throw new Error('Telegram callback_data exceeds 64 bytes'); return data; }

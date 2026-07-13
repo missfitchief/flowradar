@@ -8,6 +8,8 @@ import type {
 const ALL_CHAINS: ChainId[] = ['SOLANA', 'ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'];
 const EVM_CHAINS: ChainId[] = ['ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'];
 const DEFAULT_ALERTS = ['funded_new_wallet', 'bridge_transfer', 'dormant_wallet_reactivated', 'receiver_bought_token', 'profit_rotated', 'high_priority_transfer', 'probable_side_wallet_discovered'];
+const PENDING_WORKFLOWS: OperatorWorkflow[] = ['wallet', 'token', 'entity', 'flow', 'bridges'];
+const pendingWorkflowKey = (workflow: OperatorWorkflow) => `pending:${workflow}`;
 
 export class OperatorService {
   constructor(private readonly prisma: PrismaClient) {}
@@ -281,6 +283,79 @@ export class OperatorService {
   }
 
   async listWatches(userId: string, chatId: string) { return this.prisma.operatorWatch.findMany({ where: { userId, chatId, active: true }, orderBy: { updatedAt: 'desc' }, take: 100 }); }
+
+  async setPendingSession(userId: string, chatId: string, workflow: OperatorWorkflow, ttlMinutes = 10) {
+    if (!PENDING_WORKFLOWS.includes(workflow)) throw new Error('Workflow does not accept a pending target');
+    await this.clearPendingSession(userId, chatId);
+    return this.prisma.operatorSession.create({
+      data: {
+        userId,
+        chatId,
+        workflow: pendingWorkflowKey(workflow),
+        stateJson: json({ page: 1, pageSize: 10 }),
+        expiresAt: new Date(Date.now() + Math.max(1, Math.min(ttlMinutes, 60)) * 60_000)
+      }
+    });
+  }
+
+  async getPendingSession(userId: string, chatId: string) {
+    const session = await this.prisma.operatorSession.findFirst({
+      where: { userId, chatId, workflow: { in: PENDING_WORKFLOWS.map(pendingWorkflowKey) }, expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: 'desc' }
+    });
+    if (!session) return null;
+    const workflow = session.workflow.slice('pending:'.length) as OperatorWorkflow;
+    return PENDING_WORKFLOWS.includes(workflow) ? { session, workflow } : null;
+  }
+
+  async clearPendingSession(userId: string, chatId: string) {
+    const result = await this.prisma.operatorSession.deleteMany({
+      where: { userId, chatId, workflow: { in: PENDING_WORKFLOWS.map(pendingWorkflowKey) } }
+    });
+    return result.count;
+  }
+
+  async validateWorkflowTarget(workflow: OperatorWorkflow, input: string) {
+    if (inferredAddressRefs(input).length) return true;
+    if (!['entity', 'flow', 'bridges'].includes(workflow)) return false;
+    return Boolean(await this.prisma.unifiedEntity.findUnique({ where: { entityKey: input.trim() }, select: { id: true } }));
+  }
+
+  async classifyAddressInput(input: string): Promise<'wallet' | 'token' | 'ambiguous' | 'invalid'> {
+    const refs = inferredAddressRefs(input);
+    if (!refs.length) return 'invalid';
+    const tokenRefs = refs.map((ref) => ({ chain: ref.chain, address: ref.address }));
+    const mintRefs = refs.map((ref) => ({ chain: ref.chain, mint: ref.address }));
+    const universeRefs = refs.map((ref) => ({ chain: ref.chain, tokenAddress: ref.address }));
+    const walletRefs = refs.map((ref) => ({ chain: ref.chain, address: ref.address }));
+    const candidateWalletRefs = refs.map((ref) => ({ chain: ref.chain, walletAddress: ref.address }));
+    const [tokens, metadata, universe, candidateMints, tokenEvents, wallets, entityAddresses, candidateWallets, walletEvents] = await Promise.all([
+      this.prisma.token.count({ where: { OR: tokenRefs } }),
+      this.prisma.tokenMetadata.count({ where: { OR: mintRefs } }),
+      this.prisma.historicalTokenUniverse.count({ where: { OR: universeRefs } }),
+      this.prisma.tokenTopPnlCandidate.count({ where: { OR: mintRefs } }),
+      this.prisma.massTransactionEvent.count({ where: { OR: refs.map((ref) => ({ chain: ref.chain, tokenAddress: ref.address })) } }),
+      this.prisma.wallet.count({ where: { OR: walletRefs } }),
+      this.prisma.unifiedEntityAddress.count({ where: { OR: walletRefs } }),
+      this.prisma.tokenTopPnlCandidate.count({ where: { OR: candidateWalletRefs } }),
+      this.prisma.massTransactionEvent.count({ where: { OR: eventAddressWhere(refs) } })
+    ]);
+    const hasTokenEvidence = tokens + metadata + universe + candidateMints + tokenEvents > 0;
+    const hasWalletEvidence = wallets + entityAddresses + candidateWallets + walletEvents > 0;
+    if (hasTokenEvidence !== hasWalletEvidence) return hasTokenEvidence ? 'token' : 'wallet';
+    return 'ambiguous';
+  }
+
+  async queueDeeperTokenScan(input: string) {
+    const refs = inferredAddressRefs(input);
+    if (!refs.length) throw new Error('Token CA nije validan');
+    const result = await this.prisma.historicalTokenUniverse.updateMany({
+      where: { OR: refs.map((ref) => ({ chain: ref.chain, tokenAddress: ref.address })) },
+      data: { processingStatus: 'pending', nextRetryAt: null, lastError: null }
+    });
+    if (!result.count) throw new Error('Token nije u historical discovery univerzumu');
+    return result.count;
+  }
 
   async createSession(userId: string, chatId: string, workflow: OperatorWorkflow, state: OperatorSessionState, ttlMinutes = 60) {
     return this.prisma.operatorSession.create({ data: { userId, chatId, workflow, stateJson: json(state), expiresAt: new Date(Date.now() + Math.max(5, Math.min(ttlMinutes, 24 * 60)) * 60_000) } });

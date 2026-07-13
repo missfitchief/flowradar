@@ -1,14 +1,20 @@
 import { OperatorService, type OperatorSessionState, type OperatorWorkflow, type ProfitableSort } from '@flowradar/db';
 import { isAuthorized } from './auth';
-import { callback, h, navKeyboard, renderBridges, renderFlows, renderProfitable, renderWallet, short } from './render';
+import { callback, exportKeyboard, h, navKeyboard, renderBridges, renderFlows, renderProfitable, renderWallet, short } from './render';
 import type { InlineKeyboard, TelegramApi, TelegramCallbackQuery, TelegramMessage, TelegramUpdate } from './types';
 
 const COMMANDS = [
   { command: 'wallet', description: 'Wallet summary (Solana/EVM)' }, { command: 'token', description: 'Token + top-PnL wallets' },
   { command: 'profitable', description: 'Automatic profitable wallets' }, { command: 'entity', description: 'Entity and linked wallets' },
   { command: 'flow', description: 'Capital-flow history' }, { command: 'bridges', description: 'Official bridge history' },
-  { command: 'watch', description: 'Persist a wallet/entity watch' }, { command: 'recent', description: 'Recent relevant events' }
+  { command: 'watch', description: 'Persist a wallet/entity watch' }, { command: 'recent', description: 'Recent relevant events' },
+  { command: 'cancel', description: 'Cancel pending input' }
 ];
+const PENDING_PROMPTS: Partial<Record<OperatorWorkflow, string>> = {
+  wallet: 'Pošalji wallet adresu.', token: 'Pošalji token CA.', entity: 'Pošalji wallet ili entity ID.',
+  flow: 'Pošalji wallet ili entity.', bridges: 'Pošalji wallet ili entity.'
+};
+const EMPTY_KEYBOARD: InlineKeyboard = { inline_keyboard: [] };
 export const TELEGRAM_COMMANDS = [{ command: 'start', description: 'FlowRadar operator menu' }, ...COMMANDS];
 
 export function createUpdateHandler(service: OperatorService, api: TelegramApi, allowed: ReadonlySet<string>) {
@@ -22,34 +28,109 @@ async function handleMessage(service: OperatorService, api: TelegramApi, allowed
   const chatId = String(message.chat.id);
   if (!isAuthorized(allowed, message.from?.id)) { await api.sendMessage(chatId, '<b>Unauthorized.</b>'); return; }
   const userId = String(message.from!.id);
-  const { command, argument } = parseCommand(message.text ?? '');
-  if (!command || command === 'start' || command === 'help') { await api.sendMessage(chatId, help()); return; }
+  const text = (message.text ?? '').trim();
+  const { command, argument } = parseCommand(text);
+
+  if (command === 'cancel') {
+    await service.clearPendingSession(userId, chatId);
+    await api.sendMessage(chatId, 'Otkazano.');
+    return;
+  }
+  if (command === 'start' || command === 'help') {
+    await service.clearPendingSession(userId, chatId);
+    await api.sendMessage(chatId, help());
+    return;
+  }
+  if (command) {
+    try {
+      if (command === 'watch') {
+        if (!argument) throw new Error('Pošalji wallet ili entity ID.');
+        const watch = await service.watch(userId, chatId, argument);
+        await api.sendMessage(chatId, `<b>Watch enabled</b>\n${h(watch.targetType)}: <code>${h(short(watch.targetKey, 10))}</code>\nNoise events are suppressed.`);
+        return;
+      }
+      if (!['wallet', 'token', 'profitable', 'entity', 'flow', 'bridges', 'recent'].includes(command)) throw new Error('Unknown command. Use /start.');
+      const workflow = command as OperatorWorkflow;
+      if (!argument && PENDING_PROMPTS[workflow]) {
+        const pending = await service.setPendingSession(userId, chatId, workflow, 10);
+        await api.sendMessage(chatId, PENDING_PROMPTS[workflow]!, pendingKeyboard(pending.id));
+        return;
+      }
+      if (argument && !(await service.validateWorkflowTarget(workflow, argument))) {
+        await api.sendMessage(chatId, invalidTargetMessage(workflow));
+        return;
+      }
+      await service.clearPendingSession(userId, chatId);
+      await sendWorkflow(service, api, userId, chatId, workflow, argument || undefined);
+    } catch (error) {
+      await api.sendMessage(chatId, `<b>Request failed</b>\n${h(error instanceof Error ? error.message : String(error))}`);
+    }
+    return;
+  }
+
+  if (!text) { await api.sendMessage(chatId, help()); return; }
   try {
-    if (command === 'watch') {
-      if (!argument) throw new Error('Usage: /watch &lt;wallet-or-entity&gt;');
-      const watch = await service.watch(userId, chatId, argument);
-      await api.sendMessage(chatId, `<b>Watch enabled</b>\n${h(watch.targetType)}: <code>${h(short(watch.targetKey, 10))}</code>\nNoise events are suppressed.`);
+    const pending = await service.getPendingSession(userId, chatId);
+    if (pending) {
+      if (!(await service.validateWorkflowTarget(pending.workflow, text))) {
+        await api.sendMessage(chatId, invalidTargetMessage(pending.workflow), pendingKeyboard(pending.session.id));
+        return;
+      }
+      await service.clearPendingSession(userId, chatId);
+      await sendWorkflow(service, api, userId, chatId, pending.workflow, text);
       return;
     }
-    if (!argument && !['profitable', 'recent'].includes(command)) throw new Error(`Usage: /${command} &lt;address-or-entity&gt;`);
-    const workflow = command as OperatorWorkflow;
-    if (!['wallet', 'token', 'profitable', 'entity', 'flow', 'bridges', 'recent'].includes(workflow)) throw new Error('Unknown command. Use /start.');
-    const state: OperatorSessionState = { target: argument || undefined, chain: 'ALL', sort: 'pnl', page: 1, pageSize: 10 };
-    const session = await service.createSession(userId, chatId, workflow, state);
-    const rendered = await renderWorkflow(service, workflow, state, session.id);
-    await api.sendMessage(chatId, rendered.text, rendered.keyboard);
-  } catch (error) { await api.sendMessage(chatId, `<b>Request failed</b>\n${h(error instanceof Error ? error.message : String(error))}`); }
+
+    const classification = await service.classifyAddressInput(text);
+    if (classification === 'wallet' || classification === 'token') {
+      await sendWorkflow(service, api, userId, chatId, classification, text);
+      return;
+    }
+    if (classification === 'ambiguous') {
+      const session = await service.createSession(userId, chatId, 'wallet', defaultState(text));
+      await api.sendMessage(chatId, 'Adresa može biti wallet ili token. Kako želiš da je analiziram?', {
+        inline_keyboard: [[
+          { text: 'Analiziraj kao wallet', callback_data: callback('choose', session.id, 'wallet') },
+          { text: 'Analiziraj kao token', callback_data: callback('choose', session.id, 'token') }
+        ], [{ text: 'Back', callback_data: callback('cancel', session.id, 'input') }]]
+      });
+      return;
+    }
+    await api.sendMessage(chatId, 'Adresa nije prepoznata. Pošalji validnu Solana ili EVM adresu, ili izaberi komandu iz /start.');
+  } catch (error) {
+    await api.sendMessage(chatId, `<b>Request failed</b>\n${h(error instanceof Error ? error.message : String(error))}`);
+  }
 }
 
 async function handleCallback(service: OperatorService, api: TelegramApi, allowed: ReadonlySet<string>, query: TelegramCallbackQuery) {
   const chatId = query.message ? String(query.message.chat.id) : '';
   if (!isAuthorized(allowed, query.from.id) || !chatId) { await api.answerCallbackQuery(query.id, 'Unauthorized'); return; }
+  const userId = String(query.from.id);
   const parsed = parseCallback(query.data);
   if (!parsed) { await api.answerCallbackQuery(query.id, 'Expired or invalid action'); return; }
-  const session = await service.getSession(parsed.sessionId, String(query.from.id), chatId);
+  await service.clearPendingSession(userId, chatId);
+  if (parsed.action === 'cancel') {
+    await editIfChanged(api, query, 'Otkazano.', EMPTY_KEYBOARD);
+    await api.answerCallbackQuery(query.id, 'Otkazano');
+    return;
+  }
+  const session = await service.getSession(parsed.sessionId, userId, chatId);
   if (!session) { await api.answerCallbackQuery(query.id, 'Session expired. Run the command again.'); return; }
   const state = session.stateJson as unknown as OperatorSessionState;
   try {
+    if (parsed.action === 'choose') {
+      const workflow = parsed.value === 'token' ? 'token' : 'wallet';
+      const next = await service.createSession(userId, chatId, workflow, { ...state, page: 1 });
+      const rendered = await renderWorkflow(service, workflow, { ...state, page: 1 }, next.id);
+      await editIfChanged(api, query, rendered.text, rendered.keyboard);
+      await api.answerCallbackQuery(query.id);
+      return;
+    }
+    if (parsed.action === 'exportmenu') {
+      await editIfChanged(api, query, `${h(query.message?.text ?? 'FlowRadar rezultat')}\n\n<b>Izvoz</b>\nIzaberi format.`, exportKeyboard(session.id));
+      await api.answerCallbackQuery(query.id);
+      return;
+    }
     if (parsed.action === 'export') {
       const format = parsed.value === 'csv' ? 'csv' : 'json';
       const file = await service.exportWorkflow(session.workflow as OperatorWorkflow, state, format);
@@ -57,8 +138,13 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
       await api.answerCallbackQuery(query.id, 'Export sent');
       return;
     }
+    if (parsed.action === 'deepscan') {
+      await service.queueDeeperTokenScan(state.target ?? '');
+      await api.answerCallbackQuery(query.id, 'Dublji scan je stavljen u red');
+      return;
+    }
     if (parsed.action === 'watch') {
-      await service.watch(String(query.from.id), chatId, state.target ?? '');
+      await service.watch(userId, chatId, state.target ?? '');
       await api.answerCallbackQuery(query.id, 'Watch enabled');
       return;
     }
@@ -67,10 +153,10 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
       const index = Math.max(0, Number(parsed.value) || 0);
       const address = entity.addresses?.[index]?.address;
       if (!address) throw new Error('Wallet is no longer available on this entity page');
-      const childState: OperatorSessionState = { target: address, page: 1, pageSize: 10 };
-      const child = await service.createSession(String(query.from.id), chatId, 'wallet', childState);
+      const childState = defaultState(address);
+      const child = await service.createSession(userId, chatId, 'wallet', childState);
       const rendered = await renderWorkflow(service, 'wallet', childState, child.id);
-      await api.editMessage(chatId, query.message!.message_id, rendered.text, rendered.keyboard);
+      await editIfChanged(api, query, rendered.text, rendered.keyboard);
       await api.answerCallbackQuery(query.id);
       return;
     }
@@ -80,17 +166,26 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
     else if (parsed.action === 'filter') state.chain = parsed.value as OperatorSessionState['chain'];
     else if (parsed.action === 'view') {
       const workflow = parsed.value as OperatorWorkflow;
-      const next = await service.createSession(String(query.from.id), chatId, workflow, { ...state, page: 1 });
+      const next = await service.createSession(userId, chatId, workflow, { ...state, page: 1 });
       const rendered = await renderWorkflow(service, workflow, { ...state, page: 1 }, next.id);
-      await api.editMessage(chatId, query.message!.message_id, rendered.text, rendered.keyboard);
+      await editIfChanged(api, query, rendered.text, rendered.keyboard);
       await api.answerCallbackQuery(query.id);
       return;
     }
-    await service.updateSession(session.id, String(query.from.id), chatId, state);
+    await service.updateSession(session.id, userId, chatId, state);
     const rendered = await renderWorkflow(service, session.workflow as OperatorWorkflow, state, session.id);
-    await api.editMessage(chatId, query.message!.message_id, rendered.text, rendered.keyboard);
+    await editIfChanged(api, query, rendered.text, rendered.keyboard);
     await api.answerCallbackQuery(query.id);
-  } catch (error) { await api.answerCallbackQuery(query.id, error instanceof Error ? error.message : 'Request failed'); }
+  } catch (error) {
+    await api.answerCallbackQuery(query.id, error instanceof Error ? error.message : 'Request failed');
+  }
+}
+
+async function sendWorkflow(service: OperatorService, api: TelegramApi, userId: string, chatId: string, workflow: OperatorWorkflow, target?: string) {
+  const state = defaultState(target);
+  const session = await service.createSession(userId, chatId, workflow, state);
+  const rendered = await renderWorkflow(service, workflow, state, session.id);
+  await api.sendMessage(chatId, rendered.text, rendered.keyboard);
 }
 
 async function renderWorkflow(service: OperatorService, workflow: OperatorWorkflow, state: OperatorSessionState, sessionId: string): Promise<{ text: string; keyboard: InlineKeyboard }> {
@@ -101,8 +196,19 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
   }
   if (workflow === 'token') {
     const value = await service.tokenSummary(required(state), page, size, state.tokenSort ?? 'pnl');
-    const text = [`<b>Token</b> ${h(short(required(state), 9))}`, ...value.tokens.map((x) => `${h(x.chain)} <b>${h(x.symbol)}</b> ${h(x.name)} · mcap ${h(x.latestMcapUsd ?? 'n/a')}`), ...value.topPnl.items.map((x, i) => `${(page - 1) * size + i + 1}. ${h(x.chain)} <code>${h(short(x.walletAddress, 7))}</code> · local ${h(x.realizedPnlUsd ?? 'n/a')} · ${h(x.validation)}`), value.coverageWarnings.length ? `<i>Coverage:</i> ${value.coverageWarnings.map(h).join(' ')}` : ''].filter(Boolean).join('\n');
-    return { text, keyboard: navKeyboard(sessionId, page, value.topPnl.hasNext, [[{ text: 'PnL', callback_data: callback('tokensort', sessionId, 'pnl') }, { text: 'ROI', callback_data: callback('tokensort', sessionId, 'roi') }, { text: 'Entry MC', callback_data: callback('tokensort', sessionId, 'entry_mcap') }], [{ text: 'Repeat', callback_data: callback('tokensort', sessionId, 'repeat_runners') }, { text: 'Dormancy', callback_data: callback('tokensort', sessionId, 'dormancy') }, { text: 'Confidence', callback_data: callback('tokensort', sessionId, 'confidence') }]]) };
+    const tokenLines = value.tokens.map((x) => `${h(x.chain)} <b>${h(x.symbol)}</b> ${h(x.name)} · mcap ${h(x.latestMcapUsd ?? 'n/a')}`);
+    const traderLines = value.topPnl.items.map((x, i) => `${(page - 1) * size + i + 1}. ${h(x.chain)} <code>${h(short(x.walletAddress, 7))}</code> · local ${h(x.realizedPnlUsd ?? 'n/a')} · ${h(x.validation)}`);
+    const emptyLines = value.topPnl.total === 0 ? [
+      '<b>Top-PnL rezultati još ne postoje.</b>',
+      'Provereno: canonical token, metadata, historical universe i lokalni/provider top-PnL zapisi.',
+      `Zašto: ${h(value.coverageWarnings.join(' ') || 'Nema potvrđenih trader zapisa za ovaj token.')}`,
+      `Coverage: ${h(value.universe.length ? value.universe.map((x) => `${x.chain} ${x.coverage}/${x.processingStatus}`).join(', ') : 'historical-universe red ne postoji')}`
+    ] : [];
+    const text = [`<b>Token</b> ${h(short(required(state), 9))}`, ...tokenLines, ...traderLines, ...emptyLines, value.coverageWarnings.length && value.topPnl.total > 0 ? `<i>Coverage:</i> ${value.coverageWarnings.map(h).join(' ')}` : ''].filter(Boolean).join('\n');
+    const controls = value.topPnl.total === 0
+      ? [[{ text: 'Pokreni dublji scan', callback_data: callback('deepscan', sessionId, 'queue') }]]
+      : [[{ text: 'PnL', callback_data: callback('tokensort', sessionId, 'pnl') }, { text: 'ROI', callback_data: callback('tokensort', sessionId, 'roi') }, { text: 'Entry MC', callback_data: callback('tokensort', sessionId, 'entry_mcap') }], [{ text: 'Repeat', callback_data: callback('tokensort', sessionId, 'repeat_runners') }, { text: 'Dormancy', callback_data: callback('tokensort', sessionId, 'dormancy') }, { text: 'Confidence', callback_data: callback('tokensort', sessionId, 'confidence') }]];
+    return { text, keyboard: navKeyboard(sessionId, page, value.topPnl.hasNext, controls) };
   }
   if (workflow === 'profitable') {
     const value = await service.profitable({ chain: state.chain, sort: state.sort, page, pageSize: size });
@@ -124,7 +230,25 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
   return { text, keyboard: navKeyboard(sessionId, page, value.hasNext) };
 }
 
+async function editIfChanged(api: TelegramApi, query: TelegramCallbackQuery, text: string, keyboard: InlineKeyboard) {
+  if (!query.message) return;
+  const sameText = query.message.text === htmlToPlain(text);
+  const sameKeyboard = JSON.stringify(query.message.reply_markup ?? null) === JSON.stringify(keyboard);
+  if (sameText && sameKeyboard) return;
+  await api.editMessage(String(query.message.chat.id), query.message.message_id, text, keyboard);
+}
+
+function htmlToPlain(value: string) {
+  return value.replace(/<[^>]+>/g, '').replaceAll('&quot;', '"').replaceAll('&gt;', '>').replaceAll('&lt;', '<').replaceAll('&amp;', '&');
+}
+function pendingKeyboard(sessionId: string): InlineKeyboard { return { inline_keyboard: [[{ text: 'Back', callback_data: callback('cancel', sessionId, 'pending') }]] }; }
+function defaultState(target?: string): OperatorSessionState { return { target, chain: 'ALL', sort: 'pnl', page: 1, pageSize: 10 }; }
+function invalidTargetMessage(workflow: OperatorWorkflow) {
+  if (workflow === 'token') return 'Token CA nije validan. Pošalji validan token CA.';
+  if (workflow === 'wallet') return 'Wallet adresa nije validna. Pošalji validnu wallet adresu.';
+  return 'Vrednost nije validna. Pošalji validan wallet ili postojeći entity ID.';
+}
 function parseCommand(text: string) { const match = text.trim().match(/^\/([a-z_]+)(?:@[a-z0-9_]+)?(?:\s+([\s\S]+))?$/i); return { command: match?.[1]?.toLowerCase() ?? '', argument: match?.[2]?.trim() ?? '' }; }
 function parseCallback(value: string | undefined) { const parts = value?.split('|'); return parts?.length === 4 && parts[0] === 'v1' ? { action: parts[1], sessionId: parts[2], value: parts[3] } : null; }
 function required(state: OperatorSessionState) { if (!state.target) throw new Error('Target is required'); return state.target; }
-function help() { return [`<b>FlowRadar operator</b>`, ...COMMANDS.map((x) => `/${x.command} — ${h(x.description)}`), '', 'Examples:', '<code>/wallet ADDRESS</code>', '<code>/token TOKEN_ADDRESS</code>', '<code>/profitable</code>'].join('\n'); }
+function help() { return [`<b>FlowRadar operator</b>`, ...COMMANDS.map((x) => `/${x.command} — ${h(x.description)}`), '', 'Izaberi komandu; bot će zatim tražiti potrebnu adresu.', '<code>/wallet</code>', '<code>/token</code>', '<code>/profitable</code>'].join('\n'); }

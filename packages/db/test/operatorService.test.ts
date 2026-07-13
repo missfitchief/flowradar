@@ -36,6 +36,13 @@ describe('OperatorService', () => {
     expect(await service.getSession(session.id, 'other-user', PREFIX)).toBeNull();
     expect(await service.updateSession(session.id, PREFIX, PREFIX, { page: 2, pageSize: 10 })).toBe(true);
 
+    const pending = await service.setPendingSession(PREFIX, PREFIX, 'wallet', 10);
+    const pendingState = await service.getPendingSession(PREFIX, PREFIX);
+    expect(pendingState).toMatchObject({ workflow: 'wallet', session: { id: pending.id, userId: PREFIX, chatId: PREFIX } });
+    expect(pending.expiresAt.getTime() - pending.createdAt.getTime()).toBeGreaterThanOrEqual(9 * 60_000);
+    expect(await service.clearPendingSession(PREFIX, PREFIX)).toBe(1);
+    expect(await service.getPendingSession(PREFIX, PREFIX)).toBeNull();
+
     await service.setCursor(`${PREFIX}:bot`, 123n);
     expect(await service.getCursor(`${PREFIX}:bot`)).toBe(123n);
   });
