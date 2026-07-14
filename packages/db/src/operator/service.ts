@@ -348,6 +348,8 @@ export class OperatorService {
         remainingPositionUsd: decimal(x.claimedRemainingUsd), claimedRealizedPnlUsd: decimal(x.claimedRealizedPnlUsd), roi,
         entryMcapUsd: entryMcap, repeatRunnerCount: repeatRunners, dormancyReactivations: dormancy,
         firstBuyTs: x.localFirstBuyTs?.toISOString() ?? providerEntryTime(x.providerJson), firstSellTs: x.localFirstSellTs?.toISOString() ?? null,
+        lastActivityTs: x.localLastSellTs?.toISOString() ?? x.localFirstSellTs?.toISOString() ?? x.localFirstBuyTs?.toISOString() ?? providerEntryTime(x.providerJson),
+        qualityScore: intelligenceBy.get(`${x.chain}:${x.walletAddress}`)?.qualityScore ?? null,
         dormancy: (() => { const row = intelligenceBy.get(`${x.chain}:${x.walletAddress}`); return row ? { days7: row.dormant7d, days14: row.dormant14d, days30: row.dormant30d, days90: row.dormant90d } : null; })(),
         confidence: normalizeConfidence(x.confidence), coverage: x.coverage,
         entityKey: entity?.entityKey ?? null, role: entity?.role ?? 'unknown_related_wallet'
