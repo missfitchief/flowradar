@@ -5,6 +5,7 @@ export * from './entities';
 export * from './knowledge';
 export * from './lifecycle';
 export * from './monitoring';
+export * from './coreWalletSeed';
 export * from './outcomes';
 export * from './token';
 export * from './tokenQuality';

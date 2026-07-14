@@ -137,6 +137,11 @@ export async function runMonitoringScheduler(
       where: {
         active: true,
         priority: { in: ['strong_link', 'probable_link', 'standard', 'weak_cold'] },
+        // Priority core seeds are deliberately permanent monitoring
+        // candidates. Historical inactivity is their value proposition, not
+        // a reason to push them into the cold archive; real enrichment may
+        // later change their intelligence scores, but age alone may not.
+        NOT: { reason: { startsWith: 'priority_core_seed' } },
         wallet: { lastActiveAt: { lt: coldBefore } },
         ...scope
       },

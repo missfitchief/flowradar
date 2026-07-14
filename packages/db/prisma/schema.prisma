@@ -696,6 +696,77 @@ model ImportJob {
   @@map("import_jobs")
 }
 
+/// Immutable batch receipt for externally supplied priority wallet seeds.
+/// The source score is retained as provenance and may select monitoring
+/// candidates, but this path never treats it as identity/ownership evidence,
+/// historical-alpha proof, signal eligibility, or a Buy Candidate trigger.
+model CoreWalletSeedImport {
+  id                       String    @id @default(cuid())
+  importKey                String    @unique
+  status                   String
+  policyVersion            Int
+  scoreThreshold           Float
+  sourceFiles              String[]
+  sourceHashes             String[]
+  totalRows                Int
+  candidateRows            Int
+  acceptedRows             Int
+  uniqueWallets            Int
+  rejectedRows             Int
+  duplicateRows            Int
+  profilesCreated          Int       @default(0)
+  profilesUpdated          Int       @default(0)
+  singletonClustersCreated Int       @default(0)
+  monitoringEnrolled       Int       @default(0)
+  entitiesProjected        Int       @default(0)
+  guardrailJson            Json
+  errorsJson               Json
+  startedAt                DateTime
+  completedAt              DateTime?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+
+  records CoreWalletSeedRecord[]
+
+  @@index([status, startedAt])
+  @@map("core_wallet_seed_imports")
+}
+
+/// One append-only source-row receipt. Duplicate addresses remain visible as
+/// separate rows even though wallet/profile/monitoring projections are
+/// idempotently unified by canonical chain+address.
+model CoreWalletSeedRecord {
+  id                 String    @id @default(cuid())
+  recordKey          String    @unique
+  importId           String
+  sourceFile         String
+  sourceHash         String
+  sourceSheet        String?
+  sourceRow          Int
+  chain              ChainId?
+  address            String?
+  sourceScore        Float?
+  sourceTier         String?
+  sourceStatus       String?
+  sourceLabel        String?
+  sourceAddedAt      DateTime?
+  sourceLastActiveAt DateTime?
+  rawJson            Json
+  decision           String
+  reasonCodes        String[]
+  walletId           String?
+  profileId          String?
+  clusterId          String?
+  createdAt          DateTime  @default(now())
+
+  import CoreWalletSeedImport @relation(fields: [importId], references: [id], onDelete: Restrict)
+
+  @@index([importId, decision])
+  @@index([chain, address])
+  @@index([sourceScore])
+  @@map("core_wallet_seed_records")
+}
+
 // ---------------------------------------------------------------------------
 // 14. MoneyFlowEdge
 // ---------------------------------------------------------------------------

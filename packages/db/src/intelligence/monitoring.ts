@@ -4,7 +4,7 @@ import type { ChainId, PrismaClient } from '@prisma/client';
 export function monitoringTierForRole(role: string): MonitoringTier {
   if (role === 'operator_root' || role === 'root_main') return 'root_permanent';
   if (role === 'fresh_funded_receiver' || role === 'dormant_funded_receiver' || role === 'dormant_reactivated') return 'fresh_receiver_hot';
-  if (role === 'execution_wallet' || role === 'high_pnl_wallet') return 'strong_link';
+  if (role === 'execution_wallet' || role === 'high_pnl_wallet' || role === 'priority_core_seed_candidate') return 'strong_link';
   if (['probable_side_wallet', 'bridge_linked_receiver', 'profit_collection_wallet', 'funding_wallet'].includes(role)) return 'probable_link';
   return 'standard';
 }

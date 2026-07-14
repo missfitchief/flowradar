@@ -28,6 +28,7 @@
     "intelligence:adaptive-pilot": "tsx scripts/adaptive-intelligence-pilot.mts",
     "intelligence:real-outcome-replay": "tsx scripts/adaptive-real-outcome-replay.mts",
     "intelligence:telegram-smoke": "tsx scripts/adaptive-telegram-smoke.mts",
+    "intelligence:import-core-seeds": "tsx scripts/import-priority-core-wallet-seeds.mts",
     "telegram:smoke": "tsx scripts/telegram-smoke.mts",
     "test": "vitest run",
     "typecheck": "tsc -b apps/worker apps/telegram packages/core packages/db packages/providers && npm run typecheck -w apps/web",
