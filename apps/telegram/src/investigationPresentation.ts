@@ -91,7 +91,7 @@ export function buildInvestigationPresentation(value: WalletInvestigationResult)
   };
   const defaultTier = candidates.filter((row) => row.intelligence.tier === 'S' || row.intelligence.tier === 'A');
   const topDormantWallets = defaultTier.filter((row) => /dormant|awakened/i.test(row.intelligence.status)).slice(0, 5);
-  const topActiveWallets = defaultTier.filter((row) => !/dormant|awakened/i.test(row.intelligence.status)).slice(0, Math.max(5, 10 - topDormantWallets.length));
+  const topActiveWallets = defaultTier.filter((row) => !/dormant|awakened/i.test(row.intelligence.status)).slice(0, 5);
   const topWallets = uniqueWallets([...topActiveWallets, ...topDormantWallets]).slice(0, 10);
   const moreWallets = candidates.filter((row) => row.intelligence.tier === 'B' || row.intelligence.tier === 'C').slice(0, 20);
   const walletCatalog = [...topWallets, ...moreWallets];

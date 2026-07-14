@@ -9,7 +9,7 @@ import {
   type WalletInvestigationResult
 } from '@flowradar/db';
 import { isAuthorized } from './auth';
-import { renderInvestigationReport } from './investigationRenderer';
+import { renderInvestigationReport, renderRefreshFailure, renderRefreshProgress } from './investigationRenderer';
 import { parseIntelligenceAlertCallback, renderIntelligenceAlert } from './intelligenceAlertRenderer';
 import { callback, exportKeyboard, h, navKeyboard, renderProfitable, short } from './render';
 import type { InlineKeyboard, TelegramApi, TelegramCallbackQuery, TelegramMessage, TelegramUpdate } from './types';
@@ -28,6 +28,7 @@ const PENDING_PROMPTS: Partial<Record<OperatorWorkflow, string>> = {
 const INVESTIGATION_WORKFLOWS = new Set<OperatorWorkflow>(['wallet', 'entity', 'flow', 'bridges']);
 const EMPTY_KEYBOARD: InlineKeyboard = { inline_keyboard: [] };
 const activeWalletInvestigationJobs = new Map<string, Promise<void>>();
+const activeWalletRefreshJobs = new Map<string, Promise<void>>();
 export const TELEGRAM_COMMANDS = [{ command: 'start', description: 'FlowRadar operator menu' }, ...COMMANDS];
 
 export function createUpdateHandler(service: OperatorService, api: TelegramApi, allowed: ReadonlySet<string>) {
@@ -176,33 +177,53 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
     }
     if (parsed.action === 'watch') {
       const investigation = state.investigationId ? await service.loadWalletInvestigation(state.investigationId) : null;
+      if (!investigation) throw new Error('Investigation is no longer available. Use Refresh.');
       await service.watch(userId, chatId, investigation?.entityKey ?? state.target ?? '');
-      await api.answerCallbackQuery(query.id, 'Cluster watch enabled');
-      return;
-    }
-    if (parsed.action === 'refresh') {
-      await api.answerCallbackQuery(query.id, 'Prikaz osvežen');
-      const investigation = await service.loadWalletInvestigation(state.investigationId ?? required(state));
-      if (!investigation) throw new Error('Investigation is no longer available.');
-      state.investigationView = 'summary';
+      rememberInvestigationScreen(state);
+      state.investigationView = 'watch';
+      state.investigationItem = undefined;
       state.page = 1;
       await service.updateSession(session.id, userId, chatId, state);
       const rendered = renderInvestigation(investigation, state, session.id);
       await editIfChanged(api, query, rendered.text, rendered.keyboard);
+      await api.answerCallbackQuery(query.id, 'Cluster added to monitoring');
+      return;
+    }
+    if (parsed.action === 'refresh') {
+      if (activeWalletRefreshJobs.has(session.id)) {
+        await api.answerCallbackQuery(query.id, 'Refresh is already running');
+        return;
+      }
+      if (!state.investigationPreviousView) rememberInvestigationScreen(state);
+      state.investigationView = 'summary';
+      state.investigationItem = undefined;
+      state.page = 1;
+      await service.updateSession(session.id, userId, chatId, state);
+      await api.answerCallbackQuery(query.id, 'Refreshing intelligence');
+      const progress = renderRefreshProgress(required(state), 0);
+      await editIfChanged(api, query, progress.text, progress.keyboard);
+      enqueueWalletRefresh(service, api, userId, chatId, state, session.id, query);
       return;
     }
     if (parsed.action === 'invest') {
-      state.investigationView = investigationView(parsed.value);
+      const nextView = investigationView(parsed.value);
+      if (nextView === 'summary') clearInvestigationHistory(state);
+      else rememberInvestigationScreen(state);
+      state.investigationView = nextView;
       state.investigationItem = undefined;
       state.page = 1;
     } else if (parsed.action === 'evidence') {
+      rememberInvestigationScreen(state);
       state.investigationView = 'evidence';
       state.investigationItem = parsed.value;
       state.page = 1;
     } else if (parsed.action === 'receivers') {
+      rememberInvestigationScreen(state);
       state.investigationView = 'receivers';
       state.investigationItem = parsed.value;
       state.page = 1;
+    } else if (parsed.action === 'back') {
+      restoreInvestigationScreen(state);
     } else if (parsed.action === 'page') state.page = Math.max(1, Number(parsed.value) || 1);
     else if (parsed.action === 'sort') state.sort = parsed.value as ProfitableSort;
     else if (parsed.action === 'tokensort') state.tokenSort = parsed.value as OperatorSessionState['tokenSort'];
@@ -259,6 +280,66 @@ function enqueueWalletInvestigation(
   activeWalletInvestigationJobs.set(sessionId, job);
   void job.finally(() => activeWalletInvestigationJobs.delete(sessionId));
   return true;
+}
+
+function enqueueWalletRefresh(
+  service: OperatorService,
+  api: TelegramApi,
+  userId: string,
+  chatId: string,
+  state: OperatorSessionState,
+  sessionId: string,
+  query: TelegramCallbackQuery
+) {
+  if (activeWalletRefreshJobs.has(sessionId)) return false;
+  const job = new Promise<void>((resolve) => {
+    setImmediate(() => {
+      void executeWalletRefresh(service, api, userId, chatId, state, sessionId, query).finally(resolve);
+    });
+  });
+  activeWalletRefreshJobs.set(sessionId, job);
+  void job.finally(() => activeWalletRefreshJobs.delete(sessionId));
+  return true;
+}
+
+async function executeWalletRefresh(
+  service: OperatorService,
+  api: TelegramApi,
+  userId: string,
+  chatId: string,
+  state: OperatorSessionState,
+  sessionId: string,
+  query: TelegramCallbackQuery
+) {
+  const target = required(state);
+  try {
+    const investigation = await service.walletInvestigationView(target, { maxDepth: 4, refresh: true });
+    for (let stage = 1; stage <= 4; stage += 1) {
+      const progress = renderRefreshProgress(target, stage);
+      await editIfChanged(api, query, progress.text, progress.keyboard);
+    }
+    state.investigationId = investigation.id;
+    state.investigationStatus = 'completed';
+    state.investigationError = undefined;
+    state.investigationView = 'summary';
+    state.investigationItem = undefined;
+    state.page = 1;
+    state.pageSize = 5;
+    clearInvestigationHistory(state);
+    await service.updateSession(sessionId, userId, chatId, state);
+    const rendered = renderInvestigation(investigation, state, sessionId);
+    await editIfChanged(api, query, rendered.text, rendered.keyboard);
+    console.info(`[telegram] wallet intelligence refreshed session=${sessionId} target=${target}`);
+  } catch (error) {
+    const message = errorMessage(error);
+    state.investigationError = message;
+    await Promise.resolve(service.updateSession(sessionId, userId, chatId, state)).catch(() => false);
+    const rendered = renderRefreshFailure(sessionId, message);
+    await editIfChanged(api, query, rendered.text, rendered.keyboard).catch((deliveryError) => {
+      console.error(`[telegram] wallet refresh failure could not be displayed session=${sessionId}: ${errorMessage(deliveryError)}`);
+    });
+    console.error(`[telegram] wallet intelligence refresh failed session=${sessionId} target=${target}: ${message}`);
+  }
 }
 
 async function executeWalletInvestigation(
@@ -816,7 +897,33 @@ function workflowView(workflow: OperatorWorkflow): OperatorSessionState['investi
 }
 function investigationView(value: string): NonNullable<OperatorSessionState['investigationView']> {
   return value === 'paths' || value === 'priority' || value === 'cluster' || value === 'alts' || value === 'deployments'
-    || value === 'evidence' || value === 'bridges' || value === 'more' || value === 'advanced' || value === 'receivers' ? value : 'summary';
+    || value === 'evidence' || value === 'bridges' || value === 'more' || value === 'advanced' || value === 'receivers'
+    || value === 'history' || value === 'outcomes' || value === 'watch' ? value : 'summary';
+}
+
+function rememberInvestigationScreen(state: OperatorSessionState) {
+  state.investigationPreviousView = state.investigationView ?? 'summary';
+  state.investigationPreviousItem = state.investigationItem;
+  state.investigationPreviousPage = state.page || 1;
+}
+
+function restoreInvestigationScreen(state: OperatorSessionState) {
+  const previous = state.investigationPreviousView ?? 'summary';
+  state.investigationView = previous;
+  state.investigationItem = state.investigationPreviousItem;
+  state.page = state.investigationPreviousPage ?? 1;
+  if (previous === 'summary') clearInvestigationHistory(state);
+  else {
+    state.investigationPreviousView = 'summary';
+    state.investigationPreviousItem = undefined;
+    state.investigationPreviousPage = 1;
+  }
+}
+
+function clearInvestigationHistory(state: OperatorSessionState) {
+  state.investigationPreviousView = undefined;
+  state.investigationPreviousItem = undefined;
+  state.investigationPreviousPage = undefined;
 }
 interface TokenPnlTelegramRow {
   chain: string;

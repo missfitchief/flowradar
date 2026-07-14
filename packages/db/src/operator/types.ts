@@ -135,13 +135,19 @@ export interface BridgeRow {
 
 export type OperatorWorkflow = 'wallet' | 'token' | 'profitable' | 'entity' | 'flow' | 'bridges' | 'recent';
 
+export type OperatorInvestigationView = 'summary' | 'paths' | 'priority' | 'cluster' | 'alts' | 'deployments' | 'evidence'
+  | 'bridges' | 'more' | 'advanced' | 'receivers' | 'history' | 'outcomes' | 'watch';
+
 export interface OperatorSessionState {
   target?: string;
   investigationId?: string;
   investigationStatus?: 'queued' | 'running' | 'completed' | 'failed';
   investigationError?: string;
-  investigationView?: 'summary' | 'paths' | 'priority' | 'cluster' | 'alts' | 'deployments' | 'evidence' | 'bridges' | 'more' | 'advanced' | 'receivers';
+  investigationView?: OperatorInvestigationView;
   investigationItem?: string;
+  investigationPreviousView?: OperatorInvestigationView;
+  investigationPreviousItem?: string;
+  investigationPreviousPage?: number;
   chain?: ChainId | 'ALL';
   sort?: ProfitableSort;
   tokenSort?: TokenTraderSort;

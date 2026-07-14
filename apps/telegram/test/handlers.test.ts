@@ -90,11 +90,11 @@ describe('Telegram command handlers', () => {
     await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(3));
     expect(service.updateSession).toHaveBeenCalledWith('session1', '123', '123', expect.objectContaining({ investigationId: 'investigation1', investigationStatus: 'completed', investigationView: 'summary', pageSize: 5 }));
     const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[2]!;
-    expect(text).toContain('<b>WALLET INTELLIGENCE REPORT</b>');
-    expect(text).toContain(`<code>${ADDRESS}</code>`);
+    expect(text).toContain('<b>WALLET INVESTIGATION</b>');
+    expect(text).toContain('<code>111111…111111</code>');
     expect(text).not.toContain('Wallet DNA');
     expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual([
-      'Tier A evidence', 'Explorer', 'Capital paths', 'Cluster wallets', 'Token deployments', 'Evidence', 'Refresh', 'Watch cluster'
+      '💸 Capital Paths', '🧩 Cluster', '🚀 Deployments', '🛡 Evidence', '🔄 Refresh', '📡 Watch', '🕰 Entity History', '📊 Outcomes'
     ]);
   });
 
@@ -134,12 +134,12 @@ describe('Telegram command handlers', () => {
     await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4, refresh: true }));
     await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(2));
     expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('nastavljen nakon restarta');
-    expect(vi.mocked(api.sendMessage).mock.calls[1]?.[1]).toContain('WALLET INTELLIGENCE REPORT');
+    expect(vi.mocked(api.sendMessage).mock.calls[1]?.[1]).toContain('WALLET INVESTIGATION');
   });
 
   it.each([
-    ['/flow', 'priority', 'STRONGEST CAPITAL PATHS'],
-    ['/bridges', 'bridges', 'STRONGEST BRIDGE PATHS'],
+    ['/flow', 'priority', 'CAPITAL PATHS'],
+    ['/bridges', 'bridges', 'BRIDGE PATHS'],
     ['/entity', 'cluster', 'ENTITY CLUSTER']
   ])('uses the same canonical investigation for %s', async (command, view, heading) => {
     const api = apiMock();
@@ -153,7 +153,7 @@ describe('Telegram command handlers', () => {
     expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain(heading);
   });
 
-  it('paginates at most five persisted priority paths with full addresses and explorer links without rescanning', async () => {
+  it('paginates at most five persisted priority paths with compact addresses and explorer links without rescanning', async () => {
     const api = apiMock();
     const service = {
       clearPendingSession: vi.fn(), getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'wallet', stateJson: { target: ADDRESS, investigationId: 'investigation1', investigationView: 'summary', page: 1, pageSize: 5 } }),
@@ -162,23 +162,24 @@ describe('Telegram command handlers', () => {
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 4, callback_query: { id: 'cb-paths', from: { id: 123 }, data: 'v1|invest|session1|priority', message: { message_id: 4, chat: { id: 123, type: 'private' }, text: 'summary' } } });
     const [, , text, keyboard] = vi.mocked(api.editMessage).mock.calls[0]!;
     expect(service.loadWalletInvestigation).toHaveBeenCalledWith('investigation1');
-    expect(text).toContain(`<code>${ADDRESS}</code>`);
-    expect(text).toContain(`<code>${RECEIVER}</code>`);
+    expect(text).toContain('<code>111111…111111</code>');
+    expect(text).toContain('<code>222222…222222</code>');
     expect(text).toContain('TOKEN BUY');
     expect(keyboard?.inline_keyboard.flat().find((button) => button.url === `https://solscan.io/account/${RECEIVER}`)?.url).toBe(`https://solscan.io/account/${RECEIVER}`);
     expect(text?.match(/<b>\d+\. /g)?.length ?? 0).toBeLessThanOrEqual(5);
   });
 
-  it('turns a stale Refresh callback into a persisted summary refresh without starting a scan', async () => {
+  it('runs a real refresh in the same message and returns to the intelligence summary', async () => {
     const api = apiMock();
     const service = {
       clearPendingSession: vi.fn(), getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'wallet', stateJson: { target: ADDRESS, investigationId: 'investigation1', investigationView: 'summary', page: 1, pageSize: 5 } }),
-      loadWalletInvestigation: vi.fn().mockResolvedValue(investigation()), investigateWallet: vi.fn(), updateSession: vi.fn()
+      walletInvestigationView: vi.fn().mockResolvedValue(investigation()), updateSession: vi.fn().mockResolvedValue(true)
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 5, callback_query: { id: 'cb-refresh', from: { id: 123 }, data: 'v1|refresh|session1|run', message: { message_id: 5, chat: { id: 123, type: 'private' }, text: 'old summary' } } });
-    expect(service.loadWalletInvestigation).toHaveBeenCalledWith('investigation1');
-    expect(service.investigateWallet).not.toHaveBeenCalled();
-    expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain('WALLET INTELLIGENCE REPORT');
+    expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain('REFRESHING INTELLIGENCE');
+    await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4, refresh: true }));
+    await vi.waitFor(() => expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('WALLET INVESTIGATION'))).toBe(true));
+    expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('✅ Done.'))).toBe(true);
   });
 
   it('enables the persisted entity watch from the Wallet Investigation callback', async () => {
@@ -187,11 +188,42 @@ describe('Telegram command handlers', () => {
       clearPendingSession: vi.fn(),
       getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'wallet', stateJson: { target: ADDRESS, investigationId: 'investigation1', investigationView: 'summary', page: 1, pageSize: 5 } }),
       loadWalletInvestigation: vi.fn().mockResolvedValue(investigation()),
-      watch: vi.fn().mockResolvedValue({})
+      watch: vi.fn().mockResolvedValue({}), updateSession: vi.fn().mockResolvedValue(true)
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 51, callback_query: { id: 'cb-watch', from: { id: 123 }, data: 'v1|watch|session1|cluster', message: { message_id: 51, chat: { id: 123, type: 'private' }, text: 'summary' } } });
     expect(service.watch).toHaveBeenCalledWith('123', '123', 'entity:1');
-    expect(api.answerCallbackQuery).toHaveBeenCalledWith('cb-watch', 'Cluster watch enabled');
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith('cb-watch', 'Cluster added to monitoring');
+    expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain('CLUSTER ADDED TO MONITORING');
+  });
+
+  it.each([
+    ['cluster', 'ENTITY CLUSTER'],
+    ['deployments', 'TOP DEPLOYMENTS'],
+    ['evidence', 'EVIDENCE DESK'],
+    ['history', 'ENTITY HISTORY'],
+    ['outcomes', 'OUTCOMES & CALIBRATION']
+  ])('renders the %s intelligence screen from persisted real fields', async (view, heading) => {
+    const api = apiMock();
+    const service = {
+      clearPendingSession: vi.fn(),
+      getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'wallet', stateJson: { target: ADDRESS, investigationId: 'investigation1', investigationView: 'summary', page: 1, pageSize: 5 } }),
+      updateSession: vi.fn().mockResolvedValue(true), loadWalletInvestigation: vi.fn().mockResolvedValue(investigation())
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 52, callback_query: { id: `cb-${view}`, from: { id: 123 }, data: `v1|invest|session1|${view}`, message: { message_id: 52, chat: { id: 123, type: 'private' }, text: 'summary' } } });
+    expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain(heading);
+    expect(service.updateSession).toHaveBeenCalledWith('session1', '123', '123', expect.objectContaining({ investigationView: view, investigationPreviousView: 'summary' }));
+  });
+
+  it('returns from wallet evidence to the exact previous investigation screen', async () => {
+    const api = apiMock();
+    const service = {
+      clearPendingSession: vi.fn(),
+      getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'wallet', stateJson: { target: ADDRESS, investigationId: 'investigation1', investigationView: 'evidence', investigationItem: 'w:0', investigationPreviousView: 'priority', investigationPreviousPage: 1, page: 1, pageSize: 5 } }),
+      updateSession: vi.fn().mockResolvedValue(true), loadWalletInvestigation: vi.fn().mockResolvedValue(investigation())
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 53, callback_query: { id: 'cb-back', from: { id: 123 }, data: 'v1|back|session1|previous', message: { message_id: 53, chat: { id: 123, type: 'private' }, text: 'evidence' } } });
+    expect(service.updateSession).toHaveBeenCalledWith('session1', '123', '123', expect.objectContaining({ investigationView: 'priority', investigationPreviousView: 'summary' }));
+    expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain('CAPITAL PATHS');
   });
 
   it('clears pending state on /cancel and Back', async () => {
