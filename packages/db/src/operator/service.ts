@@ -243,6 +243,10 @@ export class OperatorService {
     }
     refs = uniqueRefs(refs);
     const now = new Date();
+    const persistedCounts = await Promise.all(refs.map((ref) => this.prisma.tokenTopPnlCandidate.count({
+      where: { chain: ref.chain, mint: ref.address, validation: { not: 'invalid' } }
+    })));
+    const persistedCandidateCount = persistedCounts.reduce((sum, count) => sum + count, 0);
     const universeBy = new Map(universe.map((row) => [`${row.chain}:${row.tokenAddress}`, row]));
     for (const ref of refs) {
       const existing = universeBy.get(`${ref.chain}:${ref.address}`);
@@ -250,7 +254,7 @@ export class OperatorService {
         sources: [...new Set([...(existing?.sources ?? []), 'telegram_token_scan'])].sort(),
         historicalWinnerStatus: existing?.historicalWinnerStatus ?? 'candidate',
         coverage: existing?.coverage ?? 'unavailable',
-        processingStatus: 'pending',
+        processingStatus: persistedCandidateCount > 0 ? existing?.processingStatus ?? 'processed' : 'pending',
         evidenceJson: json({ priorEvidence: existing?.evidenceJson ?? null, telegramTokenScan: { requestedAt: now.toISOString() } }),
         lastError: null,
         nextRetryAt: null
@@ -260,6 +264,14 @@ export class OperatorService {
         create: { chain: ref.chain, tokenAddress: ref.address, ...data },
         update: data
       });
+    }
+    if (persistedCandidateCount > 0) {
+      for (let index = 0; index < refs.length; index += 1) {
+        if ((persistedCounts[index] ?? 0) > 0) {
+          await analyzeTokenWalletIntelligence(this.prisma, { chain: refs[index]!.chain, tokenAddress: refs[index]!.address, topLimit: 10, now });
+        }
+      }
+      return { chains: refs.map((ref) => ref.chain), candidateCount: persistedCandidateCount };
     }
     const providers = Object.fromEntries(refs.flatMap((ref) => {
       const provider = this.options.tokenTopTraderProviders?.[ref.chain];
