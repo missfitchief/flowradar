@@ -7,6 +7,7 @@ import type { TelegramApi } from '../src/types';
 const ADDRESS = '11111111111111111111111111111111';
 const RECEIVER = '22222222222222222222222222222222';
 const TOKEN = '33333333333333333333333333333333';
+const EVM_TOKEN = `0x${'ab'.repeat(20)}`;
 
 function intelligence(): InvestigationMemberIntelligence {
   return {
@@ -320,7 +321,7 @@ describe('Telegram command handlers', () => {
     expect(keyboard?.inline_keyboard[0]?.map((button) => button.text)).toEqual(['Analiziraj kao wallet', 'Analiziraj kao token']);
   });
 
-  it('keeps the token empty result short after the real scan', async () => {
+  it('acknowledges a direct valid Solana token before the real scan and keeps an empty result short', async () => {
     const api = apiMock();
     const service = {
       validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'session1' }),
@@ -328,7 +329,96 @@ describe('Telegram command handlers', () => {
       tokenSummary: vi.fn().mockResolvedValue({ topPnl: { items: [], page: 1, pageSize: 10, total: 0, hasNext: false } })
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 9, message: { message_id: 9, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
-    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Nije pronađen nijedan top-PnL wallet za ovaj token.');
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Token primljen. Pokrećem analizu');
+    expect(vi.mocked(api.sendMessage).mock.calls[1]?.[1]).toContain('Nije pronađen nijedan top-PnL wallet za ovaj token.');
+    expect(service.tokenSummary).toHaveBeenCalledTimes(2);
+    expect(service.scanTokenTopPnl).toHaveBeenCalledWith(ADDRESS);
+  });
+
+  it('accepts a valid EVM contract in the direct /token flow', async () => {
+    const api = apiMock();
+    const service = {
+      validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'evm-token-session' }),
+      scanTokenTopPnl: vi.fn().mockResolvedValue({ chains: ['ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'], candidateCount: 0 }),
+      tokenSummary: vi.fn().mockResolvedValue({ topPnl: { items: [], page: 1, pageSize: 10, total: 0, hasNext: false } })
+    } as unknown as OperatorService;
+
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 90, message: { message_id: 90, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${EVM_TOKEN}` } });
+
+    expect(service.validateWorkflowTarget).toHaveBeenCalledWith('token', EVM_TOKEN);
+    expect(service.scanTokenTopPnl).toHaveBeenCalledWith(EVM_TOKEN);
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Token primljen. Pokrećem analizu');
+  });
+
+  it('rejects an invalid token without creating an analysis session', async () => {
+    const api = apiMock();
+    const service = { validateWorkflowTarget: vi.fn().mockResolvedValue(false) } as unknown as OperatorService;
+
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 91, message: { message_id: 91, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/token not-a-token' } });
+
+    expect(api.sendMessage).toHaveBeenCalledWith('123', expect.stringContaining('INVALID TOKEN CA'));
+  });
+
+  it('supports /token without an argument followed by the token address', async () => {
+    const api = apiMock();
+    const service = {
+      setPendingSession: vi.fn().mockResolvedValue({ id: 'pending-token' }),
+      getPendingSession: vi.fn().mockResolvedValue({ workflow: 'token', session: { id: 'pending-token' } }),
+      validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(),
+      createSession: vi.fn().mockResolvedValue({ id: 'token-session' }), scanTokenTopPnl: vi.fn().mockResolvedValue({ chains: ['SOLANA'], candidateCount: 0 }),
+      tokenSummary: vi.fn().mockResolvedValue({ topPnl: { items: [], page: 1, pageSize: 10, total: 0, hasNext: false } })
+    } as unknown as OperatorService;
+    const handler = createUpdateHandler(service, api, new Set(['123']));
+
+    await handler({ update_id: 92, message: { message_id: 92, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/token' } });
+    await handler({ update_id: 93, message: { message_id: 93, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: ADDRESS } });
+
+    expect(service.setPendingSession).toHaveBeenCalledWith('123', '123', 'token', 10);
+    expect(service.scanTokenTopPnl).toHaveBeenCalledWith(ADDRESS);
+    expect(vi.mocked(api.sendMessage).mock.calls.map((call) => call[1])).toEqual(expect.arrayContaining([
+      expect.stringContaining('Pošalji token CA.'), expect.stringContaining('Token primljen. Pokrećem analizu')
+    ]));
+  });
+
+  it('never exposes a Prisma schema/query mismatch through Telegram and offers Retry/Back', async () => {
+    const api = apiMock();
+    const stack = 'Invalid this.prisma.tokenMetadata.count() invocation\nUnknown argument tokenAddress. Did you mean toAddress?';
+    const service = {
+      validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'failed-token-session' }),
+      tokenSummary: vi.fn().mockRejectedValue(new Error(stack)), scanTokenTopPnl: vi.fn()
+    } as unknown as OperatorService;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 94, message: { message_id: 94, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
+
+    const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[1]!;
+    expect(text).toContain('TOKEN ANALYSIS FAILED');
+    expect(text).toContain('Internal database query failed.');
+    expect(text).not.toContain('tokenMetadata.count');
+    expect(text).not.toContain('tokenAddress');
+    expect(keyboard?.inline_keyboard[0]?.map((button) => button.text)).toEqual(['Retry', 'Back']);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('tokenMetadata.count'));
+    errorSpy.mockRestore();
+  });
+
+  it('runs Retry through the real token workflow and Back returns to the menu', async () => {
+    const api = apiMock();
+    const service = {
+      clearPendingSession: vi.fn(),
+      getSession: vi.fn().mockResolvedValue({ id: 'retry-token-session', workflow: 'token', stateJson: { target: ADDRESS, page: 1, pageSize: 10 } }),
+      scanTokenTopPnl: vi.fn().mockResolvedValue({ chains: ['SOLANA'], candidateCount: 0 }),
+      tokenSummary: vi.fn().mockResolvedValue({ topPnl: { items: [], page: 1, pageSize: 10, total: 0, hasNext: false } })
+    } as unknown as OperatorService;
+    const handler = createUpdateHandler(service, api, new Set(['123']));
+
+    await handler({ update_id: 95, callback_query: { id: 'token-retry', from: { id: 123 }, data: 'v1|tokenretry|retry-token-session|run', message: { message_id: 95, chat: { id: 123, type: 'private' }, text: 'TOKEN ANALYSIS FAILED' } } });
+    await handler({ update_id: 96, callback_query: { id: 'token-back', from: { id: 123 }, data: 'v1|tokenback|retry-token-session|menu', message: { message_id: 96, chat: { id: 123, type: 'private' }, text: 'TOKEN ANALYSIS FAILED' } } });
+
+    expect(service.scanTokenTopPnl).toHaveBeenCalledWith(ADDRESS);
+    expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('Nije pronađen nijedan top-PnL wallet'))).toBe(true);
+    expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('FLOWRADAR INTELLIGENCE'))).toBe(true);
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith('token-retry', 'Analysis completed');
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith('token-back');
   });
 
   it('does not edit an unchanged Telegram message', async () => {

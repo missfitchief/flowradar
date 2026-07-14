@@ -291,9 +291,10 @@ export class OperatorService {
   async tokenSummary(addressInput: string, page = 1, pageSize = 10, sort: TokenTraderSort = 'pnl') {
     const refs = inferredAddressRefs(addressInput);
     const normalized = refs.map((x) => x.address);
+    const metadataRefs = tokenMetadataAddressWhere(refs);
     const [tokens, metadata, universe, candidates] = await Promise.all([
       this.prisma.token.findMany({ where: { address: { in: normalized } }, take: 10, include: { marketSnapshots: { orderBy: { ts: 'desc' }, take: 1 } } }),
-      this.prisma.tokenMetadata.findMany({ where: { mint: { in: normalized } }, take: 10 }),
+      this.prisma.tokenMetadata.findMany({ where: { OR: metadataRefs }, take: 10 }),
       this.prisma.historicalTokenUniverse.findMany({ where: { tokenAddress: { in: normalized } }, take: 10 }),
       this.prisma.tokenTopPnlCandidate.findMany({ where: { mint: { in: normalized } }, orderBy: [{ chain: 'asc' }, { walletAddress: 'asc' }, { localRealizedProxyUsd: 'desc' }, { claimedRealizedPnlUsd: 'desc' }, { confidence: 'desc' }], take: 5_000, distinct: ['chain', 'walletAddress'] })
     ]);
@@ -758,16 +759,18 @@ export class OperatorService {
     const refs = inferredAddressRefs(input);
     if (!refs.length) return 'invalid';
     const tokenRefs = refs.map((ref) => ({ chain: ref.chain, address: ref.address }));
-    const mintRefs = refs.map((ref) => ({ chain: ref.chain, mint: ref.address }));
+    const metadataRefs = tokenMetadataAddressWhere(refs);
+    const candidateMintRefs = refs.map((ref) => ({ chain: ref.chain, mint: ref.address }));
     const universeRefs = refs.map((ref) => ({ chain: ref.chain, tokenAddress: ref.address }));
+    const tokenEventRefs: Prisma.MassTransactionEventWhereInput[] = refs.map((ref) => ({ chain: ref.chain, assetAddress: ref.address }));
     const walletRefs = refs.map((ref) => ({ chain: ref.chain, address: ref.address }));
     const candidateWalletRefs = refs.map((ref) => ({ chain: ref.chain, walletAddress: ref.address }));
     const [tokens, metadata, universe, candidateMints, tokenEvents, wallets, entityAddresses, candidateWallets, walletEvents] = await Promise.all([
       this.prisma.token.count({ where: { OR: tokenRefs } }),
-      this.prisma.tokenMetadata.count({ where: { OR: mintRefs } }),
+      this.prisma.tokenMetadata.count({ where: { OR: metadataRefs } }),
       this.prisma.historicalTokenUniverse.count({ where: { OR: universeRefs } }),
-      this.prisma.tokenTopPnlCandidate.count({ where: { OR: mintRefs } }),
-      this.prisma.massTransactionEvent.count({ where: { OR: refs.map((ref) => ({ chain: ref.chain, tokenAddress: ref.address })) } }),
+      this.prisma.tokenTopPnlCandidate.count({ where: { OR: candidateMintRefs } }),
+      this.prisma.massTransactionEvent.count({ where: { OR: tokenEventRefs } }),
       this.prisma.wallet.count({ where: { OR: walletRefs } }),
       this.prisma.unifiedEntityAddress.count({ where: { OR: walletRefs } }),
       this.prisma.tokenTopPnlCandidate.count({ where: { OR: candidateWalletRefs } }),
@@ -1369,6 +1372,9 @@ function extractDiscoveryMints(value: Prisma.JsonValue | null): string[] { if (!
 function dormancyFlags(value: Prisma.JsonValue | undefined) { const text = JSON.stringify(value ?? {}).toLowerCase(); const has = (days: number) => text.includes(`"days":${days}`) || text.includes(`"windowdays":${days}`) ? text.includes('covered_dormant') || text.includes('dormant') : null; return { days7: has(7), days14: has(14), days30: has(30), days90: has(90) }; }
 function uniqueFunder(value: { chain: ChainId; address: string; txHash: string }, index: number, all: Array<{ chain: ChainId; address: string; txHash: string }>) { return all.findIndex((x) => x.chain === value.chain && x.address === value.address && x.txHash === value.txHash) === index; }
 function uniqueStrings(values: string[]) { return [...new Set(values)]; }
+function tokenMetadataAddressWhere(refs: Array<{ chain: ChainId; address: string }>): Prisma.TokenMetadataWhereInput[] {
+  return refs.map((ref) => ({ chain: ref.chain, mint: ref.address }));
+}
 function uniqueConnected<T extends { chain: ChainId; address: string; confidence: number }>(values: T[]) {
   const result = new Map<string, T>();
   for (const value of values) {

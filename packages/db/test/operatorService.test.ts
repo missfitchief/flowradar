@@ -12,8 +12,13 @@ const CORE_CONNECTED = `0x${'89'.repeat(20)}`;
 const CORE_BRIDGE_CONNECTED = `0x${'bc'.repeat(20)}`;
 const CORE_TOKEN = `0x${'9a'.repeat(20)}`;
 const CORE_SOLO_TOKEN = `0x${'9b'.repeat(20)}`;
+const TOKEN_METADATA_SOL = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const TOKEN_METADATA_EVM = `0x${'ca'.repeat(20)}`;
+const TOKEN_METADATA_MISSING = `0x${'cb'.repeat(20)}`;
+const TOKEN_EVENT_ONLY = 'So11111111111111111111111111111111111111112';
 
 async function cleanup() {
+  await prisma.tokenMetadata.deleteMany({ where: { mint: { in: [TOKEN_METADATA_SOL, TOKEN_METADATA_EVM, TOKEN_METADATA_MISSING] } } });
   await prisma.operatorWatchAlert.deleteMany({ where: { watch: { targetKey: { in: [CORE_ADDRESS, CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } } } });
   await prisma.operatorWatch.deleteMany({ where: { targetKey: { in: [CORE_ADDRESS, CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } } });
   await prisma.walletFlowRelationship.deleteMany({ where: { OR: [{ sourceWallet: CORE_ADDRESS }, { relatedWallet: { in: [CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } }] } });
@@ -62,6 +67,34 @@ describe('OperatorService', () => {
 
     await service.setCursor(`${PREFIX}:bot`, 123n);
     expect(await service.getCursor(`${PREFIX}:bot`)).toBe(123n);
+  });
+
+  it('queries TokenMetadata by its real mint field for existing and missing Solana/EVM tokens', async () => {
+    const now = new Date();
+    await prisma.tokenMetadata.createMany({ data: [
+      { chain: 'SOLANA', mint: TOKEN_METADATA_SOL, name: 'Schema Regression SOL', symbol: 'SRS', source: 'test', availability: 'resolved', reasonCodes: ['test'], engineVersion: 1, computedAt: now },
+      { chain: 'BASE', mint: TOKEN_METADATA_EVM, name: 'Schema Regression EVM', symbol: 'SRE', source: 'test', availability: 'resolved', reasonCodes: ['test'], engineVersion: 1, computedAt: now }
+    ] });
+    await prisma.massTransactionEvent.create({ data: {
+      eventId: `${PREFIX}:token-field-regression`, chain: 'SOLANA', txHash: `${PREFIX}:token-field-regression`, eventIndex: 0,
+      blockOrSlot: 1n, ts: now, kind: 'token_buy', status: 'succeeded', fromAddress: ADDRESS, toAddress: ADDRESS,
+      actorAddress: ADDRESS, assetAddress: TOKEN_EVENT_ONLY, assetSymbol: 'SOL', amountToken: '1', amountUsd: 100,
+      provider: 'test', observedAt: now, relevanceCategory: 'token_deployment', relevanceScore: 90,
+      reasonCodes: ['test'], metadataJson: {}
+    } });
+    const service = new OperatorService(prisma);
+
+    expect(await service.classifyAddressInput(TOKEN_METADATA_SOL)).toBe('token');
+    expect(await service.classifyAddressInput(TOKEN_METADATA_EVM)).toBe('token');
+    expect(await service.classifyAddressInput(TOKEN_EVENT_ONLY)).toBe('token');
+    expect(await service.validateWorkflowTarget('token', '9BXsXgSQZ5RHcckLPfpLoY1QCCCHzpw9TQQD4NPymod6a')).toBe(false);
+    expect((await service.tokenSummary(TOKEN_METADATA_SOL)).metadata).toEqual([
+      expect.objectContaining({ chain: 'SOLANA', name: 'Schema Regression SOL', symbol: 'SRS' })
+    ]);
+    expect((await service.tokenSummary(TOKEN_METADATA_EVM)).metadata).toEqual([
+      expect.objectContaining({ chain: 'BASE', name: 'Schema Regression EVM', symbol: 'SRE' })
+    ]);
+    await expect(service.tokenSummary(TOKEN_METADATA_MISSING)).resolves.toMatchObject({ metadata: [] });
   });
 
   it('adds, lists and removes a restart-safe cross-chain Core wallet without deleting history', async () => {

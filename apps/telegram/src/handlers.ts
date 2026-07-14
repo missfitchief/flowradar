@@ -248,8 +248,35 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
         await api.answerCallbackQuery(query.id, 'Investigation started');
         return;
       }
-      const rendered = await renderWorkflow(service, workflow, nextState, next.id);
-      await editIfChanged(api, query, rendered.text, rendered.keyboard);
+      await editIfChanged(api, query, tokenProgress(required(nextState)), EMPTY_KEYBOARD);
+      try {
+        const rendered = await renderWorkflow(service, workflow, nextState, next.id);
+        await editIfChanged(api, query, rendered.text, rendered.keyboard);
+        await api.answerCallbackQuery(query.id);
+      } catch (error) {
+        logTokenAnalysisFailure(next.id, required(nextState), error);
+        const failure = tokenAnalysisFailure(required(nextState), next.id);
+        await editIfChanged(api, query, failure.text, failure.keyboard);
+        await api.answerCallbackQuery(query.id, 'Token analysis failed');
+      }
+      return;
+    }
+    if (session.workflow === 'token' && parsed.action === 'tokenretry') {
+      await editIfChanged(api, query, tokenProgress(required(state)), EMPTY_KEYBOARD);
+      try {
+        const rendered = await renderWorkflow(service, 'token', state, session.id);
+        await editIfChanged(api, query, rendered.text, rendered.keyboard);
+        await api.answerCallbackQuery(query.id, 'Analysis completed');
+      } catch (error) {
+        logTokenAnalysisFailure(session.id, required(state), error);
+        const failure = tokenAnalysisFailure(required(state), session.id);
+        await editIfChanged(api, query, failure.text, failure.keyboard);
+        await api.answerCallbackQuery(query.id, 'Token analysis failed');
+      }
+      return;
+    }
+    if (session.workflow === 'token' && parsed.action === 'tokenback') {
+      await editIfChanged(api, query, help(), EMPTY_KEYBOARD);
       await api.answerCallbackQuery(query.id);
       return;
     }
@@ -379,6 +406,18 @@ async function sendWorkflow(service: OperatorService, api: TelegramApi, userId: 
     enqueueWalletInvestigation(service, api, userId, chatId, state, session.id);
     await api.sendMessage(chatId, walletProgress(target ?? '', 'running'));
     console.info(`[telegram] wallet progress delivered session=${session.id} target=${target ?? ''}`);
+    return;
+  }
+  if (workflow === 'token') {
+    await api.sendMessage(chatId, tokenProgress(required(state)));
+    try {
+      const rendered = await renderWorkflow(service, workflow, state, session.id);
+      await api.sendMessage(chatId, rendered.text, rendered.keyboard);
+    } catch (error) {
+      logTokenAnalysisFailure(session.id, required(state), error);
+      const failure = tokenAnalysisFailure(required(state), session.id);
+      await api.sendMessage(chatId, failure.text, failure.keyboard);
+    }
     return;
   }
   if (INVESTIGATION_WORKFLOWS.has(workflow)) {
@@ -675,6 +714,7 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
   if (INVESTIGATION_WORKFLOWS.has(workflow)) return renderPersistedInvestigation(service, state, sessionId);
   if (workflow === 'token') {
     const tokenAddress = required(state);
+    await service.tokenSummary(tokenAddress, 1, 10, 'pnl');
     await service.scanTokenTopPnl(tokenAddress);
     const value = await service.tokenSummary(tokenAddress, 1, 10, 'pnl');
     const rows = value.topPnl.items.slice(0, 10) as TokenPnlTelegramRow[];
@@ -1291,6 +1331,35 @@ function compactAmount(value: string) { const number = Number(value); return Num
 function formatTelegramDate(value: string | null) { if (!value) return 'Never observed'; const date = new Date(value); return Number.isNaN(date.getTime()) ? h(value) : `${date.toISOString().slice(0, 10)} ${date.toISOString().slice(11, 16)} UTC`; }
 function eventIcon(value: string) { if (/buy|deployment/i.test(value)) return '🎯'; if (/bridge/i.test(value)) return '🌉'; if (/fund|transfer/i.test(value)) return '💸'; if (/dormant|awaken/i.test(value)) return '😴'; return '📡'; }
 function requestFailure(error: unknown) { return `🔴 <b>REQUEST FAILED</b>\n━━━━━━━━━━━━━━━━━━━━\n${h(errorMessage(error))}\n\n<i>No intelligence conclusion was changed.</i>`; }
+function tokenProgress(target: string) {
+  return [
+    '🎯 <b>TOKEN INTELLIGENCE</b>',
+    `Token: <code>${h(short(target, 7))}</code>`,
+    '',
+    '✓ Token primljen. Pokrećem analizu…',
+    '<i>Učitavam postojeće podatke i pokrećem realni investigation.</i>'
+  ].join('\n');
+}
+function tokenAnalysisFailure(target: string, sessionId: string) {
+  return {
+    text: [
+      '🔴 <b>TOKEN ANALYSIS FAILED</b>',
+      '',
+      'Token:',
+      `<code>${h(short(target, 7))}</code>`,
+      '',
+      'Reason:',
+      'Internal database query failed.'
+    ].join('\n'),
+    keyboard: { inline_keyboard: [[
+      { text: 'Retry', callback_data: callback('tokenretry', sessionId, 'run') },
+      { text: 'Back', callback_data: callback('tokenback', sessionId, 'menu') }
+    ]] }
+  } satisfies { text: string; keyboard: InlineKeyboard };
+}
+function logTokenAnalysisFailure(sessionId: string, target: string, error: unknown) {
+  console.error(`[telegram] token analysis failed session=${sessionId} target=${target}: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+}
 function walletProgress(target: string, stage: 'received' | 'running' | 'resumed') {
   const label = stage === 'received' ? '✓ Wallet received' : stage === 'resumed' ? '✓ Runtime resumed' : '🔄 Investigation running';
   const detail = stage === 'received' ? 'Preparing production investigation…' : 'Fetching transactions\n↓\nResolving entity\n↓\nRanking intelligence';
