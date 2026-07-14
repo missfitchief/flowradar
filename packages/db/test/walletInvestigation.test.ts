@@ -17,12 +17,21 @@ const BASE = new Date('2036-01-01T00:00:00.000Z');
 async function cleanup() {
   await prisma.walletIntelligenceEvent.deleteMany({ where: { walletAddress: { in: WALLETS } } });
   await prisma.walletIntelligenceObservation.deleteMany({ where: { profile: { address: { in: WALLETS } } } });
-  const intelligenceClusterIds = (await prisma.walletIntelligenceProfile.findMany({ where: { address: { in: WALLETS } }, select: { clusterId: true } })).map((row) => row.clusterId);
+  const intelligenceProfiles = await prisma.walletIntelligenceProfile.findMany({ where: { address: { in: WALLETS } }, select: { id: true, clusterId: true } });
+  const intelligenceClusterIds = intelligenceProfiles.map((row) => row.clusterId);
+  const intelligenceEntityIds = (await prisma.intelligenceEntityMembership.findMany({ where: { profileId: { in: intelligenceProfiles.map((row) => row.id) } }, select: { entityId: true } })).map((row) => row.entityId);
+  await prisma.intelligenceEntityMembership.deleteMany({ where: { profileId: { in: intelligenceProfiles.map((row) => row.id) } } });
   await prisma.walletIntelligenceProfile.deleteMany({ where: { address: { in: WALLETS } } });
   if (intelligenceClusterIds.length) {
     await prisma.intelligenceClusterMerge.deleteMany({ where: { OR: [{ fromClusterId: { in: intelligenceClusterIds } }, { intoClusterId: { in: intelligenceClusterIds } }] } });
     await prisma.intelligenceClusterObservation.deleteMany({ where: { clusterId: { in: intelligenceClusterIds } } });
     await prisma.intelligenceCluster.deleteMany({ where: { id: { in: intelligenceClusterIds } } });
+  }
+  if (intelligenceEntityIds.length) {
+    await prisma.intelligenceEntityAction.deleteMany({ where: { OR: [{ sourceEntityIds: { hasSome: intelligenceEntityIds } }, { targetEntityIds: { hasSome: intelligenceEntityIds } }] } });
+    await prisma.intelligenceEntityDecaySnapshot.deleteMany({ where: { entityId: { in: intelligenceEntityIds } } });
+    await prisma.intelligenceEntityVersion.deleteMany({ where: { entityId: { in: intelligenceEntityIds } } });
+    await prisma.intelligenceEntity.deleteMany({ where: { id: { in: intelligenceEntityIds }, memberships: { none: {} } } });
   }
   const investigations = await prisma.walletInvestigation.findMany({ where: { rootAddress: ROOT }, select: { id: true } });
   for (const investigation of investigations) {

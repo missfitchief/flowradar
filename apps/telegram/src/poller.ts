@@ -1,6 +1,7 @@
 import { OperatorService } from '@flowradar/db';
 import { isTelegramRecipientUnavailable } from './api';
 import { TELEGRAM_COMMANDS, createUpdateHandler } from './handlers';
+import { renderIntelligenceAlert } from './intelligenceAlertRenderer';
 import type { TelegramApi } from './types';
 
 export async function runLongPolling(options: { service: OperatorService; api: TelegramApi; allowedUserIds: ReadonlySet<string>; signal?: AbortSignal; log?: Pick<Console, 'info' | 'error'> }) {
@@ -46,8 +47,18 @@ export async function dispatchWatchAlerts(service: OperatorService, api: Telegra
   for (const alert of await service.pendingWatchAlerts(100)) {
     try {
       const payload = alert.payloadJson as Record<string, unknown>;
-      const text = `<b>FlowRadar · ${escape(String(alert.alertType))}</b>\n${Object.entries(payload).map(([key, value]) => `${escape(key)}: ${escape(String(value ?? 'n/a'))}`).join('\n')}`;
-      await api.sendMessage(alert.watch.chatId, text);
+      if (alert.alertType === 'receiver_bought_token' && typeof payload.intelligenceSignalId === 'string') {
+        const intelligence = await service.intelligenceAlert(alert.id);
+        if (intelligence) {
+          const rendered = renderIntelligenceAlert(intelligence);
+          await api.sendMessage(alert.watch.chatId, rendered.text, rendered.keyboard);
+        } else {
+          await api.sendMessage(alert.watch.chatId, '<b>FlowRadar</b>\nSignal receipt is no longer available.');
+        }
+      } else {
+        const text = `<b>FlowRadar · ${escape(String(alert.alertType))}</b>\n${Object.entries(payload).map(([key, value]) => `${escape(key)}: ${escape(String(value ?? 'n/a'))}`).join('\n')}`;
+        await api.sendMessage(alert.watch.chatId, text);
+      }
       await service.markWatchAlert(alert.id);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

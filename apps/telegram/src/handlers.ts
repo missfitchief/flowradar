@@ -10,6 +10,7 @@ import {
 } from '@flowradar/db';
 import { isAuthorized } from './auth';
 import { renderInvestigationReport } from './investigationRenderer';
+import { parseIntelligenceAlertCallback, renderIntelligenceAlert } from './intelligenceAlertRenderer';
 import { callback, exportKeyboard, h, navKeyboard, renderProfitable, short } from './render';
 import type { InlineKeyboard, TelegramApi, TelegramCallbackQuery, TelegramMessage, TelegramUpdate } from './types';
 
@@ -117,6 +118,15 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
   const chatId = query.message ? String(query.message.chat.id) : '';
   if (!isAuthorized(allowed, query.from.id) || !chatId) { await api.answerCallbackQuery(query.id, 'Unauthorized'); return; }
   const userId = String(query.from.id);
+  const alertAction = parseIntelligenceAlertCallback(query.data);
+  if (alertAction) {
+    const alert = await service.intelligenceAlert(alertAction.alertId);
+    if (!alert) { await api.answerCallbackQuery(query.id, 'Alert is no longer available.'); return; }
+    const rendered = renderIntelligenceAlert(alert, alertAction.view);
+    await editIfChanged(api, query, rendered.text, rendered.keyboard);
+    await api.answerCallbackQuery(query.id);
+    return;
+  }
   const parsed = parseCallback(query.data);
   if (!parsed) { await api.answerCallbackQuery(query.id, 'Expired or invalid action'); return; }
   await service.clearPendingSession(userId, chatId);

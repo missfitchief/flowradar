@@ -3,6 +3,8 @@ import type { InvestigationMember, WalletInvestigationResult } from '../src/inve
 import { prisma } from '../src/client';
 import { persistInvestigationKnowledge } from '../src/intelligence/knowledge';
 import { intelligenceSignalLevelForScore, runIntelligenceLifecycle } from '../src/intelligence/lifecycle';
+import { applyEntityMerge, proposeEntityMerge, rollbackEntityAction } from '../src/intelligence/entities';
+import { runIntelligenceOutcomePass } from '../src/intelligence/outcomes';
 import { OperatorService } from '../src/operator/service';
 
 const PREFIX = 'INTELLIGENCE_PLATFORM_TEST';
@@ -14,6 +16,8 @@ async function cleanup() {
   await prisma.operatorWatchAlert.deleteMany({ where: { watch: { userId: PREFIX } } });
   await prisma.operatorWatch.deleteMany({ where: { userId: PREFIX } });
   await prisma.intelligenceBuyCandidate.deleteMany({ where: { tokenAddress: { in: TOKENS } } });
+  await prisma.intelligenceSignalOutcomeLabel.deleteMany({ where: { signal: { tokenAddress: { in: TOKENS } } } });
+  await prisma.intelligenceSignalOutcome.deleteMany({ where: { signal: { tokenAddress: { in: TOKENS } } } });
   await prisma.intelligenceSignal.deleteMany({ where: { tokenAddress: { in: TOKENS } } });
   await prisma.tokenQualityAssessment.deleteMany({ where: { tokenAddress: { in: TOKENS } } });
   await prisma.trackedTokenActivationAlert.deleteMany({ where: { tokenAddress: { in: TOKENS } } });
@@ -21,12 +25,21 @@ async function cleanup() {
   await prisma.walletIntelligenceObservation.deleteMany({ where: { profile: { address: { in: ADDRESSES } } } });
   await prisma.intelligenceClusterObservation.deleteMany({ where: { cluster: { profiles: { some: { address: { in: ADDRESSES } } } } } });
   await prisma.intelligenceClusterMerge.deleteMany({ where: { OR: [{ fromCluster: { profiles: { some: { address: { in: ADDRESSES } } } } }, { intoCluster: { profiles: { some: { address: { in: ADDRESSES } } } } }] } });
-  const clusterIds = (await prisma.walletIntelligenceProfile.findMany({ where: { address: { in: ADDRESSES } }, select: { clusterId: true } })).map((row) => row.clusterId);
+  const testProfiles = await prisma.walletIntelligenceProfile.findMany({ where: { address: { in: ADDRESSES } }, select: { id: true, clusterId: true } });
+  const clusterIds = testProfiles.map((row) => row.clusterId);
+  const entityIds = (await prisma.intelligenceEntityMembership.findMany({ where: { profileId: { in: testProfiles.map((row) => row.id) } }, select: { entityId: true } })).map((row) => row.entityId);
+  await prisma.intelligenceEntityMembership.deleteMany({ where: { profileId: { in: testProfiles.map((row) => row.id) } } });
   await prisma.walletIntelligenceProfile.deleteMany({ where: { address: { in: ADDRESSES } } });
   if (clusterIds.length) {
     await prisma.intelligenceClusterMerge.deleteMany({ where: { OR: [{ fromClusterId: { in: clusterIds } }, { intoClusterId: { in: clusterIds } }] } });
     await prisma.intelligenceClusterObservation.deleteMany({ where: { clusterId: { in: clusterIds } } });
     await prisma.intelligenceCluster.deleteMany({ where: { id: { in: clusterIds } } });
+  }
+  if (entityIds.length) {
+    await prisma.intelligenceEntityAction.deleteMany({ where: { OR: [{ sourceEntityIds: { hasSome: entityIds } }, { targetEntityIds: { hasSome: entityIds } }] } });
+    await prisma.intelligenceEntityDecaySnapshot.deleteMany({ where: { entityId: { in: entityIds } } });
+    await prisma.intelligenceEntityVersion.deleteMany({ where: { entityId: { in: entityIds } } });
+    await prisma.intelligenceEntity.deleteMany({ where: { id: { in: entityIds }, memberships: { none: {} } } });
   }
   await prisma.intelligenceLifecycleRun.deleteMany({ where: { startedAt: { gte: new Date('2038-01-01T00:00:00Z') } } });
   await prisma.massTransactionEvent.deleteMany({ where: { eventId: { startsWith: PREFIX } } });
@@ -132,6 +145,71 @@ describe('persistent intelligence platform', () => {
     expect(intelligenceSignalLevelForScore(70)).toBe('STRONG_WATCH');
     expect(intelligenceSignalLevelForScore(85)).toBe('HIGH_CONVICTION');
   });
+
+  it('requires two independent merge evidence types and can roll an applied merge back', async () => {
+    await persistInvestigationKnowledge(prisma, investigation('merge-a', NOW, [member(ADDRESSES[0], 'entity-merge-a', 88, 72, 70)]), { now: NOW });
+    await persistInvestigationKnowledge(prisma, investigation('merge-b', NOW, [member(ADDRESSES[1], 'entity-merge-b', 86, 68, 65)]), { now: NOW });
+    const entities = await prisma.intelligenceEntity.findMany({ where: { memberships: { some: { profile: { address: { in: ADDRESSES.slice(0, 2) } } } } }, include: { memberships: true } });
+    expect(entities).toHaveLength(2);
+
+    const unsafe = await proposeEntityMerge(prisma, { sourceEntityIds: entities.map((row) => row.id), independentEvidenceTypes: ['timing_correlation'], reasons: ['test_single_signal'], now: NOW });
+    expect(unsafe.status).toBe('rejected');
+
+    const proposal = await proposeEntityMerge(prisma, { sourceEntityIds: entities.map((row) => row.id), independentEvidenceTypes: ['direct_funding', 'execution_pattern'], reasons: ['repeated_direct_funding', 'matched_execution'], now: new Date(NOW.getTime() + 1_000) });
+    expect(proposal.status).toBe('proposed');
+    const applied = await applyEntityMerge(prisma, proposal.id, new Date(NOW.getTime() + 2_000));
+    expect(applied.status).toBe('applied');
+    expect(await prisma.intelligenceEntity.count({ where: { id: { in: entities.map((row) => row.id) }, status: 'merged' } })).toBe(1);
+
+    const rolledBack = await rollbackEntityAction(prisma, proposal.id, new Date(NOW.getTime() + 3_000));
+    expect(rolledBack.status).toBe('rolled_back');
+    expect(await prisma.intelligenceEntity.count({ where: { id: { in: entities.map((row) => row.id) }, status: 'active' } })).toBe(2);
+    expect(await prisma.intelligenceEntityMembership.count({ where: { entityId: { in: entities.map((row) => row.id) }, status: 'rejected' } })).toBe(0);
+  }, 30_000);
+
+  it('evaluates horizon outcomes without lookahead and remains idempotent', async () => {
+    const activatedAt = new Date(NOW.getTime() - 2 * 60 * 60_000);
+    const token = await prisma.token.create({ data: {
+      chain: 'BASE', address: TOKENS[0], symbol: 'OUT', name: 'Outcome', decimals: 18,
+      firstSeenAt: new Date(activatedAt.getTime() - 86_400_000), pairAddress: 'pair-out', dex: 'test', riskFlags: []
+    } });
+    const entry = await prisma.tokenMarketSnapshot.create({ data: {
+      tokenId: token.id, ts: new Date(activatedAt.getTime() - 60_000), priceUsd: 1, marketCapUsd: 100_000, fdvUsd: 100_000,
+      liquidityUsd: 50_000, vol5m: 100, vol1h: 1_000, vol6h: 2_000, vol24h: 5_000, holderCount: 100, source: 'persisted-provider-test'
+    } });
+    const five = await prisma.tokenMarketSnapshot.create({ data: {
+      tokenId: token.id, ts: new Date(activatedAt.getTime() + 5 * 60_000), priceUsd: 1.5, marketCapUsd: 150_000, fdvUsd: 150_000,
+      liquidityUsd: 55_000, vol5m: 200, vol1h: 1_500, vol6h: 2_500, vol24h: 6_000, holderCount: 110, source: 'persisted-provider-test'
+    } });
+    const thirty = await prisma.tokenMarketSnapshot.create({ data: {
+      tokenId: token.id, ts: new Date(activatedAt.getTime() + 30 * 60_000), priceUsd: 2, marketCapUsd: 200_000, fdvUsd: 200_000,
+      liquidityUsd: 60_000, vol5m: 300, vol1h: 2_000, vol6h: 3_000, vol24h: 7_000, holderCount: 125, source: 'persisted-provider-test'
+    } });
+    const afterOneHour = await prisma.tokenMarketSnapshot.create({ data: {
+      tokenId: token.id, ts: new Date(activatedAt.getTime() + 90 * 60_000), priceUsd: 0.5, marketCapUsd: 50_000, fdvUsd: 50_000,
+      liquidityUsd: 30_000, vol5m: 50, vol1h: 500, vol6h: 1_000, vol24h: 2_000, holderCount: 90, source: 'persisted-provider-test'
+    } });
+    const signal = await prisma.intelligenceSignal.create({ data: {
+      dedupeKey: `${PREFIX}:outcome`, chain: 'BASE', tokenAddress: TOKENS[0], signalType: 'same_cluster_multi_wallet_buy',
+      level: 'STRONG_WATCH', lifecycleStage: 'STRONG_WATCH', score: 75, activatedAt,
+      clusterKeys: ['test-cluster'], entityKeys: [], entityIds: [], walletAddresses: ADDRESSES.slice(0, 2), sourceEventIds: [], reasons: ['test'],
+      evidenceJson: {}, historySupportJson: {}, scoreDecompositionJson: { entityConfluence: { raw: 1, weight: 24, contribution: 24 } },
+      entryMarketJson: { snapshotId: entry.id, capturedAt: activatedAt.toISOString(), noLookahead: true }, explanation: 'test outcome',
+      independentEntityCount: 1, independentCapitalRootCount: 1, coreWalletCount: 2, peripheralWalletCount: 0,
+      engineVersion: 2, ruleVersion: 1, modelVersion: 1
+    } });
+
+    const first = await runIntelligenceOutcomePass(prisma, { now: NOW, signalIds: [signal.id] });
+    expect(first.horizonsUpserted).toBe(8);
+    const oneHour = await prisma.intelligenceSignalOutcome.findUniqueOrThrow({ where: { signalId_horizon: { signalId: signal.id, horizon: '1h' } } });
+    expect(oneHour.status).toBe('complete');
+    expect(oneHour.sourceSnapshotIds).toEqual(expect.arrayContaining([entry.id, five.id, thirty.id]));
+    expect(oneHour.sourceSnapshotIds).not.toContain(afterOneHour.id);
+    expect((await prisma.intelligenceSignalOutcomeLabel.findUniqueOrThrow({ where: { signalId: signal.id } }))).toMatchObject({ label: 'strong', basisHorizon: '1h' });
+
+    await runIntelligenceOutcomePass(prisma, { now: NOW, signalIds: [signal.id] });
+    expect(await prisma.intelligenceSignalOutcome.count({ where: { signalId: signal.id } })).toBe(8);
+  }, 30_000);
 });
 
 function member(address: string, entityKey: string | null, evidence: number, alpha: number, wake: number, contradictions: string[] = []): InvestigationMember {
@@ -165,15 +243,27 @@ function investigation(id: string, completedAt: Date, members: InvestigationMemb
 }
 
 async function createQualityToken(address: string, safe: boolean) {
-  const token = await prisma.token.create({ data: { chain: 'BASE', address, symbol: safe ? 'GOOD' : 'BAD', name: safe ? 'Good Token' : 'Bad Token', decimals: 18, firstSeenAt: new Date(NOW.getTime() - 86_400_000), riskFlags: [] } });
+  const token = await prisma.token.create({ data: {
+    chain: 'BASE', address, symbol: safe ? 'GOOD' : 'BAD', name: safe ? 'Good Token' : 'Bad Token', decimals: 18,
+    firstSeenAt: new Date(NOW.getTime() - 86_400_000), tokenCreatedAt: new Date(NOW.getTime() - 86_400_000),
+    pairAddress: `pair:${address}`, dex: 'test-dex', riskFlags: []
+  } });
   await prisma.tokenMarketSnapshot.create({ data: {
     tokenId: token.id, ts: new Date(NOW.getTime() - 300_000), priceUsd: 0.01, marketCapUsd: 500_000, fdvUsd: 500_000,
     liquidityUsd: safe ? 100_000 : 5_000, vol5m: 5_000, vol1h: 20_000, vol6h: 40_000, vol24h: 80_000, holderCount: safe ? 300 : 10, source: 'intelligence-platform-test'
   } });
   await prisma.tokenRiskSnapshot.create({ data: {
-    tokenId: token.id, chain: 'BASE', tokenAddress: address, provider: 'test', requestedAt: NOW, observedAt: NOW,
-    status: 'ok', flags: safe ? [] : [{ id: 'honeypot', label: 'Honeypot', severity: 'danger' }], penalty: safe ? 0 : 0.9,
+    tokenId: token.id, chain: 'BASE', tokenAddress: address, provider: 'test', requestedAt: new Date(NOW.getTime() - 600_000), observedAt: new Date(NOW.getTime() - 600_000),
+    status: 'ok', flags: safe ? [{ id: 'lp_locked', label: 'LP locked', severity: 'info' }] : [{ id: 'honeypot', label: 'Honeypot', severity: 'danger' }], penalty: safe ? 0 : 0.9,
     confidence: 100, expiresAt: new Date(NOW.getTime() + 86_400_000), nextRefreshAt: new Date(NOW.getTime() + 86_400_000)
+  } });
+  await prisma.massTransactionEvent.create({ data: {
+    eventId: `${PREFIX}:lp:${address}`, chain: 'BASE', txHash: `${PREFIX}:lp:${address}:tx`, eventIndex: 0, blockOrSlot: 1n,
+    ts: new Date(NOW.getTime() - 1_200_000), kind: 'lp_add', status: 'succeeded', fromAddress: ADDRESSES[3], toAddress: address,
+    actorAddress: ADDRESSES[3], assetAddress: address, assetSymbol: safe ? 'GOOD' : 'BAD', assetDecimals: 18,
+    amountToken: '1000', amountUsd: safe ? 100_000 : 5_000, provider: 'test', observedAt: new Date(NOW.getTime() - 1_200_000),
+    relevanceCategory: 'capital_transfer', relevanceScore: 90, reasonCodes: ['lp_locked'], safeEntityLink: false,
+    enrollmentCandidate: false, metadataJson: { locked: safe, testPrefix: PREFIX }
   } });
 }
 

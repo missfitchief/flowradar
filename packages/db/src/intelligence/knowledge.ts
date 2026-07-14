@@ -3,6 +3,7 @@ import { Prisma, type ChainId, type MonitoringPriority, type PrismaClient } from
 import type { InvestigationMember, WalletInvestigationResult } from '../investigation/types';
 import { normalizeAddress } from '../discovery/unified';
 import { enrollObservationWallet, monitoringTierForRole } from './monitoring';
+import { syncIntelligenceEntities } from './entities';
 
 export const INTELLIGENCE_KNOWLEDGE_ENGINE_VERSION = 1;
 
@@ -45,6 +46,7 @@ export async function persistInvestigationKnowledge(
     monitoringEnrolled: 0
   };
   if (!qualified.length) return report;
+  const touchedProfileIds: string[] = [];
 
   const walletByRef = new Map<string, Awaited<ReturnType<typeof enrollObservationWallet>>['wallet']>();
   for (const member of qualified) {
@@ -213,6 +215,7 @@ export async function persistInvestigationKnowledge(
           }
         });
       existing ? report.profilesUpdated += 1 : report.profilesCreated += 1;
+      touchedProfileIds.push(profile.id);
       existingByRef.set(ref, { ...profile, cluster } as typeof existingProfiles[number]);
 
       await prisma.walletIntelligenceObservation.create({
@@ -272,6 +275,7 @@ export async function persistInvestigationKnowledge(
     });
   }
 
+  await syncIntelligenceEntities(prisma, { profileIds: unique(touchedProfileIds), now, cause: source });
   return report;
 }
 

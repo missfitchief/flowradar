@@ -1,9 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Prisma, type ChainId, type IntelligenceSignalLevel, type PrismaClient } from '@prisma/client';
 import { normalizeAddress } from '../discovery/unified';
+import {
+  ADAPTIVE_MODEL_VERSION, ADAPTIVE_RULE_VERSION, ADAPTIVE_THRESHOLDS,
+  scoreAdaptiveActivation
+} from './adaptive';
+import { syncIntelligenceEntities } from './entities';
 import { assessTokenQuality } from './tokenQuality';
 
-export const INTELLIGENCE_LIFECYCLE_ENGINE_VERSION = 1;
+export const INTELLIGENCE_LIFECYCLE_ENGINE_VERSION = 2;
 const CHAINS: ChainId[] = ['SOLANA', 'ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'];
 const DORMANT_MS = 30 * 86_400_000;
 const ACTIVATION_WINDOW_MS = 24 * 60 * 60_000;
@@ -20,6 +25,11 @@ export interface IntelligenceLifecycleReport {
   buyCandidatesCreated: number;
   singleWalletGroupsRejected: number;
   honestEmpty: boolean;
+  durationMs: number;
+  throughputEventsPerSec: number;
+  heapUsedBytes: number;
+  heapDeltaBytes: number;
+  retryCount: number;
 }
 
 type Profile = Prisma.WalletIntelligenceProfileGetPayload<{ include: { cluster: true; wallet: true } }>;
@@ -35,6 +45,8 @@ export async function runIntelligenceLifecycle(
   options: { since?: Date; now?: Date; maxProfiles?: number; maxEvents?: number } = {}
 ): Promise<IntelligenceLifecycleReport> {
   const now = options.now ?? new Date();
+  const startedMs = Date.now();
+  const startHeap = process.memoryUsage().heapUsed;
   const previous = options.since ? null : await prisma.intelligenceLifecycleRun.findFirst({
     where: { status: { in: ['completed', 'empty'] } }, orderBy: { completedAt: 'desc' }
   });
@@ -56,7 +68,12 @@ export async function runIntelligenceLifecycle(
     signalsCreated: 0,
     buyCandidatesCreated: 0,
     singleWalletGroupsRejected: 0,
-    honestEmpty: false
+    honestEmpty: false,
+    durationMs: 0,
+    throughputEventsPerSec: 0,
+    heapUsedBytes: startHeap,
+    heapDeltaBytes: 0,
+    retryCount: 0
   };
 
   try {
@@ -67,6 +84,13 @@ export async function runIntelligenceLifecycle(
       take: maxProfiles
     });
     report.profilesTracked = profiles.length;
+    await syncIntelligenceEntities(prisma, { profileIds: profiles.map((profile) => profile.id), now, cause: `lifecycle:${runId}` });
+    const memberships = await prisma.intelligenceEntityMembership.findMany({
+      where: { profileId: { in: profiles.map((profile) => profile.id) }, status: { not: 'rejected' }, scope: { not: 'infrastructure' }, entity: { status: 'active' } },
+      include: { entity: true },
+      orderBy: [{ identityConfidence: 'desc' }, { id: 'asc' }]
+    });
+    const membershipByProfile = new Map(memberships.map((membership) => [membership.profileId, membership]));
     const profileByRef = new Map(profiles.map((profile) => [refKey(profile.chain, profile.address), profile]));
     const events = await loadEvents(prisma, profiles, since, now, maxEvents);
     report.eventsProcessed = events.length;
@@ -149,7 +173,10 @@ export async function runIntelligenceLifecycle(
       const sameCluster = [...buyersByCluster.values()].some((rows) => rows.length >= 2);
       const independentClusters = new Set(buyerProfiles.map((profile) => profile.cluster.clusterKey)).size;
       const executionSequences = funding.filter((row) => row.funder && row.funder.id !== row.buyer.id);
-      const dormantBuyers = buyerProfiles.filter((profile) => recentBuys.some((buy) => dormantByEvent.has(`${buy.eventId}:${profile.id}`)));
+      const dormantBuyers = buyerProfiles.filter((profile) =>
+        membershipByProfile.get(profile.id)?.scope === 'core'
+        && recentBuys.some((buy) => dormantByEvent.has(`${buy.eventId}:${profile.id}`))
+      );
       const dormantFunded = dormantBuyers.filter((profile) => funding.some((row) => row.buyer.id === profile.id && row.funder));
       const patterns = [
         sameCluster ? 'same_cluster_multi_wallet_buy' : null,
@@ -160,27 +187,42 @@ export async function runIntelligenceLifecycle(
       if (!patterns.length) continue;
 
       const highAlphaWallets = participants.filter((profile) => profile.historicalAlphaScore >= 60);
-      const score = clusterSignalScore({
-        sameCluster,
-        independentClusters,
-        executionSequences: executionSequences.length,
-        dormantFunded: dormantFunded.length,
-        highAlphaWallets: highAlphaWallets.length,
-        participants
-      });
-      if (score < 50) continue;
-      const level = intelligenceSignalLevelForScore(score);
+      const adaptive = scoreAdaptiveActivation(participants.map((profile) => {
+        const membership = membershipByProfile.get(profile.id);
+        const buyerFunding = funding.find((row) => row.buyer.id === profile.id && row.funder);
+        const funderMembership = buyerFunding?.funder ? membershipByProfile.get(buyerFunding.funder.id) : null;
+        return {
+          profileId: profile.id,
+          entityId: membership?.entityId ?? null,
+          clusterKey: profile.cluster.clusterKey,
+          capitalRootKey: funderMembership?.entityId ?? buyerFunding?.funder?.cluster.clusterKey ?? membership?.entityId ?? profile.cluster.clusterKey,
+          scope: membership?.scope === 'core' ? 'core' : 'peripheral',
+          historicalAlphaScore: membership?.entity.historicalAlphaScore ?? profile.historicalAlphaScore,
+          evidenceScore: profile.evidenceScore,
+          identityConfidence: membership?.identityConfidence ?? profile.confidence,
+          // The activation transaction is fresh by definition. Historical
+          // membership freshness remains represented inside evidenceQuality.
+          evidenceFreshness: 1,
+          dormantAwakened: dormantBuyers.some((row) => row.id === profile.id),
+          fundingExecution: executionSequences.some((row) => row.buyer.id === profile.id || row.funder?.id === profile.id)
+        };
+      }));
+      if (adaptive.lifecycleStage === 'OBSERVATION') continue;
+      const score = adaptive.score;
+      const level: IntelligenceSignalLevel = adaptive.lifecycleStage === 'WATCH' ? 'WATCH'
+        : adaptive.lifecycleStage === 'STRONG_WATCH' ? 'STRONG_WATCH' : 'HIGH_CONVICTION';
       const allEvents = uniqueBy([...recentBuys, ...funding.map((row) => row.event)], (event) => event.eventId);
       const sourceEventIds = allEvents.map((event) => event.eventId).sort();
       const dedupeKey = hash(`intelligence-signal|${chain}|${tokenAddress}|${patterns.sort().join(',')}|${sourceEventIds.join(',')}|v${INTELLIGENCE_LIFECYCLE_ENGINE_VERSION}`);
       if (await prisma.intelligenceSignal.findUnique({ where: { dedupeKey }, select: { id: true } })) continue;
 
-      const quality = await assessTokenQuality(prisma, { chain, tokenAddress, sourceEventIds, assessedAt: now });
+      const quality = await assessTokenQuality(prisma, { chain, tokenAddress, sourceEventIds, assessedAt: activationEnd });
       const reasons = signalReasons({ sameCluster, independentClusters, executionSequences, dormantFunded, highAlphaWallets, buyerProfiles });
       const clusterKeys = unique(participants.map((profile) => profile.cluster.clusterKey)).sort();
       const entityKeys = unique(participants.map((profile) => profile.entityKey).filter(nonNull)).sort();
+      const entityIds = unique(participants.map((profile) => membershipByProfile.get(profile.id)?.entityId).filter(nonNull)).sort();
       const walletAddresses = unique(participants.map((profile) => profile.address)).sort();
-      const explanation = `${level.replace('_', ' ')}: ${reasons.join(' ')} Token quality ${quality.passed ? `passed (${Math.round(quality.score)}/100)` : `did not pass (${Math.round(quality.score)}/100)`}.`;
+      const explanation = `${adaptive.lifecycleStage.replaceAll('_', ' ')}: ${reasons.join(' ')} ${adaptive.independentEntityCount} independent entity confirmation(s), ${adaptive.independentCapitalRootCount} capital root(s), ${adaptive.coreWalletCount} core wallet(s). Token quality ${quality.passed ? `passed (${Math.round(quality.score)}/100)` : `did not pass (${Math.round(quality.score)}/100)`}.`;
       const signal = await prisma.intelligenceSignal.create({
         data: {
           dedupeKey,
@@ -188,10 +230,12 @@ export async function runIntelligenceLifecycle(
           tokenAddress,
           signalType: patterns.join('+'),
           level,
+          lifecycleStage: adaptive.lifecycleStage,
           score,
           activatedAt: activationEnd,
           clusterKeys,
           entityKeys,
+          entityIds,
           walletAddresses,
           sourceEventIds,
           reasons,
@@ -201,6 +245,8 @@ export async function runIntelligenceLifecycle(
             funding: funding.map((row) => ({ event: eventReceipt(row.event), funderProfileId: row.funder?.id ?? null, buyerProfileId: row.buyer.id })),
             dormantProfileIds: dormantFunded.map((profile) => profile.id),
             independentClusters,
+            independentEntities: adaptive.independentEntityCount,
+            independentCapitalRoots: adaptive.independentCapitalRootCount,
             singleWalletActivityRejected: false
           }),
           historySupportJson: json({
@@ -215,14 +261,39 @@ export async function runIntelligenceLifecycle(
               confidence: profile.confidence,
               observationCount: profile.observationCount
             })),
-            highAlphaWalletCount: highAlphaWallets.length
+            highAlphaWalletCount: highAlphaWallets.length,
+            signalTimeCutoff: activationEnd.toISOString(),
+            noLookahead: true
+          }),
+          scoreDecompositionJson: json(adaptive.decomposition),
+          entryMarketJson: json({
+            capturedAt: activationEnd.toISOString(), assessedAt: quality.assessedAt.toISOString(),
+            liquidityUsd: decimal(quality.liquidityUsd), marketCapUsd: decimal(quality.marketCapUsd),
+            holderCount: quality.holderCount, qualityScore: quality.score, coverage: quality.coverage,
+            noLookahead: quality.assessedAt <= activationEnd
+          }),
+          rejectionReceiptJson: quality.passed ? Prisma.JsonNull : json({
+            rejectedAt: activationEnd.toISOString(), reasonCodes: quality.reasonCodes,
+            coverage: quality.coverage, qualityScore: quality.score, checks: quality.checksJson
           }),
           explanation,
           qualityAssessmentId: quality.id,
+          independentEntityCount: adaptive.independentEntityCount,
+          independentCapitalRootCount: adaptive.independentCapitalRootCount,
+          coreWalletCount: adaptive.coreWalletCount,
+          peripheralWalletCount: adaptive.peripheralWalletCount,
+          outcomeStatus: 'pending',
+          ruleVersion: ADAPTIVE_RULE_VERSION,
+          modelVersion: ADAPTIVE_MODEL_VERSION,
           engineVersion: INTELLIGENCE_LIFECYCLE_ENGINE_VERSION
         }
       });
       report.signalsCreated += 1;
+      if (entityIds.length) {
+        await prisma.intelligenceEntity.updateMany({ where: { id: { in: entityIds } }, data: { signalCount: { increment: 1 }, lastActivityAt: activationEnd } });
+        const coreEntityIds = unique(participants.filter((profile) => membershipByProfile.get(profile.id)?.scope === 'core').map((profile) => membershipByProfile.get(profile.id)?.entityId).filter(nonNull));
+        if (coreEntityIds.length) await prisma.intelligenceEntity.updateMany({ where: { id: { in: coreEntityIds } }, data: { lastCoreActivityAt: activationEnd, dormantSince: null } });
+      }
 
       // Compatibility bridge for the existing operator watch/Telegram alert
       // dispatcher. Only valid cluster intelligence reaches this table now.
@@ -238,11 +309,15 @@ export async function runIntelligenceLifecycle(
           trackedWallets: walletAddresses,
           entityKeys: unique([...entityKeys, ...clusterKeys]),
           trackedWalletCount: walletAddresses.length,
-          independentEntityCount: independentClusters,
+          independentEntityCount: adaptive.independentEntityCount,
           sourceEventIds,
           confidence: score / 100,
           historicalToken: Boolean(historical),
-          evidenceJson: json({ intelligenceSignalId: signal.id, explanation, reasons, qualityAssessmentId: quality.id }),
+          evidenceJson: json({
+            intelligenceSignalId: signal.id, lifecycleStage: adaptive.lifecycleStage, explanation, reasons,
+            qualityAssessmentId: quality.id, scoreDecomposition: adaptive.decomposition,
+            entityIds, coreWalletCount: adaptive.coreWalletCount, independentCapitalRootCount: adaptive.independentCapitalRootCount
+          }),
           caveats: ['cluster activation required; no single-wallet buy can create this alert', 'research-only; no automatic trade execution'],
           status: 'active',
           engineVersion: INTELLIGENCE_LIFECYCLE_ENGINE_VERSION,
@@ -251,7 +326,7 @@ export async function runIntelligenceLifecycle(
         update: { status: 'active', computedAt: now }
       });
 
-      if (level !== 'WATCH' && quality.passed && quality.score >= 70) {
+      if (score >= ADAPTIVE_THRESHOLDS.buyCandidateSignal && level !== 'WATCH' && quality.passed && quality.score >= ADAPTIVE_THRESHOLDS.buyCandidateQuality) {
         const confidence = Math.min(score / 100, quality.score / 100, average(participants.map((profile) => profile.confidence)));
         await prisma.intelligenceBuyCandidate.create({
           data: {
@@ -261,8 +336,8 @@ export async function runIntelligenceLifecycle(
             chain,
             tokenAddress,
             confidence,
-            reasonCodes: ['cluster_intelligence_pass', 'token_quality_pass', `signal_level_${level.toLowerCase()}`],
-            evidenceJson: json({ signalId: signal.id, signalScore: score, qualityAssessmentId: quality.id, qualityScore: quality.score, noAutomaticExecution: true })
+            reasonCodes: ['entity_intelligence_pass', 'independent_confirmation_pass', 'token_quality_pass', `signal_stage_${adaptive.lifecycleStage.toLowerCase()}`],
+            evidenceJson: json({ signalId: signal.id, signalScore: score, lifecycleStage: adaptive.lifecycleStage, qualityAssessmentId: quality.id, qualityScore: quality.score, scoreDecomposition: adaptive.decomposition, noAutomaticExecution: true })
           }
         });
         report.buyCandidatesCreated += 1;
@@ -270,6 +345,10 @@ export async function runIntelligenceLifecycle(
     }
 
     report.honestEmpty = report.eventsProcessed === 0 && report.signalsCreated === 0;
+    report.durationMs = Math.max(1, Date.now() - startedMs);
+    report.heapUsedBytes = process.memoryUsage().heapUsed;
+    report.heapDeltaBytes = report.heapUsedBytes - startHeap;
+    report.throughputEventsPerSec = Number((report.eventsProcessed / (report.durationMs / 1_000)).toFixed(2));
     await prisma.intelligenceLifecycleRun.update({
       where: { id: runId },
       data: {
@@ -283,7 +362,13 @@ export async function runIntelligenceLifecycle(
         metadataJson: json({
           intelligenceEventsCreated: report.intelligenceEventsCreated,
           tokenGroupsConsidered: report.tokenGroupsConsidered,
-          singleWalletGroupsRejected: report.singleWalletGroupsRejected
+          singleWalletGroupsRejected: report.singleWalletGroupsRejected,
+          durationMs: report.durationMs,
+          throughputEventsPerSec: report.throughputEventsPerSec,
+          heapUsedBytes: report.heapUsedBytes,
+          heapDeltaBytes: report.heapDeltaBytes,
+          retryCount: report.retryCount,
+          retryScope: 'database_only_pass_no_provider_retries'
         })
       }
     });

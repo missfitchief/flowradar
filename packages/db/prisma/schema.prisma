@@ -3221,6 +3221,170 @@ model IntelligenceCluster {
   @@map("intelligence_clusters")
 }
 
+/// Persistent owner/operator abstraction above wallet clusters. Clusters are
+/// graph components; an entity is the cautiously inferred economic actor. The
+/// current row is a projection and every material change is captured in an
+/// IntelligenceEntityVersion / IntelligenceEntityAction receipt.
+model IntelligenceEntity {
+  id                        String             @id @default(cuid())
+  entityKey                 String             @unique
+  label                     String
+  type                      String
+  status                    String             @default("active")
+  identityConfidence        Float
+  currentRelevance          Float
+  historicalAlphaScore      Float
+  historicalAlphaConfidence Float
+  wakeUpPotential           Float
+  evidenceFreshness         Float
+  monitoringPriority        MonitoringPriority
+  chains                    ChainId[]
+  clusterKeys               String[]
+  coreWalletCount           Int                @default(0)
+  peripheralWalletCount     Int                @default(0)
+  tokenCount                Int                @default(0)
+  signalCount               Int                @default(0)
+  outcomeCount              Int                @default(0)
+  firstDiscoveredAt         DateTime
+  lastEvidenceAt            DateTime
+  lastCoreActivityAt        DateTime?
+  lastActivityAt            DateTime?
+  dormantSince              DateTime?
+  provenanceJson            Json
+  currentVersion            Int                @default(1)
+  mergedIntoId              String?
+  createdAt                 DateTime           @default(now())
+  updatedAt                 DateTime           @updatedAt
+
+  mergedInto     IntelligenceEntity?               @relation("IntelligenceEntityMergeTarget", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+  mergedEntities IntelligenceEntity[]              @relation("IntelligenceEntityMergeTarget")
+  memberships    IntelligenceEntityMembership[]
+  versions       IntelligenceEntityVersion[]
+  decaySnapshots IntelligenceEntityDecaySnapshot[]
+
+  @@index([status, monitoringPriority])
+  @@index([historicalAlphaScore, identityConfidence])
+  @@index([lastCoreActivityAt])
+  @@map("intelligence_entities")
+}
+
+/// Wallet-to-entity membership is deliberately independent from the wallet
+/// profile and from cluster membership. It may decay, become stale or be
+/// rejected without deleting the evidence history or wallet profile.
+model IntelligenceEntityMembership {
+  id                        String    @id @default(cuid())
+  membershipKey             String    @unique
+  entityId                  String
+  profileId                 String
+  role                      String
+  scope                     String
+  status                    String
+  confidence                Float
+  evidenceScore             Float
+  identityConfidence        Float
+  currentRelevance          Float
+  evidenceFreshness         Float
+  independentSignalCount    Int
+  evidenceTypes             String[]
+  supportingEvidenceJson    Json
+  contradictingEvidenceJson Json
+  firstSeenAt               DateTime
+  lastConfirmedAt           DateTime
+  lastObservedAt            DateTime
+  staleAt                   DateTime?
+  rejectedAt                DateTime?
+  version                   Int       @default(1)
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+
+  entity  IntelligenceEntity        @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  profile WalletIntelligenceProfile @relation(fields: [profileId], references: [id], onDelete: Restrict)
+
+  @@unique([entityId, profileId])
+  @@index([profileId, status])
+  @@index([entityId, scope, status])
+  @@index([identityConfidence, evidenceFreshness])
+  @@map("intelligence_entity_memberships")
+}
+
+/// Append-only, rollback-friendly entity snapshot.
+model IntelligenceEntityVersion {
+  id                        String   @id @default(cuid())
+  entityId                  String
+  version                   Int
+  cause                     String
+  identityConfidence        Float
+  currentRelevance          Float
+  historicalAlphaScore      Float
+  historicalAlphaConfidence Float
+  wakeUpPotential           Float
+  evidenceFreshness         Float
+  coreWalletRefs            String[]
+  peripheralWalletRefs      String[]
+  evidenceJson              Json
+  provenanceJson            Json
+  ruleVersion               Int
+  observedAt                DateTime
+  createdAt                 DateTime @default(now())
+
+  entity IntelligenceEntity @relation(fields: [entityId], references: [id], onDelete: Restrict)
+
+  @@unique([entityId, version])
+  @@index([entityId, observedAt])
+  @@map("intelligence_entity_versions")
+}
+
+/// Versioned confidence/decay receipt. Historical alpha and wake-up potential
+/// are copied unchanged unless new outcome evidence updates them.
+model IntelligenceEntityDecaySnapshot {
+  id                   String   @id @default(cuid())
+  snapshotKey          String   @unique
+  entityId             String
+  identityConfidence   Float
+  currentRelevance     Float
+  historicalAlphaScore Float
+  wakeUpPotential      Float
+  evidenceFreshness    Float
+  previousJson         Json
+  halfLivesJson        Json
+  reasonCodes          String[]
+  policyVersion        Int
+  computedAt           DateTime
+  createdAt            DateTime @default(now())
+
+  entity IntelligenceEntity @relation(fields: [entityId], references: [id], onDelete: Restrict)
+
+  @@index([entityId, computedAt])
+  @@map("intelligence_entity_decay_snapshots")
+}
+
+/// Immutable merge/split proposal, application and rollback receipt. No
+/// entity action is applied from a single evidence type.
+model IntelligenceEntityAction {
+  id                       String    @id @default(cuid())
+  actionKey                String    @unique
+  actionType               String
+  status                   String
+  sourceEntityIds          String[]
+  targetEntityIds          String[]
+  membershipIds            String[]
+  independentEvidenceTypes String[]
+  beforeJson               Json
+  afterJson                Json
+  reasons                  String[]
+  evidenceJson             Json
+  rollbackJson             Json
+  ruleVersion              Int
+  proposedAt               DateTime
+  appliedAt                DateTime?
+  rolledBackAt             DateTime?
+  createdAt                DateTime  @default(now())
+
+  @@index([actionType, status, proposedAt])
+  @@index([sourceEntityIds])
+  @@map("intelligence_entity_actions")
+}
+
 /// Current materialized intelligence for one wallet. Every mutation is backed
 /// by an immutable WalletIntelligenceObservation, so confidence may rise or
 /// fall without losing the prior conclusion.
@@ -3253,10 +3417,11 @@ model WalletIntelligenceProfile {
   createdAt                 DateTime           @default(now())
   updatedAt                 DateTime           @updatedAt
 
-  wallet       Wallet                          @relation(fields: [walletId], references: [id], onDelete: Restrict)
-  cluster      IntelligenceCluster             @relation(fields: [clusterId], references: [id], onDelete: Restrict)
-  observations WalletIntelligenceObservation[]
-  events       WalletIntelligenceEvent[]
+  wallet            Wallet                          @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  cluster           IntelligenceCluster             @relation(fields: [clusterId], references: [id], onDelete: Restrict)
+  observations      WalletIntelligenceObservation[]
+  events            WalletIntelligenceEvent[]
+  entityMemberships IntelligenceEntityMembership[]
 
   @@unique([chain, address])
   @@index([clusterId, confidence])
@@ -3401,34 +3566,197 @@ model TokenQualityAssessment {
 /// participating intelligence wallets/entities; a lone wallet buy cannot write
 /// this row.
 model IntelligenceSignal {
-  id                  String                  @id @default(cuid())
-  dedupeKey           String                  @unique
-  chain               ChainId
-  tokenAddress        String
-  signalType          String
-  level               IntelligenceSignalLevel
-  score               Float
-  status              String                  @default("active")
-  activatedAt         DateTime
-  clusterKeys         String[]
-  entityKeys          String[]
-  walletAddresses     String[]
-  sourceEventIds      String[]
-  reasons             String[]
-  evidenceJson        Json
-  historySupportJson  Json
-  explanation         String
-  qualityAssessmentId String?
-  engineVersion       Int
-  createdAt           DateTime                @default(now())
+  id                          String                  @id @default(cuid())
+  dedupeKey                   String                  @unique
+  chain                       ChainId
+  tokenAddress                String
+  signalType                  String
+  level                       IntelligenceSignalLevel
+  lifecycleStage              String                  @default("WATCH")
+  score                       Float
+  status                      String                  @default("active")
+  activatedAt                 DateTime
+  clusterKeys                 String[]
+  entityKeys                  String[]
+  entityIds                   String[]
+  walletAddresses             String[]
+  sourceEventIds              String[]
+  reasons                     String[]
+  evidenceJson                Json
+  historySupportJson          Json
+  scoreDecompositionJson      Json
+  entryMarketJson             Json
+  rejectionReceiptJson        Json?
+  explanation                 String
+  qualityAssessmentId         String?
+  independentEntityCount      Int                     @default(0)
+  independentCapitalRootCount Int                     @default(0)
+  coreWalletCount             Int                     @default(0)
+  peripheralWalletCount       Int                     @default(0)
+  outcomeStatus               String                  @default("pending")
+  ruleVersion                 Int                     @default(1)
+  modelVersion                Int                     @default(1)
+  engineVersion               Int
+  createdAt                   DateTime                @default(now())
 
-  qualityAssessment TokenQualityAssessment?   @relation(fields: [qualityAssessmentId], references: [id], onDelete: SetNull)
+  qualityAssessment TokenQualityAssessment?         @relation(fields: [qualityAssessmentId], references: [id], onDelete: SetNull)
   buyCandidate      IntelligenceBuyCandidate?
+  outcomes          IntelligenceSignalOutcome[]
+  outcomeLabel      IntelligenceSignalOutcomeLabel?
 
   @@index([level, activatedAt])
   @@index([chain, tokenAddress, activatedAt])
   @@index([clusterKeys])
   @@map("intelligence_signals")
+}
+
+/// One deterministic, no-lookahead outcome receipt per signal horizon.
+model IntelligenceSignalOutcome {
+  id                    String   @id @default(cuid())
+  signalId              String
+  horizon               String
+  targetAt              DateTime
+  evaluatedAt           DateTime
+  status                String
+  coverage              String
+  entryPriceUsd         Decimal? @db.Decimal(24, 12)
+  referencePriceUsd     Decimal? @db.Decimal(24, 12)
+  entryMarketCapUsd     Decimal? @db.Decimal(24, 4)
+  referenceMarketCapUsd Decimal? @db.Decimal(24, 4)
+  realizedReturnPct     Float?
+  maxReturnPct          Float?
+  maxDrawdownPct        Float?
+  timeToPeakMinutes     Int?
+  liquidityRetentionPct Float?
+  volumeContinuation    String
+  holderContinuation    String
+  rugPullDetected       Boolean  @default(false)
+  tradingHalted         Boolean  @default(false)
+  lpRemoved             Boolean  @default(false)
+  survivalStatus        String
+  earlyLateLabel        String
+  sourceSnapshotIds     String[]
+  receiptJson           Json
+  evaluatorVersion      Int
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  signal IntelligenceSignal @relation(fields: [signalId], references: [id], onDelete: Restrict)
+
+  @@unique([signalId, horizon])
+  @@index([horizon, status, evaluatedAt])
+  @@index([signalId, targetAt])
+  @@map("intelligence_signal_outcomes")
+}
+
+/// Deterministic aggregate label derived only from persisted horizon outcomes.
+model IntelligenceSignalOutcomeLabel {
+  id           String   @id @default(cuid())
+  signalId     String   @unique
+  label        String
+  basisHorizon String
+  rationale    String[]
+  metricsJson  Json
+  labelVersion Int
+  computedAt   DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  signal IntelligenceSignal @relation(fields: [signalId], references: [id], onDelete: Restrict)
+
+  @@index([label, computedAt])
+  @@map("intelligence_signal_outcome_labels")
+}
+
+/// Immutable scoring model version. Candidate versions remain shadow-only
+/// until a holdout receipt proves non-degrading precision and they are
+/// explicitly approved.
+model IntelligenceModelVersion {
+  id                   String    @id @default(cuid())
+  version              Int       @unique
+  status               String
+  weightsJson          Json
+  thresholdsJson       Json
+  trainingWindowJson   Json
+  validationWindowJson Json
+  holdoutWindowJson    Json
+  metricsJson          Json
+  source               String
+  approvedAt           DateTime?
+  activatedAt          DateTime?
+  createdAt            DateTime  @default(now())
+
+  @@index([status, version])
+  @@map("intelligence_model_versions")
+}
+
+/// Audited learning proposal. The engine never mutates production weights
+/// directly from observed outcomes.
+model IntelligenceWeightProposal {
+  id                    String    @id @default(cuid())
+  proposalKey           String    @unique
+  baseModelVersion      Int
+  candidateModelVersion Int
+  status                String
+  proposedWeightsJson   Json
+  reasons               String[]
+  trainingMetricsJson   Json
+  validationMetricsJson Json
+  holdoutMetricsJson    Json
+  precisionDelta        Float?
+  falsePositiveDelta    Float?
+  sampleSize            Int
+  evaluatedAt           DateTime?
+  createdAt             DateTime  @default(now())
+
+  @@index([status, createdAt])
+  @@map("intelligence_weight_proposals")
+}
+
+/// Auditable no-lookahead adaptive replay run.
+model IntelligenceReplayRun {
+  id                    String    @id
+  status                String
+  trainingFrom          DateTime?
+  trainingTo            DateTime?
+  validationFrom        DateTime?
+  validationTo          DateTime?
+  holdoutFrom           DateTime?
+  holdoutTo             DateTime?
+  signalsConsidered     Int       @default(0)
+  signalsEvaluated      Int       @default(0)
+  noLookaheadViolations Int       @default(0)
+  modelVersion          Int
+  ruleVersion           Int
+  metricsJson           Json
+  dataQualityJson       Json
+  startedAt             DateTime
+  completedAt           DateTime?
+  createdAt             DateTime  @default(now())
+
+  @@index([status, startedAt])
+  @@map("intelligence_replay_runs")
+}
+
+/// Resumable/idempotent entity and outcome backfill receipt.
+model IntelligenceBackfillRun {
+  id           String    @id
+  backfillType String
+  status       String
+  cursorJson   Json
+  scannedCount Int       @default(0)
+  createdCount Int       @default(0)
+  updatedCount Int       @default(0)
+  unknownCount Int       @default(0)
+  errorCount   Int       @default(0)
+  errorsJson   Json
+  ruleVersion  Int
+  startedAt    DateTime
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([backfillType, status, startedAt])
+  @@map("intelligence_backfill_runs")
 }
 
 /// Research-only Buy Candidate. Creation requires BOTH a STRONG/HIGH cluster

@@ -627,7 +627,7 @@ export class OperatorService {
               ...(target.entity ? [{ profile: { entityKey: target.entity.entityKey } }] : [])
             ]
           },
-          include: { profile: { include: { cluster: true } } }, orderBy: { occurredAt: 'asc' }, take: 1_000
+          include: { profile: { include: { cluster: true, entityMemberships: { where: { scope: 'core', status: { not: 'rejected' }, entity: { status: 'active' } }, include: { entity: true }, take: 1 } } } }, orderBy: { occurredAt: 'asc' }, take: 1_000
         });
         for (const event of dormantEvents) {
           const result = await this.prisma.operatorWatchAlert.createMany({ data: [{
@@ -636,9 +636,13 @@ export class OperatorService {
             alertType: 'dormant_wallet_reactivated',
             payloadJson: json({
               title: 'Dormant Wallet Awakened', chain: event.chain, wallet: event.walletAddress,
-              cluster: event.profile.cluster.clusterKey, entity: event.profile.entityKey, role: event.profile.role,
+              cluster: event.profile.cluster.clusterKey,
+              entity: event.profile.entityMemberships[0]?.entity.label ?? event.profile.entityKey,
+              entityId: event.profile.entityMemberships[0]?.entityId ?? null,
+              coreWallet: event.profile.entityMemberships[0]?.scope === 'core', role: event.profile.role,
               evidenceScore: event.profile.evidenceScore, historicalAlphaScore: event.profile.historicalAlphaScore,
               wakeUpPotential: event.profile.wakeUpPotential, confidence: event.profile.confidence,
+              preWakeDormancy: objectJson(event.evidenceJson)?.dormantDays ?? null,
               sourceEventId: event.sourceEventId, txHash: event.txHash, tokenAddress: event.tokenAddress,
               occurredAt: event.occurredAt.toISOString(), evidence: event.evidenceJson
             })
@@ -707,6 +711,21 @@ export class OperatorService {
   }
 
   async pendingWatchAlerts(limit = 100) { return this.prisma.operatorWatchAlert.findMany({ where: { status: { in: ['pending', 'retryable'] } }, include: { watch: true }, orderBy: { createdAt: 'asc' }, take: Math.max(1, Math.min(limit, 1_000)) }); }
+  async intelligenceAlert(alertId: string) {
+    const alert = await this.prisma.operatorWatchAlert.findUnique({ where: { id: alertId }, include: { watch: true } });
+    if (!alert) return null;
+    const payload = objectJson(alert.payloadJson);
+    const signalId = typeof payload?.intelligenceSignalId === 'string' ? payload.intelligenceSignalId : null;
+    const signal = signalId ? await this.prisma.intelligenceSignal.findUnique({
+      where: { id: signalId },
+      include: { qualityAssessment: true, outcomes: { orderBy: { targetAt: 'asc' } }, outcomeLabel: true }
+    }) : null;
+    const entities = signal?.entityIds.length ? await this.prisma.intelligenceEntity.findMany({
+      where: { id: { in: signal.entityIds } },
+      include: { memberships: { where: { status: { not: 'rejected' }, scope: { not: 'infrastructure' } }, include: { profile: true }, orderBy: [{ scope: 'asc' }, { identityConfidence: 'desc' }] } }
+    }) : [];
+    return { alert, payload, signal, entities };
+  }
   async markWatchAlert(id: string, error?: string) { await this.prisma.operatorWatchAlert.update({ where: { id }, data: error ? { status: 'retryable', lastError: error.slice(0, 1_000) } : { status: 'sent', sentAt: new Date(), lastError: null } }); }
   async stopTelegramDelivery(chatId: string, error: string) {
     const watches = await this.prisma.operatorWatch.findMany({ where: { chatId }, select: { id: true } });

@@ -30,6 +30,24 @@ async function cleanup() {
   await prisma.tokenTopPnlCandidate.deleteMany({ where: { mint: TOKEN_CA } });
   await prisma.historicalTokenUniverse.deleteMany({ where: { tokenAddress: { in: [TOKEN_CA, ...TOKENS] } } });
   await prisma.addressRegistry.deleteMany({ where: { address: BASE_CEX } });
+  await prisma.walletIntelligenceEvent.deleteMany({ where: { walletAddress: { in: ALL_WALLETS } } });
+  await prisma.walletIntelligenceObservation.deleteMany({ where: { profile: { address: { in: ALL_WALLETS } } } });
+  const intelligenceProfiles = await prisma.walletIntelligenceProfile.findMany({ where: { address: { in: ALL_WALLETS } }, select: { id: true, clusterId: true } });
+  const intelligenceEntityIds = (await prisma.intelligenceEntityMembership.findMany({ where: { profileId: { in: intelligenceProfiles.map((row) => row.id) } }, select: { entityId: true } })).map((row) => row.entityId);
+  await prisma.intelligenceEntityMembership.deleteMany({ where: { profileId: { in: intelligenceProfiles.map((row) => row.id) } } });
+  await prisma.walletIntelligenceProfile.deleteMany({ where: { id: { in: intelligenceProfiles.map((row) => row.id) } } });
+  if (intelligenceEntityIds.length) {
+    await prisma.intelligenceEntityAction.deleteMany({ where: { OR: [{ sourceEntityIds: { hasSome: intelligenceEntityIds } }, { targetEntityIds: { hasSome: intelligenceEntityIds } }] } });
+    await prisma.intelligenceEntityDecaySnapshot.deleteMany({ where: { entityId: { in: intelligenceEntityIds } } });
+    await prisma.intelligenceEntityVersion.deleteMany({ where: { entityId: { in: intelligenceEntityIds } } });
+    await prisma.intelligenceEntity.deleteMany({ where: { id: { in: intelligenceEntityIds }, memberships: { none: {} } } });
+  }
+  const intelligenceClusterIds = intelligenceProfiles.map((row) => row.clusterId);
+  if (intelligenceClusterIds.length) {
+    await prisma.intelligenceClusterMerge.deleteMany({ where: { OR: [{ fromClusterId: { in: intelligenceClusterIds } }, { intoClusterId: { in: intelligenceClusterIds } }] } });
+    await prisma.intelligenceClusterObservation.deleteMany({ where: { clusterId: { in: intelligenceClusterIds } } });
+    await prisma.intelligenceCluster.deleteMany({ where: { id: { in: intelligenceClusterIds }, profiles: { none: {} } } });
+  }
   await prisma.unifiedEntity.deleteMany({ where: { addresses: { some: { address: { in: ALL_WALLETS } } } } });
   await prisma.unifiedEntityAddress.deleteMany({ where: { address: { in: ALL_WALLETS } } });
   await prisma.monitoringSubscription.deleteMany({ where: { wallet: { address: { in: ALL_WALLETS } } } });

@@ -1,4 +1,4 @@
-import { prisma, runIntelligenceLifecycle } from '@flowradar/db';
+import { prisma, runEntityDecayPass, runIntelligenceLifecycle, runIntelligenceOutcomePass } from '@flowradar/db';
 
 const configured = Number(process.env.INTELLIGENCE_LIFECYCLE_INTERVAL_SEC ?? 300);
 const intervalMs = Math.max(30, Number.isFinite(configured) ? configured : 300) * 1_000;
@@ -11,7 +11,11 @@ while (running) {
   const started = Date.now();
   try {
     const report = await runIntelligenceLifecycle(prisma);
-    console.log(JSON.stringify({ at: new Date().toISOString(), event: 'intelligence_lifecycle_complete', ...report }));
+    const [outcomes, decay] = await Promise.all([
+      runIntelligenceOutcomePass(prisma, { take: 10_000 }),
+      runEntityDecayPass(prisma)
+    ]);
+    console.log(JSON.stringify({ at: new Date().toISOString(), event: 'intelligence_lifecycle_complete', ...report, outcomes, decay }));
   } catch (error) {
     console.error(JSON.stringify({
       at: new Date().toISOString(), event: 'intelligence_lifecycle_failed',

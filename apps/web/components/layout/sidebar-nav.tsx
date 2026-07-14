@@ -22,6 +22,7 @@ const PRIMARY_ITEMS: NavItem[] = [
 ];
 
 const ADVANCED_ITEMS: NavItem[] = [
+  { label: 'Intelligence Performance', href: '/intelligence' },
   { label: 'Historical Proof (replay)', href: '/proof' },
   { label: 'Signal Feed', href: '/feed' },
   { label: 'Tokens (raw)', href: '/tokens' },
