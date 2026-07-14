@@ -35,7 +35,7 @@ import { isRateLimitError } from '@flowradar/providers';
 import { normalizeMassTransaction, type Chain } from '@flowradar/core';
 import type { JobContext } from '../context';
 
-const PROVIDER_NAME = 'mock';
+const LIVE_FAILURE_PROVIDER_NAME = 'wallet_activity_live';
 const PAGE_LIMIT = 500;
 const DEFAULT_MAX_BACKFILL_PAGES = 5;
 
@@ -178,12 +178,21 @@ export async function run(ctx: JobContext): Promise<void> {
 async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chain, massTracker: MassTrackerSession): Promise<WalletPollResult> {
   const { prisma, providers } = ctx;
 
+  const activityProvider = providers(chain, 'walletActivity');
+  const providerName = activityProvider.providerName ?? 'unknown';
+  // Registry-level keyless fallbacks intentionally return MockProvider so
+  // generic development jobs can boot. A MOCK_MODE=false production worker
+  // must never turn that fallback into fake on-chain evidence or alerts.
+  if (process.env.MOCK_MODE === 'false' && /mock/i.test(providerName)) {
+    throw new Error(`No live walletActivity provider configured for ${chain}; refusing MockProvider in production`);
+  }
+  const syncProvider = process.env.MOCK_MODE === 'false' ? providerName.toLowerCase() : 'mock';
+
   const syncState = await prisma.providerSyncState.findUnique({
-    where: { provider_chain_scope: { provider: PROVIDER_NAME, chain, scope: address } }
+    where: { provider_chain_scope: { provider: syncProvider, chain, scope: address } }
   });
   const since = syncState?.cursor ? new Date(syncState.cursor) : undefined;
 
-  const activityProvider = providers(chain, 'walletActivity');
   const maxPages = maxBackfillPages();
 
   let cursor: string | undefined;
@@ -215,8 +224,7 @@ async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chai
       // yields the identical DB state as one whole-history ingest.
       await ingestNormalizedTxs(prisma, chain, address, result.txs);
       const observedAt = new Date();
-      const provider = activityProvider.providerName ?? PROVIDER_NAME;
-      await massTracker.ingest(result.txs.flatMap((tx) => normalizeMassTransaction(tx, { chain, provider, observedAt }, address)));
+      await massTracker.ingest(result.txs.flatMap((tx) => normalizeMassTransaction(tx, { chain, provider: providerName, observedAt }, address)));
       txsIngested += result.txs.length;
       for (const tx of result.txs) {
         if (!latestTs || tx.ts.getTime() > latestTs.getTime()) latestTs = tx.ts;
@@ -242,9 +250,9 @@ async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chai
   const nextCursor = latestTs ? new Date(latestTs.getTime() + 1).toISOString() : (syncState?.cursor ?? null);
 
   await prisma.providerSyncState.upsert({
-    where: { provider_chain_scope: { provider: PROVIDER_NAME, chain, scope: address } },
+    where: { provider_chain_scope: { provider: syncProvider, chain, scope: address } },
     create: {
-      provider: PROVIDER_NAME,
+      provider: syncProvider,
       chain,
       scope: address,
       cursor: nextCursor,
@@ -265,10 +273,11 @@ async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chai
 
 async function recordSyncFailure(prisma: JobContext['prisma'], chain: Chain, address: string, err: unknown): Promise<void> {
   const message = err instanceof Error ? err.message : String(err);
+  const failureProvider = process.env.MOCK_MODE === 'false' ? LIVE_FAILURE_PROVIDER_NAME : 'mock';
   await prisma.providerSyncState.upsert({
-    where: { provider_chain_scope: { provider: PROVIDER_NAME, chain, scope: address } },
+    where: { provider_chain_scope: { provider: failureProvider, chain, scope: address } },
     create: {
-      provider: PROVIDER_NAME,
+      provider: failureProvider,
       chain,
       scope: address,
       lastError: message,

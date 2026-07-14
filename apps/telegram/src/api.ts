@@ -21,7 +21,7 @@ export function createTelegramApi(token: string, fetchImpl: typeof fetch = fetch
     async deleteWebhook() { await call('deleteWebhook', { drop_pending_updates: false }); },
     async setMyCommands(commands) { await call('setMyCommands', { commands }); },
     getUpdates: (offset, signal) => call<TelegramUpdate[]>('getUpdates', { offset: Number(offset), limit: 100, timeout: 25, allowed_updates: ['message', 'callback_query'] }, signal),
-    async sendMessage(chatId, text, keyboard) { await call('sendMessage', messageBody(chatId, text, keyboard)); },
+    sendMessage: (chatId, text, keyboard) => call('sendMessage', messageBody(chatId, text, keyboard)),
     async editMessage(chatId, messageId, text, keyboard) {
       try { await call('editMessageText', { ...messageBody(chatId, text, keyboard), message_id: messageId }); }
       catch (error) {

@@ -123,6 +123,15 @@ describe('OperatorService', () => {
     expect(alerts.some((alert) => alert.eventKey.includes('funding'))).toBe(false);
     expect(alerts.find((alert) => alert.alertType === 'connected_core_receiver_buy')?.payloadJson).toMatchObject({ coreWallet: CORE_ADDRESS, wallet: CORE_CONNECTED, connection: 'direct_transfer', ca: CORE_TOKEN });
     expect(alerts.some((alert) => alert.alertType === 'connected_core_receiver_buy' && JSON.stringify(alert.payloadJson).includes('exact_bridge'))).toBe(true);
+    expect(await service.materializeWatchAlerts(new Date(now.getTime() - 10_000))).toBe(0);
+
+    const delivered = alerts.find((alert) => alert.alertType === 'core_wallet_token_buy')!;
+    await service.recordWatchAlertDispatchAttempt(delivered.id);
+    await service.markWatchAlert(delivered.id, undefined, { telegramMessageId: 456, telegramChatId: 123 });
+    expect((await prisma.operatorWatchAlert.findUniqueOrThrow({ where: { id: delivered.id } })).payloadJson).toMatchObject({
+      pipeline: { persisted: true, eligibility: 'eligible' },
+      deliveryReceipt: { attempts: 1, status: 'delivered', telegramMessageId: 456, telegramChatId: 123 }
+    });
   });
 
   it('returns automatic candidates through bounded profitable pagination', async () => {

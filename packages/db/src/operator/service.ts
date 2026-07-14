@@ -997,7 +997,12 @@ export class OperatorService {
             title: 'Core Wallet Token Buy', wallet: event.actorAddress ?? event.fromAddress, chain: event.chain,
             token: token?.name ?? token?.symbol ?? event.assetAddress, symbol: token?.symbol ?? event.assetSymbol,
             ca: event.assetAddress, amount: event.amountToken, amountUsd: decimal(event.amountUsd), txHash: event.txHash,
-            occurredAt: event.ts.toISOString(), reason: 'Core wallet executed a locally observed token buy.'
+            occurredAt: event.ts.toISOString(), reason: 'Core wallet executed a locally observed token buy.',
+            pipeline: {
+              providerEventSeen: true, normalized: true, persisted: true,
+              eventId: event.eventId, provider: event.provider, observedAt: event.observedAt.toISOString(),
+              eligibility: 'eligible', alertType: 'core_wallet_token_buy', alertCreatedAt: new Date().toISOString()
+            }
           })
         }], skipDuplicates: true });
         created += result.count;
@@ -1045,7 +1050,12 @@ export class OperatorService {
                 ca: event.assetAddress, amount: event.amountToken, amountUsd: decimal(event.amountUsd), txHash: event.txHash,
                 occurredAt: event.ts.toISOString(), reason: relation.route === 'exact_bridge'
                   ? 'Wallet is linked to the Core root by a verified exact bridge path.'
-                  : 'Wallet directly received capital from the Core root.'
+                  : 'Wallet directly received capital from the Core root.',
+                pipeline: {
+                  providerEventSeen: true, normalized: true, persisted: true,
+                  eventId: event.eventId, provider: event.provider, observedAt: event.observedAt.toISOString(),
+                  eligibility: 'eligible', alertType: 'connected_core_receiver_buy', alertCreatedAt: new Date().toISOString()
+                }
               })
             }], skipDuplicates: true });
             created += result.count;
@@ -1136,7 +1146,43 @@ export class OperatorService {
     }) : [];
     return { alert, payload, signal, entities };
   }
-  async markWatchAlert(id: string, error?: string) { await this.prisma.operatorWatchAlert.update({ where: { id }, data: error ? { status: 'retryable', lastError: error.slice(0, 1_000) } : { status: 'sent', sentAt: new Date(), lastError: null } }); }
+  async recordWatchAlertDispatchAttempt(id: string) {
+    const alert = await this.prisma.operatorWatchAlert.findUnique({ where: { id }, select: { payloadJson: true } });
+    if (!alert) return;
+    const payload = objectJson(alert.payloadJson) ?? {};
+    const prior = objectJson(payload.deliveryReceipt as Prisma.JsonValue) ?? {};
+    const attempts = Number(prior.attempts);
+    await this.prisma.operatorWatchAlert.update({
+      where: { id },
+      data: { payloadJson: json({
+        ...payload,
+        deliveryReceipt: {
+          ...prior, attempts: Number.isFinite(attempts) ? attempts + 1 : 1,
+          dispatchAttemptedAt: new Date().toISOString(), status: 'attempted'
+        }
+      }) }
+    });
+  }
+
+  async markWatchAlert(id: string, error?: string, receipt?: { telegramMessageId?: number; telegramChatId?: number }) {
+    const alert = await this.prisma.operatorWatchAlert.findUnique({ where: { id }, select: { payloadJson: true } });
+    const payload = alert ? objectJson(alert.payloadJson) ?? {} : {};
+    const prior = objectJson(payload.deliveryReceipt as Prisma.JsonValue) ?? {};
+    const now = new Date();
+    const deliveryReceipt = error
+      ? { ...prior, status: 'failed', failedAt: now.toISOString(), error: error.slice(0, 1_000) }
+      : {
+          ...prior, status: 'delivered', deliveredAt: now.toISOString(),
+          telegramMessageId: receipt?.telegramMessageId ?? null,
+          telegramChatId: receipt?.telegramChatId ?? null
+        };
+    await this.prisma.operatorWatchAlert.update({
+      where: { id },
+      data: error
+        ? { status: 'retryable', lastError: error.slice(0, 1_000), payloadJson: json({ ...payload, deliveryReceipt }) }
+        : { status: 'sent', sentAt: now, lastError: null, payloadJson: json({ ...payload, deliveryReceipt }) }
+    });
+  }
   async stopTelegramDelivery(chatId: string, error: string) {
     const watches = await this.prisma.operatorWatch.findMany({ where: { chatId }, select: { id: true } });
     if (!watches.length) return;

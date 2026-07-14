@@ -46,6 +46,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { DEFAULT_SETTINGS, parseSettings } from '@flowradar/core';
 import type { Chain, Settings } from '@flowradar/core';
 import { prisma } from '@flowradar/db';
@@ -168,6 +169,10 @@ function intervalMsFor(settingsSec: number, fast: boolean): number {
 async function main(): Promise<void> {
   loadEnv();
   const bootLog = createConsoleLogger('worker');
+  bootLog.info('runtime identity', {
+    pid: process.pid, cwd: process.cwd(), mockMode: process.env.MOCK_MODE ?? null,
+    databaseFingerprint: secretFingerprint(process.env.DATABASE_URL)
+  });
 
   ensureLiteDatabase(bootLog);
 
@@ -363,6 +368,10 @@ async function main(): Promise<void> {
 
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+}
+
+function secretFingerprint(value: string | undefined) {
+  return value ? createHash('sha256').update(value).digest('hex').slice(0, 12) : 'missing';
 }
 
 main().catch((err) => {

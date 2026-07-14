@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import { OperatorService, prisma } from '@flowradar/db';
 import { createBirdeyeTokenTopTraders, createGmgnTokenTopTraders, createLiveWalletCapitalScanner, createWormholeWalletBridgeScanner, type TokenTopTradersProvider } from '@flowradar/providers';
 import { createTelegramApi } from './api';
@@ -18,6 +19,11 @@ export async function main() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) throw new Error('TELEGRAM_BOT_TOKEN is required');
   const allowedUserIds = parseAllowedUserIds(process.env.TELEGRAM_ALLOWED_USER_IDS);
+  console.info(`[telegram] runtime identity ${JSON.stringify({
+    pid: process.pid, cwd: process.cwd(), mockMode: process.env.MOCK_MODE,
+    databaseFingerprint: secretFingerprint(process.env.DATABASE_URL),
+    tokenPresent: Boolean(process.env.TELEGRAM_BOT_TOKEN), allowedUserCount: allowedUserIds.size
+  })}`);
   const birdeyeTopTraders = createBirdeyeTokenTopTraders(process.env);
   const gmgnTopTraders = createGmgnTokenTopTraders();
   const solanaTopTraders: TokenTopTradersProvider = birdeyeTopTraders ? {
@@ -42,6 +48,10 @@ export async function main() {
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
   try { await runLongPolling({ service: new OperatorService(prisma, { tokenTopTraderProviders, walletCapitalScanner, walletBridgeScanner }), api: createTelegramApi(token), allowedUserIds, signal: controller.signal }); }
   finally { await prisma.$disconnect(); }
+}
+
+function secretFingerprint(value: string | undefined) {
+  return value ? createHash('sha256').update(value).digest('hex').slice(0, 12) : 'missing';
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main().catch((error) => { console.error(`[telegram] fatal: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; });

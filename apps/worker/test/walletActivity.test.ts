@@ -380,3 +380,25 @@ describe('walletActivity — per-cycle wallet budget (overnight 2026-07-11)', ()
     expect(r.windows).toBe(1);
   });
 });
+
+describe('walletActivity - production evidence guard', () => {
+  it('refuses the registry MockProvider when MOCK_MODE=false', async () => {
+    const previous = process.env.MOCK_MODE;
+    process.env.MOCK_MODE = 'false';
+    try {
+      const provider = { providerName: 'MockProvider', getWalletTransactions: vi.fn() };
+      const { ctx, log } = makeCtx([{ id: 'core', address: 'CoreWallet', chain: 'SOLANA' }], provider);
+
+      await run(ctx);
+
+      expect(provider.getWalletTransactions).not.toHaveBeenCalled();
+      expect(log.error).toHaveBeenCalledWith(
+        expect.stringContaining('CoreWallet'),
+        expect.objectContaining({ kind: 'provider_error', error: expect.stringContaining('refusing MockProvider') })
+      );
+    } finally {
+      if (previous === undefined) delete process.env.MOCK_MODE;
+      else process.env.MOCK_MODE = previous;
+    }
+  });
+});

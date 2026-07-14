@@ -11,7 +11,7 @@ export interface TelegramApi {
   deleteWebhook(): Promise<void>;
   setMyCommands(commands: Array<{ command: string; description: string }>): Promise<void>;
   getUpdates(offset: bigint, signal?: AbortSignal): Promise<TelegramUpdate[]>;
-  sendMessage(chatId: string, text: string, keyboard?: InlineKeyboard): Promise<void>;
+  sendMessage(chatId: string, text: string, keyboard?: InlineKeyboard): Promise<TelegramMessage>;
   editMessage(chatId: string, messageId: number, text: string, keyboard?: InlineKeyboard): Promise<void>;
   answerCallbackQuery(id: string, text?: string): Promise<void>;
   sendDocument(chatId: string, filename: string, content: string, mimeType: string, caption?: string): Promise<void>;

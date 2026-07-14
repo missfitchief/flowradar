@@ -103,3 +103,23 @@ describe('mapHeliusTransaction — determinism', () => {
     expect(a).toEqual(b);
   });
 });
+
+describe('mapHeliusTransaction - provider-classified SWAP fallback', () => {
+  it('keeps an inbound token transfer alertable when events.swap is absent', () => {
+    const tx = mapHeliusTransaction({
+      type: 'SWAP', source: 'JUPITER', feePayer: SWAP_WALLET,
+      signature: 'fallback-swap', slot: 123, timestamp: 1_700_000_000,
+      tokenTransfers: [{
+        fromUserAccount: 'Pool111111111111111111111111111111111111111',
+        toUserAccount: SWAP_WALLET, tokenAmount: 42,
+        mint: 'Mint111111111111111111111111111111111111111'
+      }]
+    }, SWAP_WALLET);
+
+    expect(tx.legs).toHaveLength(1);
+    expect(tx.legs[0]).toMatchObject({
+      kind: 'swap_leg', to: SWAP_WALLET,
+      asset: { address: 'Mint111111111111111111111111111111111111111' }
+    });
+  });
+});

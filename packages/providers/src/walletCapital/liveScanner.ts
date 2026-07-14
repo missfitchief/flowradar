@@ -194,37 +194,81 @@ async function fetchBscTradeReceiptEvents(address: string, rows: BscTransactionR
 
 async function scanSolana(address: string, options: WalletCapitalScanOptions, helius: ReturnType<typeof createHeliusActivityProvider>): Promise<WalletCapitalScanResult> {
   const observedAt = new Date();
+  let heliusWarning: string | null = null;
   if (helius) {
-    const maxPages = clamp(options.maxPages ?? (options.root ? 10 : 4), 1, 20);
-    let cursor: string | undefined;
-    let pages = 0;
-    const events: MassTransactionEvent[] = [];
-    do {
-      const result = await helius.getWalletTransactions('SOLANA', address, { cursor, limit: 100, since: options.since });
-      pages += 1;
-      events.push(...result.txs.flatMap((tx) => normalizeMassTransaction(tx, { chain: 'SOLANA', provider: 'Helius', observedAt }, address)));
-      cursor = result.nextCursor;
-    } while (cursor && pages < maxPages);
-    return { events: dedupeEvents(events), infrastructure: [], provider: 'Helius', pagesFetched: pages, complete: !cursor, warnings: cursor ? ['Helius history bounded by page budget'] : [] };
+    try {
+      const maxPages = clamp(options.maxPages ?? (options.root ? 10 : 4), 1, 20);
+      let cursor: string | undefined;
+      let pages = 0;
+      const events: MassTransactionEvent[] = [];
+      do {
+        const result = await helius.getWalletTransactions('SOLANA', address, { cursor, limit: 100, since: options.since });
+        pages += 1;
+        events.push(...result.txs.flatMap((tx) => normalizeMassTransaction(tx, { chain: 'SOLANA', provider: 'Helius', observedAt }, address)));
+        // before-signature paginates into older history. Once a full raw page
+        // maps to zero rows after the incremental since filter, every following
+        // page is older too; stop instead of spending the whole page budget and
+        // falsely reporting an incomplete live scan.
+        if (options.since && result.txs.length === 0) {
+          cursor = undefined;
+          break;
+        }
+        cursor = result.nextCursor;
+      } while (cursor && pages < maxPages);
+      return { events: dedupeEvents(events), infrastructure: [], provider: 'Helius', pagesFetched: pages, complete: !cursor, warnings: cursor ? ['Helius history bounded by page budget'] : [] };
+    } catch (error) {
+      // The operator scanner already has a query-only GMGN fallback for a
+      // missing key. Use the same source when Helius is configured but rejects
+      // or throttles the request; one provider credential must not stop Core
+      // monitoring. The warning is deliberately credential-safe.
+      heliusWarning = safeHeliusFailure(error);
+    }
   }
-  const result = await fetchWalletActivity(address, { chain: 'sol', limit: 100, timeoutMs: 30_000 });
-  const events = result.rows.map((row, index) => mapGmgnActivity(address, row, index, observedAt)).filter(nonNull);
-  return { events: dedupeEvents(events), infrastructure: [], provider: 'GMGN', pagesFetched: 1, complete: !result.next, warnings: result.next ? ['GMGN cursor available; current scan is bounded'] : [] };
+  const maxPages = clamp(options.maxPages ?? (options.root ? 10 : 4), 1, 20);
+  let gmgnCursor: string | undefined;
+  let gmgnPages = 0;
+  const events: MassTransactionEvent[] = [];
+  do {
+    const result = await fetchWalletActivity(address, { chain: 'sol', limit: 100, cursor: gmgnCursor, timeoutMs: 30_000 });
+    gmgnPages += 1;
+    const mapped = result.rows.map((row, index) => mapGmgnActivity(address, row, index, observedAt)).filter(nonNull);
+    events.push(...mapped.filter((event) => !options.since || event.ts >= options.since));
+    if (options.since && mapped.length > 0 && mapped.every((event) => event.ts < options.since!)) {
+      gmgnCursor = undefined;
+      break;
+    }
+    gmgnCursor = result.next ?? undefined;
+  } while (gmgnCursor && gmgnPages < maxPages);
+  return {
+    events: dedupeEvents(events), infrastructure: [], provider: 'GMGN', pagesFetched: gmgnPages, complete: !gmgnCursor,
+    warnings: [...(heliusWarning ? [heliusWarning] : []), ...(gmgnCursor ? ['GMGN history bounded by page budget'] : [])]
+  };
 }
 
-function mapGmgnActivity(address: string, row: Record<string, unknown>, index: number, observedAt: Date): MassTransactionEvent | null {
+function safeHeliusFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/401|unauthorized/i.test(message)) return 'Helius authentication rejected (401); GMGN fallback used';
+  if (/429|rate.?limit/i.test(message)) return 'Helius rate limited; GMGN fallback used';
+  return `Helius unavailable; GMGN fallback used (${(error instanceof Error ? error.name : 'provider_error').slice(0, 80)})`;
+}
+
+export function mapGmgnActivity(address: string, row: Record<string, unknown>, index: number, observedAt: Date): MassTransactionEvent | null {
   const txHash = firstString(row, ['tx_hash', 'txHash', 'hash', 'signature']);
   const ts = dateOf(firstValue(row, ['timestamp', 'time', 'block_timestamp', 'created_at']));
   const action = firstString(row, ['event_type', 'type', 'event', 'action'])?.toLowerCase() ?? '';
   if (!txHash || !ts) return null;
   const from = firstString(row, ['from_address', 'from', 'sender']) ?? address;
   const to = firstString(row, ['to_address', 'to', 'receiver']) ?? address;
-  const token = firstString(row, ['token_address', 'token', 'mint']);
+  const tokenObject = objectOf(row.token);
+  const token = firstString(row, ['token_address', 'token', 'mint']) ?? stringOf(tokenObject?.address);
   const kind = action.includes('buy') ? 'token_buy' : action.includes('sell') ? 'token_sell' : token ? 'token_transfer' : 'native_transfer';
   return massEvent({
     chain: 'SOLANA', provider: 'GMGN', txHash, index: stableIndex(`${txHash}:${index}:${action}`), block: bigintOf(firstValue(row, ['block_number', 'slot'])), ts, kind,
-    from, to, actor: address, assetAddress: token, symbol: firstString(row, ['symbol', 'token_symbol']), decimals: finiteNumber(firstValue(row, ['decimals'])) ?? null,
-    amount: firstString(row, ['amount', 'token_amount', 'amount_token']) ?? '0', amountUsd: finiteNumber(firstValue(row, ['amount_usd', 'usd_value'])),
+    from, to, actor: address, assetAddress: token,
+    symbol: firstString(row, ['symbol', 'token_symbol']) ?? stringOf(tokenObject?.symbol),
+    decimals: finiteNumber(firstValue(row, ['decimals'])) ?? finiteNumber(tokenObject?.decimals),
+    amount: firstString(row, ['amount', 'token_amount', 'amount_token']) ?? '0',
+    amountUsd: finiteNumber(firstValue(row, ['amount_usd', 'usd_value', 'cost_usd', 'buy_cost_usd', 'sell_income_usd'])),
     program: firstString(row, ['program', 'program_id', 'router']), observedAt, metadata: { source: 'gmgn_portfolio_activity', raw: row }
   });
 }

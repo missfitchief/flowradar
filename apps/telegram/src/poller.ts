@@ -31,7 +31,7 @@ export async function runLongPolling(options: { service: OperatorService; api: T
         await options.service.setCursor(botKey, offset);
       }
       if (Date.now() - lastAlertsAt >= 30_000) {
-        await dispatchWatchAlerts(options.service, options.api);
+        await dispatchWatchAlerts(options.service, options.api, log);
         lastAlertsAt = Date.now();
       }
       retry = 0;
@@ -45,27 +45,41 @@ export async function runLongPolling(options: { service: OperatorService; api: T
   }
 }
 
-export async function dispatchWatchAlerts(service: OperatorService, api: TelegramApi) {
-  await service.materializeWatchAlerts();
+export async function dispatchWatchAlerts(service: OperatorService, api: TelegramApi, log: Pick<Console, 'info' | 'error'> = console) {
+  // A materialization error must not strand records already in the durable
+  // queue. The next pass retries materialization while this pass still sends
+  // pending/retryable alerts.
+  try {
+    await service.materializeWatchAlerts();
+  } catch (error) {
+    log.error(`[telegram] alert materialization failed; dispatching existing queue: ${error instanceof Error ? error.message : String(error)}`);
+  }
   for (const alert of await service.pendingWatchAlerts(100)) {
     try {
+      await service.recordWatchAlertDispatchAttempt(alert.id);
+      log.info(`[core-alert-pipeline] ${JSON.stringify({ stage: 'dispatch_attempted', alertId: alert.id, alertType: alert.alertType })}`);
       const payload = alert.payloadJson as Record<string, unknown>;
+      let receipt: Awaited<ReturnType<TelegramApi['sendMessage']>> | undefined;
       if (alert.alertType === 'receiver_bought_token' && typeof payload.intelligenceSignalId === 'string') {
         const intelligence = await service.intelligenceAlert(alert.id);
         if (intelligence) {
           const rendered = renderIntelligenceAlert(intelligence);
-          await api.sendMessage(alert.watch.chatId, rendered.text, rendered.keyboard);
+          receipt = await api.sendMessage(alert.watch.chatId, rendered.text, rendered.keyboard);
         } else {
-          await api.sendMessage(alert.watch.chatId, '📡 <b>FLOWRADAR SIGNAL</b>\n━━━━━━━━━━━━━━━━━━━━\n⚪ Signal receipt is no longer available.');
+          receipt = await api.sendMessage(alert.watch.chatId, '📡 <b>FLOWRADAR SIGNAL</b>\n━━━━━━━━━━━━━━━━━━━━\n⚪ Signal receipt is no longer available.');
         }
       } else if (alert.watch.targetType === 'core_wallet') {
-        await api.sendMessage(alert.watch.chatId, renderCoreMonitoringAlert(alert.alertType, payload));
+        receipt = await api.sendMessage(alert.watch.chatId, renderCoreMonitoringAlert(alert.alertType, payload));
       } else {
-        await api.sendMessage(alert.watch.chatId, renderLegacyAlert(alert.alertType, payload));
+        receipt = await api.sendMessage(alert.watch.chatId, renderLegacyAlert(alert.alertType, payload));
       }
-      await service.markWatchAlert(alert.id);
+      await service.markWatchAlert(alert.id, undefined, receipt ? {
+        telegramMessageId: receipt.message_id, telegramChatId: receipt.chat.id
+      } : undefined);
+      log.info(`[core-alert-pipeline] ${JSON.stringify({ stage: 'delivered', alertId: alert.id, alertType: alert.alertType, telegramMessageId: receipt?.message_id ?? null })}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      log.error(`[core-alert-pipeline] ${JSON.stringify({ stage: 'failed', alertId: alert.id, alertType: alert.alertType, error: message })}`);
       if (isTelegramRecipientUnavailable(error)) await service.stopTelegramDelivery(alert.watch.chatId, message);
       else await service.markWatchAlert(alert.id, message);
     }
