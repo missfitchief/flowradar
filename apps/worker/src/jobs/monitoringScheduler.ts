@@ -19,6 +19,7 @@ const CORE_SYNC_PROVIDER = 'core_monitoring';
 const CORE_INITIAL_LOOKBACK_MS = 24 * 60 * 60_000;
 const CORE_CURSOR_OVERLAP_MS = 5 * 60_000;
 const CORE_MAX_PAGES = 10;
+const activeCoreGraphExpansions = new Set<string>();
 
 export function coreMonitoringSince(cursor: string | null | undefined, now = new Date()) {
   if (cursor) {
@@ -157,12 +158,6 @@ export async function run(ctx: JobContext): Promise<void> {
           await tracker.fail(error);
           throw error;
         }
-        if (metrics.persistedEvents > 0) {
-          await expandWalletCapitalGraph(prisma, {
-            chain: item.walletChain, walletAddress: item.walletAddress, maxDepth: 4,
-            maxNodes: item.tier === 'root_permanent' ? 100 : 30, maxEventsPerNode: 500
-          });
-        }
         const persisted = await prisma.massTransactionEvent.findMany({
           where: { eventId: { in: classifiedEvents.map((event) => event.eventId) } },
           select: { eventId: true, kind: true, txHash: true }
@@ -174,7 +169,11 @@ export async function run(ctx: JobContext): Promise<void> {
           buyTxHashes: persisted.filter((event) => event.kind === 'token_buy').map((event) => event.txHash).join(',') || null,
           massTrackerRunId: metrics.runId
         });
+        // The provider cursor belongs to ingest, not graph enrichment. Advancing
+        // it only after a potentially expensive graph pass replayed the same
+        // provider window and could starve future Core polling for minutes.
         await persistCoreCursor(prisma, item.walletChain, item.walletAddress, scanStartedAt, null);
+        if (metrics.persistedEvents > 0) queueCoreGraphExpansion(prisma, item, log);
         return { ok: true, events: metrics.persistedEvents };
       } catch (error) {
         await persistCoreCursor(prisma, item.walletChain, item.walletAddress, null, error).catch(() => undefined);
@@ -190,6 +189,30 @@ export async function run(ctx: JobContext): Promise<void> {
     liveErrors = outcomes.filter((outcome) => !outcome.ok).length;
   }
   log?.info('monitoringScheduler pass complete', { ...result, livePolled, liveEvents, liveErrors, byTier: JSON.stringify(result.byTier) });
+}
+
+function queueCoreGraphExpansion(
+  prisma: JobContext['prisma'],
+  item: { walletChain: ChainId; walletAddress: string; tier: string },
+  log?: JobContext['log']
+) {
+  const key = `${item.walletChain}:${item.walletAddress}`;
+  if (activeCoreGraphExpansions.has(key)) return;
+  activeCoreGraphExpansions.add(key);
+  void expandWalletCapitalGraph(prisma, {
+    chain: item.walletChain, walletAddress: item.walletAddress, maxDepth: 4,
+    maxNodes: item.tier === 'root_permanent' ? 100 : 30, maxEventsPerNode: 500
+  }).then((result) => {
+    log?.info('core graph expansion complete', {
+      chain: item.walletChain, wallet: item.walletAddress,
+      relationshipsPersisted: result.relationshipsPersisted
+    });
+  }).catch((error) => {
+    log?.error('core graph expansion failed', {
+      chain: item.walletChain, wallet: item.walletAddress,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }).finally(() => activeCoreGraphExpansions.delete(key));
 }
 
 async function persistCoreCursor(
