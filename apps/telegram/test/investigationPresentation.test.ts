@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { InvestigationMemberIntelligence, InvestigationPath, WalletInvestigationResult } from '@flowradar/db';
 import { buildInvestigationPresentation } from '../src/investigationPresentation';
+import { renderInvestigationReport } from '../src/investigationRenderer';
 
 const SOURCE = '0x0c8300000000000000000000000000000000932d';
 const EXECUTION = '0x0000000000000000000000000000000000000001';
@@ -78,5 +79,26 @@ describe('wallet intelligence presentation', () => {
     expect(presentation.topDeployments).toHaveLength(1);
     expect(presentation.topDeployments[0]?.deployment.intelligence).toMatchObject({ athMcapUsd: 10_000_000, roi: 99 });
     expect(presentation.topDeployments.length).toBeLessThanOrEqual(10);
+  });
+
+  it('renders a bounded five-second hero with no more than three active wallets', () => {
+    const value = investigation();
+    for (let index = 0; index < 5; index += 1) {
+      value.members.push({
+        chain: 'BASE', address: `0x${String(index + 700).padStart(40, '0')}`, role: 'execution_wallet', parentChain: 'BASE',
+        parentAddress: SOURCE, entityKey: 'entity:test', relationshipConfidence: 0.86, evidenceTier: 'repeated_direct_funding',
+        firstLinkedAt: '2026-06-01T00:00:00.000Z', lastLinkedAt: '2026-07-01T00:00:00.000Z', observationOnly: true,
+        intelligence: intel('A', 82 - index, 70 - index, 45)
+      });
+    }
+    const presentation = buildInvestigationPresentation(value);
+    const rendered = renderInvestigationReport(value, { target: SOURCE, investigationView: 'summary', page: 1, pageSize: 5 }, 'session1');
+    expect(rendered.text).toContain('FLOWRADAR INTELLIGENCE');
+    expect(rendered.text).toContain('QUICK VERDICT');
+    expect(rendered.text).toContain('TIMELINE');
+    expect(rendered.text).toContain('WHY THIS MATTERS');
+    expect(rendered.text.length).toBeLessThanOrEqual(4_096);
+    for (const wallet of presentation.topActiveWallets.slice(0, 3)) expect(rendered.text).toContain(wallet.member.address.slice(-6));
+    expect(rendered.text).not.toContain(presentation.topActiveWallets[3]!.member.address.slice(-6));
   });
 });

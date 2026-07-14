@@ -55,11 +55,10 @@ export async function dispatchWatchAlerts(service: OperatorService, api: Telegra
           const rendered = renderIntelligenceAlert(intelligence);
           await api.sendMessage(alert.watch.chatId, rendered.text, rendered.keyboard);
         } else {
-          await api.sendMessage(alert.watch.chatId, '<b>FlowRadar</b>\nSignal receipt is no longer available.');
+          await api.sendMessage(alert.watch.chatId, '📡 <b>FLOWRADAR SIGNAL</b>\n━━━━━━━━━━━━━━━━━━━━\n⚪ Signal receipt is no longer available.');
         }
       } else {
-        const text = `<b>FlowRadar · ${escape(String(alert.alertType))}</b>\n${Object.entries(payload).map(([key, value]) => `${escape(key)}: ${escape(String(value ?? 'n/a'))}`).join('\n')}`;
-        await api.sendMessage(alert.watch.chatId, text);
+        await api.sendMessage(alert.watch.chatId, renderLegacyAlert(alert.alertType, payload));
       }
       await service.markWatchAlert(alert.id);
     } catch (error) {
@@ -71,4 +70,18 @@ export async function dispatchWatchAlerts(service: OperatorService, api: Telegra
 }
 
 function escape(value: string) { return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'); }
+function renderLegacyAlert(type: string, payload: Record<string, unknown>) {
+  const visibleKeys = ['token', 'symbol', 'wallet', 'entity', 'chain', 'amountUsd', 'status'];
+  const details = visibleKeys.flatMap((key) => payload[key] === undefined ? [] : [`${pretty(key)}  <b>${escape(String(payload[key] ?? 'Unknown'))}</b>`]).slice(0, 5);
+  return [
+    '📡 <b>FLOWRADAR MONITOR</b>',
+    '━━━━━━━━━━━━━━━━━━━━',
+    `⚠️ <b>${escape(pretty(type).toUpperCase())}</b>`,
+    '',
+    ...(details.length ? details : ['⚪ No structured intelligence details are available.']),
+    '',
+    '<i>Legacy monitor event · no ownership conclusion implied.</i>'
+  ].join('\n');
+}
+function pretty(value: string) { return value.replace(/([A-Z])/g, ' $1').replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()).trim(); }
 function delay(ms: number, signal?: AbortSignal) { return new Promise<void>((resolve) => { const timer = setTimeout(resolve, ms); signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); }); }

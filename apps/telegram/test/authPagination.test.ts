@@ -16,6 +16,6 @@ describe('Telegram authorization and callback pagination', () => {
     expect(Buffer.byteLength(value)).toBeLessThanOrEqual(64);
     const keyboard = navKeyboard('cm123', 2, true);
     expect(keyboard.inline_keyboard[0]).toHaveLength(2);
-    expect(keyboard.inline_keyboard.at(-1)?.map((x) => x.text)).toEqual(['Izvoz']);
+    expect(keyboard.inline_keyboard.at(-1)?.map((x) => x.text)).toEqual(['📦 Export']);
   });
 });

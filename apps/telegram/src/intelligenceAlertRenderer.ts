@@ -3,6 +3,7 @@ import type { InlineKeyboard } from './types';
 
 type AdaptiveAlert = NonNullable<Awaited<ReturnType<OperatorService['intelligenceAlert']>>>;
 type AdaptiveAlertView = 'summary' | 'why' | 'evidence' | 'history' | 'outcomes' | 'path' | 'risk';
+const DIVIDER = '━━━━━━━━━━━━━━━━━━━━';
 
 export function renderIntelligenceAlert(data: AdaptiveAlert, view: AdaptiveAlertView = 'summary'): { text: string; keyboard: InlineKeyboard } {
   if (!data.signal) return renderLegacy(data);
@@ -25,30 +26,37 @@ export function renderIntelligenceAlert(data: AdaptiveAlert, view: AdaptiveAlert
   const riskFailed = quality?.reasonCodes.filter((code) => code.includes('fail') || code.includes('risk') || code.includes('unknown')).slice(0, 5) ?? [];
   const invalidation = invalidationConditions(quality?.reasonCodes ?? []);
   const text = [
-    `<b>FlowRadar · ${h(tier)}</b>`,
-    `<b>${h(token)}</b> · ${h(signal.chain)}`,
+    DIVIDER,
+    '📡 <b>FLOWRADAR SIGNAL</b>',
+    DIVIDER,
+    `${signalIcon(tier)} <b>${h(tier)}</b>`,
+    '',
+    `🎯 <b>${h(token)}</b>  ·  ${h(signal.chain)}`,
     `<code>${h(signal.tokenAddress)}</code>`,
     '',
-    `<b>Why</b>`,
-    ...signal.reasons.slice(0, 4).map((reason) => `• ${h(reason)}`),
+    '📊 <b>INTELLIGENCE</b>',
+    `${scoreIcon(signal.score)} Signal confidence  <b>${Math.round(signal.score)}/100</b>`,
+    `${quality ? (quality.passed ? '🟢' : '🟡') : '⚪'} Token quality  <b>${quality ? Math.round(quality.score) : 'Unknown'}</b>  ·  ${quality?.passed ? 'PASS' : 'BLOCKED'}`,
     '',
-    `<b>Activation</b>`,
-    `Entities: ${signal.independentEntityCount} independent · capital roots: ${signal.independentCapitalRootCount}`,
-    `Wallets: ${signal.coreWalletCount} core · ${signal.peripheralWalletCount} peripheral`,
-    ...(activeCore.length ? [`Core active: ${activeCore.map(short).join(', ')}`] : []),
-    `Dormant awakened: ${dormantAwakened.length} · funding→execution→buy: ${fundingSequences ? 'yes' : 'no'}`,
-    `Confidence: ${Math.round(signal.score)} / 100`,
+    '💡 <b>WHY THIS MATTERS</b>',
+    ...signal.reasons.slice(0, 4).map((reason) => `✓ ${h(reason)}`),
+    '',
+    '🧩 <b>CLUSTER ACTIVATION</b>',
+    `🧠 Independent entities  <b>${signal.independentEntityCount}</b>  ·  Capital roots  <b>${signal.independentCapitalRootCount}</b>`,
+    `👑 Core wallets  <b>${signal.coreWalletCount}</b>  ·  Peripheral  <b>${signal.peripheralWalletCount}</b>`,
+    ...(activeCore.length ? [`Active core  ${activeCore.map(short).join('  ·  ')}`] : []),
+    `😴 Dormant awakened  <b>${dormantAwakened.length}</b>  ·  Funding → execution → buy  <b>${fundingSequences ? 'Yes' : 'No'}</b>`,
     ...entitySummary(data),
     '',
-    `<b>Risk gate</b>`,
-    quality ? `${quality.passed ? 'PASS' : 'BLOCKED'} · ${Math.round(quality.score)}/100 · coverage ${h(quality.coverage)}` : 'BLOCKED · quality assessment unavailable',
-    ...(riskPassed.length ? [`Passed: ${h(riskPassed.join(', '))}`] : []),
-    ...(riskFailed.length ? [`Open/failed: ${h(riskFailed.join(', '))}`] : []),
+    '🛡 <b>RISK GATE</b>',
+    quality ? `${quality.passed ? '🟢 PASS' : '🟡 BLOCKED'}  ·  ${Math.round(quality.score)}/100  ·  coverage ${h(quality.coverage)}` : '⚪ BLOCKED  ·  quality assessment unavailable',
+    ...(riskPassed.length ? [`✓ ${h(riskPassed.map(pretty).join('  ·  '))}`] : []),
+    ...(riskFailed.length ? [`• Open: ${h(riskFailed.map(pretty).join('  ·  '))}`] : []),
     '',
-    `<b>Invalidation</b>`,
+    '⚠️ <b>INVALIDATION</b>',
     ...invalidation.map((row) => `• ${h(row)}`),
     '',
-    `<b>Outcome</b> ${h(signal.outcomeLabel?.label ?? signal.outcomeStatus)}${signal.outcomeLabel ? ` · ${h(signal.outcomeLabel.basisHorizon)}` : ''}`,
+    `📈 <b>Outcome</b>  ${h(signal.outcomeLabel?.label ?? signal.outcomeStatus)}${signal.outcomeLabel ? `  ·  ${h(signal.outcomeLabel.basisHorizon)}` : ''}`,
     '<i>Research intelligence only · no automatic execution.</i>'
   ].join('\n');
   return { text, keyboard: keyboard(data.alert.id, 'summary') };
@@ -135,23 +143,24 @@ function riskLines(data: AdaptiveAlert) {
 }
 
 function detail(data: AdaptiveAlert, title: string, lines: string[], view: AdaptiveAlertView) {
+  const icon = view === 'evidence' ? '🛡' : view === 'why' ? '💡' : view === 'path' ? '💸' : view === 'risk' ? '⚠️' : view === 'history' ? '📜' : '📈';
   return {
-    text: [`<b>${h(title)}</b>`, ...lines.map((line) => h(line))].join('\n'),
+    text: [`${icon} <b>${h(title.toUpperCase())}</b>`, DIVIDER, '<i>Production signal receipt · existing intelligence only.</i>', '', ...lines.map((line) => h(line))].join('\n'),
     keyboard: keyboard(data.alert.id, view)
   };
 }
 
 function keyboard(alertId: string, view: AdaptiveAlertView): InlineKeyboard {
-  if (view !== 'summary') return { inline_keyboard: [[{ text: 'Back', callback_data: alertCallback('summary', alertId) }]] };
+  if (view !== 'summary') return { inline_keyboard: [[{ text: '← Back', callback_data: alertCallback('summary', alertId) }]] };
   return { inline_keyboard: [
-    [{ text: 'Evidence', callback_data: alertCallback('evidence', alertId) }, { text: 'Why this signal', callback_data: alertCallback('why', alertId) }],
-    [{ text: 'Capital path', callback_data: alertCallback('path', alertId) }, { text: 'Token risk', callback_data: alertCallback('risk', alertId) }],
-    [{ text: 'Full entity history', callback_data: alertCallback('history', alertId) }, { text: 'Outcome tracking', callback_data: alertCallback('outcomes', alertId) }]
+    [{ text: '🛡 Evidence', callback_data: alertCallback('evidence', alertId) }, { text: '💡 Why', callback_data: alertCallback('why', alertId) }],
+    [{ text: '💸 Capital Path', callback_data: alertCallback('path', alertId) }, { text: '⚠️ Token Risk', callback_data: alertCallback('risk', alertId) }],
+    [{ text: '📜 Entity History', callback_data: alertCallback('history', alertId) }, { text: '📈 Outcomes', callback_data: alertCallback('outcomes', alertId) }]
   ] };
 }
 
 function renderLegacy(data: AdaptiveAlert) {
-  return { text: `<b>FlowRadar · ${h(data.alert.alertType)}</b>\nAdaptive signal receipt unavailable for this legacy alert.`, keyboard: { inline_keyboard: [] } };
+  return { text: `📡 <b>FLOWRADAR SIGNAL</b>\n${DIVIDER}\n${h(pretty(data.alert.alertType))}\n\n⚪ Adaptive signal receipt unavailable for this legacy alert.`, keyboard: { inline_keyboard: [] } };
 }
 export function parseIntelligenceAlertCallback(value: string | undefined): { view: AdaptiveAlertView; alertId: string } | null {
   const parts = value?.split('|');
@@ -182,3 +191,5 @@ function record(value: unknown): Record<string, unknown> { return value && typeo
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function stringValue(value: unknown) { return typeof value === 'string' ? value : null; }
 function number(value: unknown) { return typeof value === 'number' && Number.isFinite(value) ? value : null; }
+function signalIcon(value: string) { if (value === 'BUY CANDIDATE' || value.includes('HIGH')) return '🔥'; if (value.includes('WATCH') || value.includes('OPPORTUNITY')) return '⚠️'; return '⚪'; }
+function scoreIcon(value: number) { return value >= 80 ? '🟢' : value >= 55 ? '🟡' : '🔴'; }

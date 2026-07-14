@@ -21,11 +21,11 @@ describe('adaptive intelligence Telegram alert', () => {
     } as never);
 
     expect(rendered.text).toContain('HIGH CONVICTION');
-    expect(rendered.text).toContain('Entities: 2 independent');
-    expect(rendered.text).toContain('BLOCKED · 74/100');
-    expect(rendered.text).toContain('Invalidation');
+    expect(rendered.text).toContain('Independent entities  <b>2</b>');
+    expect(rendered.text).toContain('BLOCKED  ·  74/100');
+    expect(rendered.text).toContain('INVALIDATION');
     const labels = rendered.keyboard.inline_keyboard.flat().map((button) => button.text);
-    expect(labels).toEqual(expect.arrayContaining(['Evidence', 'Why this signal', 'Capital path', 'Token risk', 'Full entity history', 'Outcome tracking']));
+    expect(labels).toEqual(expect.arrayContaining(['🛡 Evidence', '💡 Why', '💸 Capital Path', '⚠️ Token Risk', '📜 Entity History', '📈 Outcomes']));
     expect(parseIntelligenceAlertCallback('ia|outcomes|alert-cuid-123')).toEqual({ view: 'outcomes', alertId: 'alert-cuid-123' });
   });
 });

@@ -57,7 +57,7 @@ describe('Telegram command handlers', () => {
     const service = { profitable: vi.fn() } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 1, message: { message_id: 1, from: { id: 999 }, chat: { id: 999, type: 'private' }, text: '/profitable' } });
     expect(service.profitable).not.toHaveBeenCalled();
-    expect(api.sendMessage).toHaveBeenCalledWith('999', '<b>Unauthorized.</b>');
+    expect(api.sendMessage).toHaveBeenCalledWith('999', '🔴 <b>ACCESS DENIED</b>');
   });
 
   it('prompts for a wallet and persists the pending action', async () => {
@@ -65,7 +65,7 @@ describe('Telegram command handlers', () => {
     const service = { setPendingSession: vi.fn().mockResolvedValue({ id: 'pending1' }) } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 1, message: { message_id: 1, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/wallet' } });
     expect(service.setPendingSession).toHaveBeenCalledWith('123', '123', 'wallet', 10);
-    expect(api.sendMessage).toHaveBeenCalledWith('123', 'Pošalji wallet adresu.', expect.objectContaining({ inline_keyboard: expect.any(Array) }));
+    expect(api.sendMessage).toHaveBeenCalledWith('123', expect.stringContaining('Pošalji wallet adresu.'), expect.objectContaining({ inline_keyboard: expect.any(Array) }));
   });
 
   it('acknowledges a pending wallet immediately, moves the state, and completes the investigation asynchronously', async () => {
@@ -82,19 +82,21 @@ describe('Telegram command handlers', () => {
     expect(service.createSession).toHaveBeenCalledWith('123', '123', 'wallet', expect.objectContaining({ target: ADDRESS, investigationStatus: 'queued' }));
     expect(service.clearPendingSession).toHaveBeenCalledWith('123', '123');
     expect(vi.mocked(api.sendMessage).mock.calls.map((call) => call[1])).toEqual([
-      'Wallet primljen. Pokrećem analizu…',
-      'Wallet Investigation je pokrenut. Skeniram stvarne on-chain tokove kapitala; rezultat će stići ovde po završetku.'
+      expect.stringContaining('✓ Wallet received'),
+      expect.stringContaining('🔄 Investigation running')
     ]);
     await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4, refresh: true }));
     resolveInvestigation(investigation());
     await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(3));
     expect(service.updateSession).toHaveBeenCalledWith('session1', '123', '123', expect.objectContaining({ investigationId: 'investigation1', investigationStatus: 'completed', investigationView: 'summary', pageSize: 5 }));
     const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[2]!;
-    expect(text).toContain('<b>WALLET INVESTIGATION</b>');
+    expect(text).toContain('<b>FLOWRADAR INTELLIGENCE</b>');
+    expect(text).toContain('<b>QUICK VERDICT</b>');
+    expect(text).toContain('<b>TIMELINE</b>');
     expect(text).toContain('<code>111111…111111</code>');
     expect(text).not.toContain('Wallet DNA');
     expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual([
-      '💸 Capital Paths', '🧩 Cluster', '🚀 Deployments', '🛡 Evidence', '🔄 Refresh', '📡 Watch', '🕰 Entity History', '📊 Outcomes'
+      '💸 Capital Paths', '🧩 Cluster', '🚀 Deployments', '🛡 Evidence', '🔄 Refresh', '👁 Watch Cluster', '🕰 Entity History', '📊 Outcomes'
     ]);
   });
 
@@ -119,7 +121,7 @@ describe('Telegram command handlers', () => {
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 21, message: { message_id: 21, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: ADDRESS } });
     await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(3));
-    expect(vi.mocked(api.sendMessage).mock.calls[2]?.[1]).toContain('Wallet Investigation nije uspela');
+    expect(vi.mocked(api.sendMessage).mock.calls[2]?.[1]).toContain('INVESTIGATION FAILED');
     expect(vi.mocked(api.sendMessage).mock.calls[2]?.[1]).toContain('provider timeout');
     expect(service.updateSession).toHaveBeenCalledWith('session-failed', '123', '123', expect.objectContaining({ investigationStatus: 'failed', investigationError: 'provider timeout' }));
   });
@@ -133,8 +135,8 @@ describe('Telegram command handlers', () => {
     expect(await resumeWalletInvestigationJobs(service, api)).toBe(1);
     await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4, refresh: true }));
     await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('nastavljen nakon restarta');
-    expect(vi.mocked(api.sendMessage).mock.calls[1]?.[1]).toContain('WALLET INVESTIGATION');
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Runtime resumed');
+    expect(vi.mocked(api.sendMessage).mock.calls[1]?.[1]).toContain('FLOWRADAR INTELLIGENCE');
   });
 
   it.each([
@@ -178,7 +180,7 @@ describe('Telegram command handlers', () => {
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 5, callback_query: { id: 'cb-refresh', from: { id: 123 }, data: 'v1|refresh|session1|run', message: { message_id: 5, chat: { id: 123, type: 'private' }, text: 'old summary' } } });
     expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain('REFRESHING INTELLIGENCE');
     await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4, refresh: true }));
-    await vi.waitFor(() => expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('WALLET INVESTIGATION'))).toBe(true));
+    await vi.waitFor(() => expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('FLOWRADAR INTELLIGENCE'))).toBe(true));
     expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('✅ Done.'))).toBe(true);
   });
 
@@ -193,7 +195,7 @@ describe('Telegram command handlers', () => {
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 51, callback_query: { id: 'cb-watch', from: { id: 123 }, data: 'v1|watch|session1|cluster', message: { message_id: 51, chat: { id: 123, type: 'private' }, text: 'summary' } } });
     expect(service.watch).toHaveBeenCalledWith('123', '123', 'entity:1');
     expect(api.answerCallbackQuery).toHaveBeenCalledWith('cb-watch', 'Cluster added to monitoring');
-    expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain('CLUSTER ADDED TO MONITORING');
+    expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain('MONITORING ENABLED');
   });
 
   it.each([
@@ -201,7 +203,7 @@ describe('Telegram command handlers', () => {
     ['deployments', 'TOP DEPLOYMENTS'],
     ['evidence', 'EVIDENCE DESK'],
     ['history', 'ENTITY HISTORY'],
-    ['outcomes', 'OUTCOMES & CALIBRATION']
+    ['outcomes', 'OUTCOMES']
   ])('renders the %s intelligence screen from persisted real fields', async (view, heading) => {
     const api = apiMock();
     const service = {
@@ -233,7 +235,7 @@ describe('Telegram command handlers', () => {
     await handler({ update_id: 6, message: { message_id: 6, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/cancel' } });
     await handler({ update_id: 7, callback_query: { id: 'cb1', from: { id: 123 }, data: 'v1|cancel|pending1|pending', message: { message_id: 7, chat: { id: 123, type: 'private' }, text: 'Pošalji wallet adresu.' } } });
     expect(service.clearPendingSession).toHaveBeenCalledTimes(2);
-    expect(api.editMessage).toHaveBeenCalledWith('123', 7, 'Otkazano.', { inline_keyboard: [] });
+    expect(api.editMessage).toHaveBeenCalledWith('123', 7, '✓ <b>Action cancelled.</b>', { inline_keyboard: [] });
   });
 
   it('offers wallet/token choice for an ambiguous direct address', async () => {
@@ -252,7 +254,7 @@ describe('Telegram command handlers', () => {
       tokenSummary: vi.fn().mockResolvedValue({ topPnl: { items: [], page: 1, pageSize: 10, total: 0, hasNext: false } })
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 9, message: { message_id: 9, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
-    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toBe('Nije pronađen nijedan top-PnL wallet za ovaj token.');
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Nije pronađen nijedan top-PnL wallet za ovaj token.');
   });
 
   it('does not edit an unchanged Telegram message', async () => {
@@ -262,7 +264,7 @@ describe('Telegram command handlers', () => {
       clearPendingSession: vi.fn(), getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'recent', stateJson: { page: 1, pageSize: 10 } }),
       updateSession: vi.fn().mockResolvedValue(true), recent: vi.fn().mockResolvedValue({ items: [], page: 1, pageSize: 10, total: 0, hasNext: false, coverageWarnings: [] })
     } as unknown as OperatorService;
-    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 10, callback_query: { id: 'cb2', from: { id: 123 }, data: 'v1|exportback|session1|result', message: { message_id: 10, chat: { id: 123, type: 'private' }, text: 'Recent relevant events · page 1 · 0 total', reply_markup: keyboard } } });
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 10, callback_query: { id: 'cb2', from: { id: 123 }, data: 'v1|exportback|session1|result', message: { message_id: 10, chat: { id: 123, type: 'private' }, text: '📡 LIVE INTELLIGENCE FEED\n━━━━━━━━━━━━━━━━━━━━\nRelevant events 0  ·  Page 1', reply_markup: keyboard } } });
     expect(api.editMessage).not.toHaveBeenCalled();
     expect(api.answerCallbackQuery).toHaveBeenCalledWith('cb2');
   });

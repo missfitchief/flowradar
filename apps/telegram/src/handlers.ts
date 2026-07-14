@@ -22,8 +22,11 @@ const COMMANDS = [
   { command: 'cancel', description: 'Cancel pending input' }
 ];
 const PENDING_PROMPTS: Partial<Record<OperatorWorkflow, string>> = {
-  wallet: 'Pošalji wallet adresu.', token: 'Pošalji token CA.', entity: 'Pošalji wallet ili entity ID.',
-  flow: 'Pošalji wallet ili entity.', bridges: 'Pošalji wallet ili entity.'
+  wallet: '👛 <b>WALLET INVESTIGATION</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji wallet adresu.\n<i>Solana ili EVM · input ostaje aktivan 10 minuta.</i>',
+  token: '🎯 <b>TOKEN INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji token CA.\n<i>FlowRadar će pokrenuti stvarni top-PnL scan.</i>',
+  entity: '🧠 <b>ENTITY INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji wallet ili entity ID.',
+  flow: '💸 <b>CAPITAL PATHS</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji wallet ili entity.',
+  bridges: '🌉 <b>BRIDGE INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji wallet ili entity.'
 };
 const INVESTIGATION_WORKFLOWS = new Set<OperatorWorkflow>(['wallet', 'entity', 'flow', 'bridges']);
 const EMPTY_KEYBOARD: InlineKeyboard = { inline_keyboard: [] };
@@ -40,14 +43,14 @@ export function createUpdateHandler(service: OperatorService, api: TelegramApi, 
 
 async function handleMessage(service: OperatorService, api: TelegramApi, allowed: ReadonlySet<string>, message: TelegramMessage) {
   const chatId = String(message.chat.id);
-  if (!isAuthorized(allowed, message.from?.id)) { await api.sendMessage(chatId, '<b>Unauthorized.</b>'); return; }
+  if (!isAuthorized(allowed, message.from?.id)) { await api.sendMessage(chatId, '🔴 <b>ACCESS DENIED</b>'); return; }
   const userId = String(message.from!.id);
   const text = (message.text ?? '').trim();
   const { command, argument } = parseCommand(text);
 
   if (command === 'cancel') {
     await service.clearPendingSession(userId, chatId);
-    await api.sendMessage(chatId, 'Otkazano.');
+    await api.sendMessage(chatId, '✓ <b>Action cancelled.</b>');
     return;
   }
   if (command === 'start' || command === 'help') {
@@ -60,7 +63,13 @@ async function handleMessage(service: OperatorService, api: TelegramApi, allowed
       if (command === 'watch') {
         if (!argument) throw new Error('Pošalji wallet ili entity ID.');
         const watch = await service.watch(userId, chatId, argument);
-        await api.sendMessage(chatId, `<b>Watch enabled</b>\n${h(watch.targetType)}: <code>${h(watch.targetKey)}</code>\nNoise events are suppressed.`);
+        await api.sendMessage(chatId, [
+          '✅ <b>MONITORING ENABLED</b>', '━━━━━━━━━━━━━━━━━━━━',
+          `Target  <code>${h(watch.targetKey)}</code>`,
+          `Type  <b>${h(watch.targetType)}</b>`,
+          '', '👁 Funding · buys · bridges · dormant wake-ups',
+          '<i>Low-value infrastructure noise remains suppressed.</i>'
+        ].join('\n'));
         return;
       }
       if (!['wallet', 'token', 'profitable', 'entity', 'flow', 'bridges', 'recent'].includes(command)) throw new Error('Unknown command. Use /start.');
@@ -77,7 +86,7 @@ async function handleMessage(service: OperatorService, api: TelegramApi, allowed
       await service.clearPendingSession(userId, chatId);
       await sendWorkflow(service, api, userId, chatId, workflow, argument || undefined);
     } catch (error) {
-      await api.sendMessage(chatId, `<b>Request failed</b>\n${h(errorMessage(error))}`);
+      await api.sendMessage(chatId, requestFailure(error));
     }
     return;
   }
@@ -102,17 +111,17 @@ async function handleMessage(service: OperatorService, api: TelegramApi, allowed
     }
     if (classification === 'ambiguous') {
       const session = await service.createSession(userId, chatId, 'wallet', defaultState(text));
-      await api.sendMessage(chatId, 'Adresa može biti wallet ili token. Kako želiš da je analiziram?', {
+      await api.sendMessage(chatId, '🧭 <b>ADDRESS DETECTED</b>\n━━━━━━━━━━━━━━━━━━━━\nAdresa može biti wallet ili token. Izaberi analizu:', {
         inline_keyboard: [[
           { text: 'Analiziraj kao wallet', callback_data: callback('choose', session.id, 'wallet') },
           { text: 'Analiziraj kao token', callback_data: callback('choose', session.id, 'token') }
-        ], [{ text: 'Back', callback_data: callback('cancel', session.id, 'input') }]]
+        ], [{ text: '← Cancel', callback_data: callback('cancel', session.id, 'input') }]]
       });
       return;
     }
-    await api.sendMessage(chatId, 'Adresa nije prepoznata. Pošalji validnu Solana ili EVM adresu, ili izaberi komandu iz /start.');
+    await api.sendMessage(chatId, '🔴 <b>ADDRESS NOT RECOGNIZED</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji validnu Solana ili EVM adresu, ili otvori <code>/start</code>.');
   } catch (error) {
-    await api.sendMessage(chatId, `<b>Request failed</b>\n${h(errorMessage(error))}`);
+    await api.sendMessage(chatId, requestFailure(error));
   }
 }
 
@@ -133,8 +142,8 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
   if (!parsed) { await api.answerCallbackQuery(query.id, 'Expired or invalid action'); return; }
   await service.clearPendingSession(userId, chatId);
   if (parsed.action === 'cancel') {
-    await editIfChanged(api, query, 'Otkazano.', EMPTY_KEYBOARD);
-    await api.answerCallbackQuery(query.id, 'Otkazano');
+    await editIfChanged(api, query, '✓ <b>Action cancelled.</b>', EMPTY_KEYBOARD);
+    await api.answerCallbackQuery(query.id, 'Cancelled');
     return;
   }
   const session = await service.getSession(parsed.sessionId, userId, chatId);
@@ -147,9 +156,9 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
       if (workflow === 'wallet') nextState.investigationStatus = 'queued';
       const next = await service.createSession(userId, chatId, workflow, nextState);
       if (workflow === 'wallet') {
-        await editIfChanged(api, query, 'Wallet primljen. Pokrećem analizu…', EMPTY_KEYBOARD);
+        await editIfChanged(api, query, walletProgress(nextState.target ?? '', 'received'), EMPTY_KEYBOARD);
         enqueueWalletInvestigation(service, api, userId, chatId, nextState, next.id);
-        await api.sendMessage(chatId, 'Wallet Investigation je pokrenut. Skeniram stvarne on-chain tokove kapitala; rezultat će stići ovde po završetku.');
+        await api.sendMessage(chatId, walletProgress(nextState.target ?? '', 'running'));
         await api.answerCallbackQuery(query.id, 'Investigation started');
         return;
       }
@@ -159,7 +168,7 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
       return;
     }
     if (parsed.action === 'exportmenu') {
-      await editIfChanged(api, query, `${h(query.message?.text ?? 'FlowRadar result')}\n\n<b>Izvoz</b>\nIzaberi format.`, exportKeyboard(session.id));
+      await editIfChanged(api, query, '📦 <b>EXPORT</b>\n━━━━━━━━━━━━━━━━━━━━\nIzaberi format za trenutni intelligence prikaz.\n\n<i>Export ostaje odvojen od glavnog izveštaja.</i>', exportKeyboard(session.id));
       await api.answerCallbackQuery(query.id);
       return;
     }
@@ -246,11 +255,11 @@ async function sendWorkflow(service: OperatorService, api: TelegramApi, userId: 
   if (workflow === 'wallet') state.investigationStatus = 'queued';
   const session = await service.createSession(userId, chatId, workflow, state);
   if (workflow === 'wallet') {
-    await api.sendMessage(chatId, 'Wallet primljen. Pokrećem analizu…');
+    await api.sendMessage(chatId, walletProgress(target ?? '', 'received'));
     console.info(`[telegram] wallet acknowledgement delivered session=${session.id} target=${target ?? ''}`);
     await service.clearPendingSession(userId, chatId);
     enqueueWalletInvestigation(service, api, userId, chatId, state, session.id);
-    await api.sendMessage(chatId, 'Wallet Investigation je pokrenut. Skeniram stvarne on-chain tokove kapitala; rezultat će stići ovde po završetku.');
+    await api.sendMessage(chatId, walletProgress(target ?? '', 'running'));
     console.info(`[telegram] wallet progress delivered session=${session.id} target=${target ?? ''}`);
     return;
   }
@@ -356,7 +365,7 @@ async function executeWalletInvestigation(
     state.investigationStatus = 'running';
     state.investigationError = undefined;
     await service.updateSession(sessionId, userId, chatId, state);
-    if (resumed) await api.sendMessage(chatId, 'Wallet Investigation je nastavljen nakon restarta procesa.');
+    if (resumed) await api.sendMessage(chatId, walletProgress(target, 'resumed'));
     console.info(`[telegram] wallet investigation started session=${sessionId} target=${target}`);
     await runInvestigationWorkflow(service, api, userId, chatId, 'wallet', state, sessionId);
     console.info(`[telegram] wallet investigation completed session=${sessionId} target=${target}`);
@@ -367,7 +376,7 @@ async function executeWalletInvestigation(
     await service.updateSession(sessionId, userId, chatId, state).catch(() => false);
     console.error(`[telegram] wallet investigation failed session=${sessionId} target=${target}: ${message}`);
     try {
-      await api.sendMessage(chatId, `<b>Wallet Investigation nije uspela</b>\n${h(message)}\nPokušaj ponovo komandom <code>/wallet</code>.`);
+      await api.sendMessage(chatId, `🔴 <b>INVESTIGATION FAILED</b>\n━━━━━━━━━━━━━━━━━━━━\n${h(message)}\n\n<i>Pokreni novu analizu komandom <code>/wallet</code>.</i>`);
     } catch (deliveryError) {
       console.error(`[telegram] wallet investigation failure notice could not be delivered session=${sessionId}: ${errorMessage(deliveryError)}`);
     }
@@ -423,9 +432,19 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
     await service.scanTokenTopPnl(tokenAddress);
     const value = await service.tokenSummary(tokenAddress, 1, 10, 'pnl');
     const rows = value.topPnl.items.slice(0, 10) as TokenPnlTelegramRow[];
-    if (!rows.length) return { text: 'Nije pronađen nijedan top-PnL wallet za ovaj token.', keyboard: EMPTY_KEYBOARD };
+    if (!rows.length) return {
+      text: `🎯 <b>TOKEN INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\n<code>${h(tokenAddress)}</code>\n\n⚪ Nije pronađen nijedan top-PnL wallet za ovaj token.`,
+      keyboard: EMPTY_KEYBOARD
+    };
     return {
-      text: [`<b>TOP 10 PNL WALLETS — ${h(tokenAddress)}</b>`, ...rows.map(renderTokenPnlWallet)].join('\n\n'),
+      text: [
+        '🎯 <b>FLOWRADAR TOKEN INTELLIGENCE</b>',
+        '━━━━━━━━━━━━━━━━━━━━',
+        `<code>${h(tokenAddress)}</code>`,
+        '',
+        `📈 <b>TOP PNL WALLETS</b>  ·  ${rows.length} found`,
+        ...rows.map(renderTokenPnlWallet)
+      ].join('\n\n'),
       keyboard: tokenPnlKeyboard(rows)
     };
   }
@@ -434,7 +453,18 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
     return { text: renderProfitable(value), keyboard: navKeyboard(sessionId, page, value.hasNext, [[{ text: 'PnL', callback_data: callback('sort', sessionId, 'pnl') }, { text: 'WR', callback_data: callback('sort', sessionId, 'win_rate') }, { text: 'EV', callback_data: callback('sort', sessionId, 'ev') }], [{ text: 'SOL', callback_data: callback('filter', sessionId, 'SOLANA') }, { text: 'ETH', callback_data: callback('filter', sessionId, 'ETHEREUM') }, { text: 'Base', callback_data: callback('filter', sessionId, 'BASE') }], [{ text: 'ARB', callback_data: callback('filter', sessionId, 'ARBITRUM') }, { text: 'BSC', callback_data: callback('filter', sessionId, 'BSC') }, { text: 'All', callback_data: callback('filter', sessionId, 'ALL') }]]) };
   }
   const value = await service.recent(page, size);
-  const text = [`<b>Recent relevant events</b> · page ${page} · ${value.total} total`, ...value.items.map((row) => `${h(row.chain)} <b>${h(row.kind)}</b> ${h(short(row.source))}→${h(short(row.destination))} · ${h(row.amountUsd ?? 'n/a')} · score ${h(row.score)}`)].join('\n');
+  const text = [
+    '📡 <b>LIVE INTELLIGENCE FEED</b>',
+    '━━━━━━━━━━━━━━━━━━━━',
+    `Relevant events <b>${value.total}</b>  ·  Page <b>${page}</b>`,
+    ...value.items.map((row, index) => [
+      '',
+      `${(page - 1) * size + index + 1}. ${eventIcon(row.kind)} <b>${h(prettyLabel(row.kind))}</b>  ·  ${h(row.chain)}`,
+      `<code>${h(short(row.source))}</code>  →  <code>${h(short(row.destination))}</code>`,
+      `💰 ${plainMoney(row.amountUsd)}  ·  🛡 score ${h(row.score)}`
+    ].join('\n')),
+    ...(value.coverageWarnings.length ? ['', `🟡 <i>${value.coverageWarnings.map(h).join(' ')}</i>`] : [])
+  ].join('\n');
   return { text, keyboard: navKeyboard(sessionId, page, value.hasNext) };
 }
 
@@ -882,12 +912,12 @@ async function editIfChanged(api: TelegramApi, query: TelegramCallbackQuery, tex
 function htmlToPlain(value: string) {
   return value.replace(/<[^>]+>/g, '').replaceAll('&quot;', '"').replaceAll('&gt;', '>').replaceAll('&lt;', '<').replaceAll('&amp;', '&');
 }
-function pendingKeyboard(sessionId: string): InlineKeyboard { return { inline_keyboard: [[{ text: 'Back', callback_data: callback('cancel', sessionId, 'pending') }]] }; }
+function pendingKeyboard(sessionId: string): InlineKeyboard { return { inline_keyboard: [[{ text: '← Cancel', callback_data: callback('cancel', sessionId, 'pending') }]] }; }
 function defaultState(target?: string): OperatorSessionState { return { target, chain: 'ALL', sort: 'pnl', page: 1, pageSize: 10 }; }
 function invalidTargetMessage(workflow: OperatorWorkflow) {
-  if (workflow === 'token') return 'Token CA nije validan. Pošalji validan token CA.';
-  if (workflow === 'wallet') return 'Wallet adresa nije validna. Pošalji Solana base58 adresu (32–44 znaka) ili EVM 0x adresu (40 hex znakova).';
-  return 'Vrednost nije validna. Pošalji validan wallet ili postojeći entity ID.';
+  if (workflow === 'token') return '🔴 <b>INVALID TOKEN CA</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji validan token contract address.';
+  if (workflow === 'wallet') return '🔴 <b>INVALID WALLET</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji Solana base58 adresu (32–44 znaka) ili EVM <code>0x</code> adresu (40 hex znakova).';
+  return '🔴 <b>INVALID TARGET</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji validan wallet ili postojeći entity ID.';
 }
 function workflowView(workflow: OperatorWorkflow): OperatorSessionState['investigationView'] {
   if (workflow === 'flow') return 'priority';
@@ -939,15 +969,16 @@ interface TokenPnlTelegramRow {
 }
 function renderTokenPnlWallet(row: TokenPnlTelegramRow, index: number) {
   const dormancy = row.dormancy && Object.values(row.dormancy).some((value) => value !== null)
-    ? `Dormancy 7d/14d/30d/90d: ${dormancyFlag(row.dormancy.days7)}/${dormancyFlag(row.dormancy.days14)}/${dormancyFlag(row.dormancy.days30)}/${dormancyFlag(row.dormancy.days90)}`
+    ? `💤 7/14/30/90d  ${dormancyFlag(row.dormancy.days7)}/${dormancyFlag(row.dormancy.days14)}/${dormancyFlag(row.dormancy.days30)}/${dormancyFlag(row.dormancy.days90)}`
     : null;
+  const medal = ['🥇', '🥈', '🥉'][index] ?? `${index + 1}.`;
   return [
-    `${index + 1}. <b>${signedMoney(row.realizedPnlUsd)} PnL · ${roi(row.roi)} ROI</b>`,
+    `${medal} <b>${signedMoney(row.realizedPnlUsd)}</b> PnL  ·  <b>${roi(row.roi)}</b> ROI`,
     `<code>${h(row.walletAddress)}</code>`,
-    `Bought ${plainMoney(row.boughtUsd)} · Sold ${plainMoney(row.soldUsd)} · Remaining ${plainMoney(row.remainingPositionUsd)}`,
-    `Entry ${h(row.firstBuyTs ?? 'n/a')}`,
+    `Capital  ${plainMoney(row.boughtUsd)} in  →  ${plainMoney(row.soldUsd)} out`,
+    `Position  ${plainMoney(row.remainingPositionUsd)}  ·  Entry ${h(compactDate(row.firstBuyTs))}`,
     dormancy,
-    `Validation: ${h(tokenValidation(row.validation))}`
+    `${validationIcon(row.validation)} ${h(tokenValidation(row.validation))}`
   ].filter(Boolean).join('\n');
 }
 function tokenValidation(value: string) {
@@ -955,10 +986,11 @@ function tokenValidation(value: string) {
   if (value === 'provider_only') return 'provider only';
   return 'incomplete';
 }
+function validationIcon(value: string) { return value === 'locally_verified' ? '🟢' : value === 'provider_only' ? '🟡' : '⚪'; }
 function tokenPnlKeyboard(rows: TokenPnlTelegramRow[]): InlineKeyboard {
-  return { inline_keyboard: rows.map((row) => [
-    { text: 'Copy wallet', copy_text: { text: row.walletAddress } },
-    { text: 'Explorer', url: walletExplorer(row.chain, row.walletAddress) }
+  return { inline_keyboard: rows.map((row, index) => [
+    { text: `Copy #${index + 1}`, copy_text: { text: row.walletAddress } },
+    { text: 'Explorer ↗', url: walletExplorer(row.chain, row.walletAddress) }
   ]) };
 }
 function walletExplorer(chain: string, address: string) {
@@ -984,10 +1016,44 @@ function formatAmount(amountUsd: number | null, amountToken: string | null, symb
 function plainMoney(value: number | null) { return value == null ? 'n/a' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value); }
 function signedMoney(value: number | null) { if (value == null) return 'n/a'; return `${value >= 0 ? '+' : '-'}${plainMoney(Math.abs(value))}`; }
 function roi(value: number | null) { return value == null ? 'n/a' : `${Math.round(value * 100).toLocaleString('en-US')}%`; }
-function dormancyFlag(value: boolean | null) { return value == null ? '?' : value ? 'yes' : 'no'; }
+function dormancyFlag(value: boolean | null) { return value == null ? '?' : value ? '✓' : '–'; }
+function compactDate(value: string | null) { if (!value) return 'n/a'; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : `${date.toISOString().slice(0, 10)} ${date.toISOString().slice(11, 16)} UTC`; }
+function prettyLabel(value: string) { return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()); }
+function eventIcon(value: string) { if (/buy|deployment/i.test(value)) return '🎯'; if (/bridge/i.test(value)) return '🌉'; if (/fund|transfer/i.test(value)) return '💸'; if (/dormant|awaken/i.test(value)) return '😴'; return '📡'; }
+function requestFailure(error: unknown) { return `🔴 <b>REQUEST FAILED</b>\n━━━━━━━━━━━━━━━━━━━━\n${h(errorMessage(error))}\n\n<i>No intelligence conclusion was changed.</i>`; }
+function walletProgress(target: string, stage: 'received' | 'running' | 'resumed') {
+  const label = stage === 'received' ? '✓ Wallet received' : stage === 'resumed' ? '✓ Runtime resumed' : '🔄 Investigation running';
+  const detail = stage === 'received' ? 'Preparing production investigation…' : 'Fetching transactions\n↓\nResolving entity\n↓\nRanking intelligence';
+  return `🧠 <b>WALLET INVESTIGATION</b>\n━━━━━━━━━━━━━━━━━━━━\n<code>${h(short(target, 7))}</code>\n\n${label}\n${detail}`;
+}
 function duration(seconds: number) { if (seconds < 60) return `${seconds}s`; if (seconds < 3600) return `${Math.round(seconds / 60)}m`; if (seconds < 86_400) return `${Math.round(seconds / 3600)}h`; return `${Math.round(seconds / 86_400)}d`; }
 function parseCommand(text: string) { const match = text.trim().match(/^\/([a-z_]+)(?:@[a-z0-9_]+)?(?:\s+([\s\S]+))?$/i); return { command: match?.[1]?.toLowerCase() ?? '', argument: match?.[2]?.trim() ?? '' }; }
 function parseCallback(value: string | undefined) { const parts = value?.split('|'); return parts?.length === 4 && parts[0] === 'v1' ? { action: parts[1], sessionId: parts[2], value: parts[3] } : null; }
 function required(state: OperatorSessionState) { if (!state.target) throw new Error('Target is required'); return state.target; }
-function help() { return [`<b>FlowRadar operator</b>`, ...COMMANDS.map((row) => `/${row.command} — ${h(row.description)}`), '', 'Izaberi komandu; bot će zatim tražiti potrebnu adresu.', '<code>/wallet</code>', '<code>/token</code>', '<code>/profitable</code>'].join('\n'); }
+function help() {
+  return [
+    '━━━━━━━━━━━━━━━━━━━━',
+    '🧠 <b>FLOWRADAR INTELLIGENCE</b>',
+    '━━━━━━━━━━━━━━━━━━━━',
+    '<i>On-chain entity, capital-flow and alpha intelligence.</i>',
+    '',
+    '🎯 <b>INVESTIGATE</b>',
+    '<code>/wallet</code>  Wallet & entity intelligence',
+    '<code>/token</code>  Top-PnL wallet discovery',
+    '<code>/entity</code>  Entity cluster',
+    '',
+    '💸 <b>TRACE</b>',
+    '<code>/flow</code>  Capital paths',
+    '<code>/bridges</code>  Cross-chain routes',
+    '',
+    '📈 <b>DISCOVER</b>',
+    '<code>/profitable</code>  Ranked wallets',
+    '<code>/recent</code>  Live intelligence feed',
+    '',
+    '👁 <b>MONITOR</b>',
+    '<code>/watch &lt;wallet-or-entity&gt;</code>',
+    '',
+    '<i>Select a command. FlowRadar will request the required address.</i>'
+  ].join('\n');
+}
 function errorMessage(error: unknown) { return error instanceof Error ? error.message : String(error); }
