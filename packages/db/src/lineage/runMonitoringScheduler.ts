@@ -11,7 +11,7 @@
 // service nodes are never subscribed, so they are never polled here. The
 // scheduler NEVER mutates Wallet.status/eligibility. Holds the global job lock.
 
-import type { PrismaClient } from '@prisma/client';
+import type { ChainId, PrismaClient } from '@prisma/client';
 import {
   DEFAULT_MONITORING_SCHEDULE,
   computeNextPollAt,
@@ -54,6 +54,8 @@ async function transitionTier(
 export interface MonitoringPollContext {
   walletId: string;
   walletAddress: string;
+  walletChain: ChainId;
+  previousLastPolledAt: Date | null;
   tier: MonitoringTier;
   lineageRootId: string | null;
 }
@@ -172,7 +174,7 @@ export async function runMonitoringScheduler(
       },
       orderBy: [{ tierPriority: 'asc' }, { nextPollAt: { sort: 'asc', nulls: 'first' } }],
       take: safeBudget,
-      include: { wallet: { select: { id: true, address: true } } }
+      include: { wallet: { select: { id: true, address: true, chain: true } } }
     });
     result.due = batch.length;
     // Exhaustion: is there at least one more due row beyond the budget?
@@ -194,7 +196,7 @@ export async function runMonitoringScheduler(
       const tier = sub.priority as MonitoringTier;
       let ok = true;
       try {
-        const res = await poll({ walletId: sub.walletId, walletAddress: sub.wallet.address, tier, lineageRootId: sub.lineageRootId });
+        const res = await poll({ walletId: sub.walletId, walletAddress: sub.wallet.address, walletChain: sub.wallet.chain, previousLastPolledAt: sub.lastPolledAt, tier, lineageRootId: sub.lineageRootId });
         ok = res.ok;
       } catch {
         ok = false; // per-wallet error isolation — never aborts the pass

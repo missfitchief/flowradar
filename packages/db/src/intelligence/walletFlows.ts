@@ -47,12 +47,33 @@ export async function expandWalletCapitalGraph(
   const maxDepth = Math.max(1, Math.min(input.maxDepth ?? 4, 4));
   const maxNodes = Math.max(1, Math.min(input.maxNodes ?? 100, 500));
   const maxEvents = Math.max(10, Math.min(input.maxEventsPerNode ?? 250, 2_000));
-  const sourceEntity = await prisma.unifiedEntityAddress.findUnique({
-    where: { chain_address: { chain: input.chain, address: sourceWallet } },
-    include: { entity: { select: { entityKey: true } } }
-  });
+  const [sourceEntity, sourceRoot] = await Promise.all([
+    prisma.unifiedEntityAddress.findUnique({
+      where: { chain_address: { chain: input.chain, address: sourceWallet } },
+      include: { entity: { select: { entityKey: true } } }
+    }),
+    prisma.wallet.findUnique({
+      where: { address_chain: { address: sourceWallet, chain: input.chain } },
+      select: {
+        lineageRoot: { select: { id: true } },
+        monitoringSubscriptions: { where: { active: true }, orderBy: { tierPriority: 'asc' }, take: 1, select: { priority: true, lineageRootId: true } }
+      }
+    })
+  ]);
   const sourceEntityKey = sourceEntity?.entity.entityKey ?? `wallet:${input.chain}:${sourceWallet}`;
-  await enrollObservationWallet(prisma, { chain: input.chain, address: sourceWallet, role: sourceEntity?.role ?? 'execution_wallet', reason: 'wallet_capital_graph_source', now });
+  const monitoredTier = sourceRoot?.monitoringSubscriptions[0]?.priority;
+  const sourceLineageRootId = sourceRoot?.lineageRoot?.id ?? sourceRoot?.monitoringSubscriptions[0]?.lineageRootId ?? null;
+  const monitoredRole = monitoredTier === 'fresh_receiver_hot' ? 'fresh_funded_receiver'
+    : monitoredTier === 'probable_link' ? 'probable_side_wallet'
+      : monitoredTier === 'root_permanent' ? 'root_main'
+        : monitoredTier === 'strong_link' ? 'execution_wallet' : null;
+  if (!monitoredTier || monitoredRole) {
+    await enrollObservationWallet(prisma, {
+      chain: input.chain, address: sourceWallet,
+      role: sourceRoot?.lineageRoot ? 'root_main' : monitoredRole ?? sourceEntity?.role ?? 'execution_wallet',
+      reason: 'wallet_capital_graph_source', now
+    });
+  }
   const infrastructureCache = new Map<string, string | null>();
 
   const relations = new Map<string, RelationAccumulator>();
@@ -223,6 +244,11 @@ export async function expandWalletCapitalGraph(
         lastActiveAt: last,
         now
       });
+      if (sourceLineageRootId && (relation.route === 'direct_transfer' || relation.route === 'exact_bridge' || safeEntityLink)) {
+        await prisma.monitoringSubscription.update({
+          where: { id: enrollment.subscription.id }, data: { lineageRootId: sourceLineageRootId }
+        });
+      }
       monitoring = Boolean(enrollment.subscription.id);
     }
     prepared.push({ relation, role, confidence, safeEntityLink, fresh, dormant, tradedTokens, dna, monitoring });

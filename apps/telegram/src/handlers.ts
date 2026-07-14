@@ -1,5 +1,6 @@
 import {
   OperatorService,
+  type CoreWalletListItem,
   type InvestigationDeployment,
   type InvestigationMember,
   type InvestigationPath,
@@ -15,6 +16,8 @@ import { callback, exportKeyboard, h, navKeyboard, renderProfitable, short } fro
 import type { InlineKeyboard, TelegramApi, TelegramCallbackQuery, TelegramMessage, TelegramUpdate } from './types';
 
 const COMMANDS = [
+  { command: 'list', description: 'Core wallet monitoring' }, { command: 'add', description: 'Add a Core wallet' },
+  { command: 'remove', description: 'Remove a Core wallet' },
   { command: 'wallet', description: 'Unified wallet investigation' }, { command: 'token', description: 'Token + top-PnL wallets' },
   { command: 'profitable', description: 'Automatic profitable wallets' }, { command: 'entity', description: 'Investigation cluster wallets' },
   { command: 'flow', description: 'Investigation capital paths' }, { command: 'bridges', description: 'Verified investigation bridges' },
@@ -26,7 +29,9 @@ const PENDING_PROMPTS: Partial<Record<OperatorWorkflow, string>> = {
   token: '🎯 <b>TOKEN INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji token CA.\n<i>FlowRadar će pokrenuti stvarni top-PnL scan.</i>',
   entity: '🧠 <b>ENTITY INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji wallet ili entity ID.',
   flow: '💸 <b>CAPITAL PATHS</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji wallet ili entity.',
-  bridges: '🌉 <b>BRIDGE INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji wallet ili entity.'
+  bridges: '🌉 <b>BRIDGE INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji wallet ili entity.',
+  core_add: '➕ <b>ADD CORE WALLET</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji Solana ili EVM wallet adresu.\n<i>Monitoring kreće odmah; istorijski sync radi u pozadini.</i>',
+  core_remove: '➖ <b>REMOVE CORE WALLET</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji wallet adresu koju uklanjaš iz Core monitoringa.\n<i>Sačuvana istorija ostaje u bazi.</i>'
 };
 const INVESTIGATION_WORKFLOWS = new Set<OperatorWorkflow>(['wallet', 'entity', 'flow', 'bridges']);
 const EMPTY_KEYBOARD: InlineKeyboard = { inline_keyboard: [] };
@@ -60,6 +65,27 @@ async function handleMessage(service: OperatorService, api: TelegramApi, allowed
   }
   if (command) {
     try {
+      if (command === 'list') {
+        await service.clearPendingSession(userId, chatId);
+        await sendCorePanel(service, api, userId, chatId);
+        return;
+      }
+      if (command === 'add' || command === 'remove') {
+        const pendingWorkflow: OperatorWorkflow = command === 'add' ? 'core_add' : 'core_remove';
+        if (!argument) {
+          const pending = await service.setPendingSession(userId, chatId, pendingWorkflow, 10);
+          await api.sendMessage(chatId, PENDING_PROMPTS[pendingWorkflow]!, pendingKeyboard(pending.id));
+          return;
+        }
+        if (!(await service.validateWorkflowTarget(pendingWorkflow, argument))) {
+          await api.sendMessage(chatId, invalidTargetMessage(pendingWorkflow));
+          return;
+        }
+        await service.clearPendingSession(userId, chatId);
+        if (command === 'add') await addCoreAndQueue(service, api, userId, chatId, argument);
+        else await removeCore(service, api, userId, chatId, argument);
+        return;
+      }
       if (command === 'watch') {
         if (!argument) throw new Error('Pošalji wallet ili entity ID.');
         const watch = await service.watch(userId, chatId, argument);
@@ -97,6 +123,12 @@ async function handleMessage(service: OperatorService, api: TelegramApi, allowed
     if (pending) {
       if (!(await service.validateWorkflowTarget(pending.workflow, text))) {
         await api.sendMessage(chatId, invalidTargetMessage(pending.workflow), pendingKeyboard(pending.session.id));
+        return;
+      }
+      if (pending.workflow === 'core_add' || pending.workflow === 'core_remove') {
+        await service.clearPendingSession(userId, chatId);
+        if (pending.workflow === 'core_add') await addCoreAndQueue(service, api, userId, chatId, text);
+        else await removeCore(service, api, userId, chatId, text);
         return;
       }
       if (pending.workflow !== 'wallet') await service.clearPendingSession(userId, chatId);
@@ -150,6 +182,50 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
   if (!session) { await api.answerCallbackQuery(query.id, 'Session expired. Run the command again.'); return; }
   const state = session.stateJson as unknown as OperatorSessionState;
   try {
+    if (session.workflow === 'core') {
+      if (parsed.action === 'corewallet') {
+        const item = await service.coreWalletAt(userId, chatId, Math.max(0, Number(parsed.value) || 0));
+        if (!item) throw new Error('Core wallet više nije dostupan.');
+        state.coreTarget = item.address;
+        state.coreView = 'detail';
+        state.page = 1;
+      } else if (parsed.action === 'coreview') {
+        if (!state.coreTarget) throw new Error('Core wallet nije izabran.');
+        state.corePreviousView = state.coreView ?? 'detail';
+        state.coreView = coreView(parsed.value);
+        state.page = 1;
+      } else if (parsed.action === 'coreremove') {
+        if (!state.coreTarget) throw new Error('Core wallet nije izabran.');
+        if (parsed.value === 'yes') {
+          await service.removeCoreWallet(userId, chatId, state.coreTarget);
+          state.coreTarget = undefined;
+          state.coreView = 'list';
+          state.corePreviousView = undefined;
+          state.page = 1;
+        } else {
+          state.corePreviousView = state.coreView ?? 'detail';
+          state.coreView = 'remove_confirm';
+        }
+      } else if (parsed.action === 'coreback') {
+        if ((state.coreView ?? 'list') === 'detail') {
+          state.coreTarget = undefined;
+          state.coreView = 'list';
+        } else {
+          state.coreView = state.corePreviousView === 'list' ? 'list' : 'detail';
+          state.corePreviousView = undefined;
+        }
+        state.page = 1;
+      } else if (parsed.action === 'page') {
+        state.page = Math.max(1, Number(parsed.value) || 1);
+      } else {
+        throw new Error('Core action je istekla.');
+      }
+      await service.updateSession(session.id, userId, chatId, state);
+      const rendered = await renderCorePanel(service, userId, chatId, state, session.id);
+      await editIfChanged(api, query, rendered.text, rendered.keyboard);
+      await api.answerCallbackQuery(query.id, parsed.action === 'coreremove' && parsed.value === 'yes' ? 'Core monitoring removed' : undefined);
+      return;
+    }
     if (parsed.action === 'choose') {
       const workflow = parsed.value === 'token' ? 'token' : 'wallet';
       const nextState = { ...state, page: 1 };
@@ -248,6 +324,38 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
   } catch (error) {
     await api.answerCallbackQuery(query.id, errorMessage(error));
   }
+}
+
+async function sendCorePanel(service: OperatorService, api: TelegramApi, userId: string, chatId: string) {
+  const state: OperatorSessionState = { page: 1, pageSize: 5, coreView: 'list' };
+  const session = await service.createSession(userId, chatId, 'core', state, 24 * 60);
+  const rendered = await renderCorePanel(service, userId, chatId, state, session.id);
+  await api.sendMessage(chatId, rendered.text, rendered.keyboard);
+}
+
+async function addCoreAndQueue(service: OperatorService, api: TelegramApi, userId: string, chatId: string, address: string) {
+  const added = await service.addCoreWallet(userId, chatId, address);
+  const session = await service.queueCoreHistoricalSync(userId, chatId, added.watch.targetKey);
+  const state = session.stateJson as unknown as OperatorSessionState;
+  enqueueWalletInvestigation(service, api, userId, chatId, state, session.id);
+  await api.sendMessage(chatId, [
+    '✅ <b>CORE WALLET ADDED</b>', '━━━━━━━━━━━━━━━━━━━━',
+    `<code>${h(added.watch.targetKey)}</code>`,
+    `Chains  <b>${added.refs.map((ref) => h(ref.chain)).join(' · ')}</b>`,
+    'Status  <b>Monitoring active</b>',
+    '', 'Historical sync je pokrenut u pozadini.',
+    '<i>Transferi se čuvaju bez Telegram spama. Signal stiže samo za kupovine, dormant wake-up i wallet/entity confluence.</i>'
+  ].join('\n'));
+}
+
+async function removeCore(service: OperatorService, api: TelegramApi, userId: string, chatId: string, address: string) {
+  await service.removeCoreWallet(userId, chatId, address);
+  await api.sendMessage(chatId, [
+    '✓ <b>CORE MONITORING REMOVED</b>', '━━━━━━━━━━━━━━━━━━━━',
+    `<code>${h(address)}</code>`, '',
+    'Aktivni Core monitoring je zaustavljen.',
+    '<i>Wallet istorija i svi prethodno sačuvani događaji ostaju u bazi.</i>'
+  ].join('\n'));
 }
 
 async function sendWorkflow(service: OperatorService, api: TelegramApi, userId: string, chatId: string, workflow: OperatorWorkflow, target?: string) {
@@ -365,7 +473,7 @@ async function executeWalletInvestigation(
     state.investigationStatus = 'running';
     state.investigationError = undefined;
     await service.updateSession(sessionId, userId, chatId, state);
-    if (resumed) await api.sendMessage(chatId, walletProgress(target, 'resumed'));
+    if (resumed && !state.silentCoreSync) await api.sendMessage(chatId, walletProgress(target, 'resumed'));
     console.info(`[telegram] wallet investigation started session=${sessionId} target=${target}`);
     await runInvestigationWorkflow(service, api, userId, chatId, 'wallet', state, sessionId);
     console.info(`[telegram] wallet investigation completed session=${sessionId} target=${target}`);
@@ -376,7 +484,9 @@ async function executeWalletInvestigation(
     await service.updateSession(sessionId, userId, chatId, state).catch(() => false);
     console.error(`[telegram] wallet investigation failed session=${sessionId} target=${target}: ${message}`);
     try {
-      await api.sendMessage(chatId, `🔴 <b>INVESTIGATION FAILED</b>\n━━━━━━━━━━━━━━━━━━━━\n${h(message)}\n\n<i>Pokreni novu analizu komandom <code>/wallet</code>.</i>`);
+      await api.sendMessage(chatId, state.silentCoreSync
+        ? `⚠️ <b>CORE HISTORY SYNC FAILED</b>\n━━━━━━━━━━━━━━━━━━━━\n<code>${h(target)}</code>\n${h(message)}\n\n<i>Live monitoring ostaje aktivan i scheduler će nastaviti polling.</i>`
+        : `🔴 <b>INVESTIGATION FAILED</b>\n━━━━━━━━━━━━━━━━━━━━\n${h(message)}\n\n<i>Pokreni novu analizu komandom <code>/wallet</code>.</i>`);
     } catch (deliveryError) {
       console.error(`[telegram] wallet investigation failure notice could not be delivered session=${sessionId}: ${errorMessage(deliveryError)}`);
     }
@@ -413,6 +523,7 @@ async function runInvestigationWorkflow(
   state.pageSize = 5;
   await service.updateSession(sessionId, userId, chatId, state);
   const rendered = renderInvestigation(investigation, state, sessionId);
+  if (state.silentCoreSync) return;
   if (query) await editIfChanged(api, query, rendered.text, rendered.keyboard);
   else await api.sendMessage(chatId, rendered.text, rendered.keyboard);
 }
@@ -421,6 +532,131 @@ async function renderPersistedInvestigation(service: OperatorService, state: Ope
   const investigation = await service.loadWalletInvestigation(state.investigationId ?? required(state));
   if (!investigation) throw new Error('Investigation is no longer available. Use Refresh.');
   return renderInvestigation(investigation, state, sessionId);
+}
+
+async function renderCorePanel(
+  service: OperatorService,
+  userId: string,
+  chatId: string,
+  state: OperatorSessionState,
+  sessionId: string
+): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const view = state.coreView ?? 'list';
+  const page = Math.max(1, state.page || 1);
+  if (view === 'list') {
+    const result = await service.listCoreWallets(userId, chatId, page, 5);
+    const rows = result.items.map((wallet, index) => {
+      const globalIndex = (page - 1) * result.pageSize + index;
+      const stateIcon = wallet.status === 'Active' ? '🟢' : '🌙';
+      return [{ text: `${stateIcon} ${wallet.label} · ${short(wallet.address)}`, callback_data: callback('corewallet', sessionId, String(globalIndex)) }];
+    });
+    const navigation = [];
+    if (page > 1) navigation.push({ text: '‹ Previous', callback_data: callback('page', sessionId, String(page - 1)) });
+    if (result.hasNext) navigation.push({ text: 'Next ›', callback_data: callback('page', sessionId, String(page + 1)) });
+    return {
+      text: [
+        '🛰 <b>CORE WALLET MONITOR</b>', '━━━━━━━━━━━━━━━━━━━━',
+        `Tracked wallets  <b>${result.total}</b>  ·  Page <b>${page}</b>`,
+        '',
+        ...(result.items.length ? result.items.map((wallet, index) => renderCoreListItem(wallet, (page - 1) * result.pageSize + index + 1)) : [
+          '⚪ Core lista je prazna.', '', 'Dodaj prvi wallet komandom <code>/add</code>.'
+        ]),
+        '', '<i>Transfers are stored silently. Telegram alerts only on actionable wallet activity.</i>'
+      ].join('\n'),
+      keyboard: { inline_keyboard: [...rows, ...(navigation.length ? [navigation] : [])] }
+    };
+  }
+  if (!state.coreTarget) throw new Error('Core wallet nije izabran.');
+  const wallet = await service.coreWalletDetail(userId, chatId, state.coreTarget);
+  if (view === 'detail') {
+    return {
+      text: [
+        '🛰 <b>CORE WALLET</b>', '━━━━━━━━━━━━━━━━━━━━',
+        `<code>${h(wallet.address)}</code>`, '',
+        `Label  <b>${h(wallet.label)}</b>`,
+        `Chains  <b>${wallet.chains.map((chain) => h(chain)).join(' · ')}</b>`,
+        `Entity  <b>${h(wallet.entity ?? 'Unresolved')}</b>`,
+        `Status  <b>${wallet.status === 'Active' ? '🟢 Active' : '🌙 Dormant'}</b>`,
+        `Historical Alpha  <b>${score(wallet.historicalAlpha)}</b>`,
+        `Evidence  <b>${score(wallet.evidence)}</b>`,
+        `Last activity  <b>${formatTelegramDate(wallet.lastActivity)}</b>`,
+        `Stored events  <b>${wallet.eventCount}</b>`,
+        `Priority  <b>${h(prettyLabel(wallet.monitoringPriority))}</b>`
+      ].join('\n'),
+      keyboard: { inline_keyboard: [
+        [{ text: '📋 Activity', callback_data: callback('coreview', sessionId, 'activity') }, { text: '💸 Capital Path', callback_data: callback('coreview', sessionId, 'capital') }],
+        [{ text: '🧩 Entity', callback_data: callback('coreview', sessionId, 'entity') }, { text: '🗑 Remove', callback_data: callback('coreremove', sessionId, 'confirm') }],
+        [{ text: '← Back', callback_data: callback('coreback', sessionId, 'list') }]
+      ] }
+    };
+  }
+  if (view === 'activity') {
+    const activity = await service.coreWalletActivity(wallet.address, page, 8);
+    const navigation = corePagination(sessionId, page, activity.hasNext);
+    return {
+      text: [
+        '📋 <b>WALLET ACTIVITY</b>', '━━━━━━━━━━━━━━━━━━━━',
+        `<code>${h(wallet.address)}</code>`,
+        `Events  <b>${activity.total}</b>  ·  Page <b>${page}</b>`, '',
+        ...(activity.items.length ? activity.items.map((event) => {
+          const verb = event.direction === 'sent' ? '➡ Sent' : event.direction === 'received' ? '⬅ Received' : event.direction === 'bought' ? '🟢 Bought' : event.direction === 'sold' ? '🔴 Sold' : '⚪ Activity';
+          return [
+            `<b>${formatTelegramDate(event.ts)}</b>`,
+            `${verb} <b>${h(compactAmount(event.amount))} ${h(event.token)}</b>${event.amountUsd == null ? '' : ` · ${money(event.amountUsd)}`}`,
+            ...(event.counterparty ? [`${event.direction === 'sent' ? 'to' : 'from'}  <code>${h(event.counterparty)}</code>`] : []),
+            `<i>${h(event.chain)}</i>`
+          ].join('\n');
+        }) : ['No stored activity yet.'])
+      ].join('\n\n'),
+      keyboard: { inline_keyboard: [...navigation, [{ text: '← Back', callback_data: callback('coreback', sessionId, 'detail') }]] }
+    };
+  }
+  if (view === 'capital') {
+    const capital = await service.coreWalletCapital(wallet.address, page, 5);
+    const navigation = corePagination(sessionId, page, capital.hasNext);
+    return {
+      text: [
+        '💸 <b>CAPITAL PATHS</b>', '━━━━━━━━━━━━━━━━━━━━',
+        `<code>${h(wallet.address)}</code>`,
+        `Evidence-backed paths  <b>${capital.total}</b>  ·  Page <b>${page}</b>`, '',
+        ...(capital.items.length ? capital.items.map((path, index) => [
+          `<b>${(page - 1) * capital.pageSize + index + 1}. ${h(prettyLabel(path.route).toUpperCase())}</b>`,
+          `<code>${h(path.source)}</code>`, '↓', `<code>${h(path.destination)}</code>`,
+          `${h(path.sourceChain)} → ${h(path.destinationChain)}  ·  Confidence <b>${Math.round(path.confidence * 100)}%</b>`,
+          `Value  <b>${path.amountUsd == null ? 'Unknown' : money(path.amountUsd)}</b>`,
+          `First / last  <b>${formatTelegramDate(path.firstTransfer)} / ${formatTelegramDate(path.lastTransfer)}</b>`,
+          ...(path.tokenBuys.length ? [`Bought after funding  <b>${path.tokenBuys.map((token) => h(short(token))).join(' · ')}</b>`] : [])
+        ].join('\n')) : ['No evidence-backed capital paths are stored yet.'])
+      ].join('\n\n'),
+      keyboard: { inline_keyboard: [...navigation, [{ text: '← Back', callback_data: callback('coreback', sessionId, 'detail') }]] }
+    };
+  }
+  if (view === 'entity') {
+    return {
+      text: [
+        '🧩 <b>CORE ENTITY</b>', '━━━━━━━━━━━━━━━━━━━━',
+        `<code>${h(wallet.address)}</code>`, '',
+        `Entity  <b>${h(wallet.entity ?? 'Unresolved')}</b>`,
+        `Evidence  <b>${score(wallet.evidence)}</b>`,
+        `Historical Alpha  <b>${score(wallet.historicalAlpha)}</b>`,
+        `Monitoring  <b>${h(prettyLabel(wallet.monitoringPriority))}</b>`, '',
+        '<i>Direct funding and verified exact-bridge receivers remain observation-only. Bridge inference and CEX correlation never prove ownership.</i>'
+      ].join('\n'),
+      keyboard: { inline_keyboard: [[{ text: '← Back', callback_data: callback('coreback', sessionId, 'detail') }]] }
+    };
+  }
+  return {
+    text: [
+      '⚠️ <b>REMOVE CORE WALLET?</b>', '━━━━━━━━━━━━━━━━━━━━',
+      `<code>${h(wallet.address)}</code>`, '',
+      'Aktivni monitoring će biti zaustavljen.',
+      '<i>Istorija i sačuvani događaji neće biti obrisani.</i>'
+    ].join('\n'),
+    keyboard: { inline_keyboard: [
+      [{ text: 'Remove', callback_data: callback('coreremove', sessionId, 'yes') }],
+      [{ text: '← Back', callback_data: callback('coreback', sessionId, 'detail') }]
+    ] }
+  };
 }
 
 async function renderWorkflow(service: OperatorService, workflow: OperatorWorkflow, state: OperatorSessionState, sessionId: string): Promise<{ text: string; keyboard: InlineKeyboard }> {
@@ -916,7 +1152,7 @@ function pendingKeyboard(sessionId: string): InlineKeyboard { return { inline_ke
 function defaultState(target?: string): OperatorSessionState { return { target, chain: 'ALL', sort: 'pnl', page: 1, pageSize: 10 }; }
 function invalidTargetMessage(workflow: OperatorWorkflow) {
   if (workflow === 'token') return '🔴 <b>INVALID TOKEN CA</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji validan token contract address.';
-  if (workflow === 'wallet') return '🔴 <b>INVALID WALLET</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji Solana base58 adresu (32–44 znaka) ili EVM <code>0x</code> adresu (40 hex znakova).';
+  if (workflow === 'wallet' || workflow === 'core_add' || workflow === 'core_remove') return '🔴 <b>INVALID WALLET</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji Solana base58 adresu (32–44 znaka) ili EVM <code>0x</code> adresu (40 hex znakova).';
   return '🔴 <b>INVALID TARGET</b>\n━━━━━━━━━━━━━━━━━━━━\nPošalji validan wallet ili postojeći entity ID.';
 }
 function workflowView(workflow: OperatorWorkflow): OperatorSessionState['investigationView'] {
@@ -929,6 +1165,10 @@ function investigationView(value: string): NonNullable<OperatorSessionState['inv
   return value === 'paths' || value === 'priority' || value === 'cluster' || value === 'alts' || value === 'deployments'
     || value === 'evidence' || value === 'bridges' || value === 'more' || value === 'advanced' || value === 'receivers'
     || value === 'history' || value === 'outcomes' || value === 'watch' ? value : 'summary';
+}
+
+function coreView(value: string): NonNullable<OperatorSessionState['coreView']> {
+  return value === 'activity' || value === 'capital' || value === 'entity' ? value : 'detail';
 }
 
 function rememberInvestigationScreen(state: OperatorSessionState) {
@@ -1019,6 +1259,26 @@ function roi(value: number | null) { return value == null ? 'n/a' : `${Math.roun
 function dormancyFlag(value: boolean | null) { return value == null ? '?' : value ? '✓' : '–'; }
 function compactDate(value: string | null) { if (!value) return 'n/a'; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : `${date.toISOString().slice(0, 10)} ${date.toISOString().slice(11, 16)} UTC`; }
 function prettyLabel(value: string) { return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()); }
+function renderCoreListItem(wallet: CoreWalletListItem, rank: number) {
+  return [
+    `<b>${rank}. ${h(wallet.label)}</b>  ${wallet.status === 'Active' ? '🟢' : '🌙'}`,
+    `<code>${h(wallet.address)}</code>`,
+    `${wallet.chains.map((chain) => h(chain)).join(' · ')}  ·  ${h(wallet.status)}`,
+    `Alpha <b>${score(wallet.historicalAlpha)}</b>  ·  Evidence <b>${score(wallet.evidence)}</b>`,
+    `Last activity  <b>${formatTelegramDate(wallet.lastActivity)}</b>`,
+    `Priority  <b>${h(prettyLabel(wallet.monitoringPriority))}</b>`
+  ].join('\n');
+}
+function corePagination(sessionId: string, page: number, hasNext: boolean): InlineKeyboard['inline_keyboard'] {
+  const row: InlineKeyboard['inline_keyboard'][number] = [];
+  if (page > 1) row.push({ text: '‹ Previous', callback_data: callback('page', sessionId, String(page - 1)) });
+  if (hasNext) row.push({ text: 'Next ›', callback_data: callback('page', sessionId, String(page + 1)) });
+  return row.length ? [row] : [];
+}
+function score(value: number | null) { return value == null ? 'n/a' : `${Math.round(value)}/100`; }
+function money(value: number) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: value >= 1_000 ? 0 : 2 }).format(value); }
+function compactAmount(value: string) { const number = Number(value); return Number.isFinite(number) ? new Intl.NumberFormat('en-US', { maximumFractionDigits: 6 }).format(number) : value; }
+function formatTelegramDate(value: string | null) { if (!value) return 'Never observed'; const date = new Date(value); return Number.isNaN(date.getTime()) ? h(value) : `${date.toISOString().slice(0, 10)} ${date.toISOString().slice(11, 16)} UTC`; }
 function eventIcon(value: string) { if (/buy|deployment/i.test(value)) return '🎯'; if (/bridge/i.test(value)) return '🌉'; if (/fund|transfer/i.test(value)) return '💸'; if (/dormant|awaken/i.test(value)) return '😴'; return '📡'; }
 function requestFailure(error: unknown) { return `🔴 <b>REQUEST FAILED</b>\n━━━━━━━━━━━━━━━━━━━━\n${h(errorMessage(error))}\n\n<i>No intelligence conclusion was changed.</i>`; }
 function walletProgress(target: string, stage: 'received' | 'running' | 'resumed') {
@@ -1051,6 +1311,9 @@ function help() {
     '<code>/recent</code>  Live intelligence feed',
     '',
     '👁 <b>MONITOR</b>',
+    '<code>/list</code>  Core wallet control panel',
+    '<code>/add</code>  Add Core wallet',
+    '<code>/remove</code>  Stop Core monitoring',
     '<code>/watch &lt;wallet-or-entity&gt;</code>',
     '',
     '<i>Select a command. FlowRadar will request the required address.</i>'

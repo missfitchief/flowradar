@@ -68,6 +68,55 @@ describe('Telegram command handlers', () => {
     expect(api.sendMessage).toHaveBeenCalledWith('123', expect.stringContaining('Pošalji wallet adresu.'), expect.objectContaining({ inline_keyboard: expect.any(Array) }));
   });
 
+  it('renders /list as a paginated Core wallet terminal without transaction spam', async () => {
+    const api = apiMock();
+    const service = {
+      clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'core-session' }),
+      listCoreWallets: vi.fn().mockResolvedValue({
+        page: 1, pageSize: 5, total: 1, hasNext: false, coverageWarnings: [],
+        items: [{ address: ADDRESS, chains: ['SOLANA'], label: 'Dormant Alpha', status: 'Dormant', historicalAlpha: 91, evidence: 84, lastActivity: '2025-01-01T00:00:00.000Z', monitoringPriority: 'root_permanent', eventCount: 42, entity: 'Entity One' }]
+      })
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 20, message: { message_id: 20, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/list' } });
+    const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[0]!;
+    expect(text).toContain('CORE WALLET MONITOR');
+    expect(text).toContain('Dormant Alpha');
+    expect(text).toContain('91/100');
+    expect(keyboard?.inline_keyboard.flat()[0]?.callback_data).toBe('v1|corewallet|core-session|0');
+    expect(text).not.toContain('Sent 0');
+  });
+
+  it('adds a Core wallet, starts persisted historical sync, and acknowledges immediately', async () => {
+    const api = apiMock();
+    const service = {
+      validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(),
+      addCoreWallet: vi.fn().mockResolvedValue({ watch: { targetKey: ADDRESS }, refs: [{ chain: 'SOLANA', address: ADDRESS }], roots: ['root1'] }),
+      queueCoreHistoricalSync: vi.fn().mockResolvedValue({ id: 'core-sync', stateJson: { target: ADDRESS, page: 1, pageSize: 5, investigationStatus: 'queued', silentCoreSync: true } }),
+      updateSession: vi.fn().mockResolvedValue(true), walletInvestigationView: vi.fn().mockResolvedValue(investigation())
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 21, message: { message_id: 21, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/add ${ADDRESS}` } });
+    expect(service.addCoreWallet).toHaveBeenCalledWith('123', '123', ADDRESS);
+    expect(service.queueCoreHistoricalSync).toHaveBeenCalledWith('123', '123', ADDRESS);
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('CORE WALLET ADDED');
+    await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4, refresh: true }));
+    expect(vi.mocked(api.sendMessage).mock.calls.filter((call) => call[1].includes('FLOWRADAR INTELLIGENCE'))).toHaveLength(0);
+  });
+
+  it('opens Core wallet detail from /list and exposes only operator controls', async () => {
+    const api = apiMock();
+    const item = { address: ADDRESS, chains: ['SOLANA'] as const, label: 'Core One', status: 'Active' as const, historicalAlpha: 88, evidence: 76, lastActivity: '2026-07-14T01:00:00.000Z', monitoringPriority: 'root_permanent', eventCount: 12, entity: 'Entity One' };
+    const service = {
+      clearPendingSession: vi.fn(),
+      getSession: vi.fn().mockResolvedValue({ id: 'core-session', workflow: 'core', stateJson: { page: 1, pageSize: 5, coreView: 'list' } }),
+      coreWalletAt: vi.fn().mockResolvedValue(item), coreWalletDetail: vi.fn().mockResolvedValue(item), updateSession: vi.fn().mockResolvedValue(true)
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 22, callback_query: { id: 'core-cb', from: { id: 123 }, data: 'v1|corewallet|core-session|0', message: { message_id: 22, chat: { id: 123, type: 'private' }, text: 'list' } } });
+    const [, , text, keyboard] = vi.mocked(api.editMessage).mock.calls[0]!;
+    expect(text).toContain('CORE WALLET');
+    expect(text).toContain('Stored events  <b>12</b>');
+    expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual(['📋 Activity', '💸 Capital Path', '🧩 Entity', '🗑 Remove', '← Back']);
+  });
+
   it('acknowledges a pending wallet immediately, moves the state, and completes the investigation asynchronously', async () => {
     const api = apiMock();
     let resolveInvestigation!: (value: WalletInvestigationResult) => void;

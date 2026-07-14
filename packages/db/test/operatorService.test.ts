@@ -7,8 +7,19 @@ const ADDRESS = `0x${'ab'.repeat(20)}`;
 const ROOT_ADDRESS = `0x${'ef'.repeat(20)}`;
 const ALERT_WALLETS = [`0x${'12'.repeat(20)}`, `0x${'34'.repeat(20)}`];
 const ALERT_TOKEN = `0x${'56'.repeat(20)}`;
+const CORE_ADDRESS = `0x${'78'.repeat(20)}`;
+const CORE_CONNECTED = `0x${'89'.repeat(20)}`;
+const CORE_BRIDGE_CONNECTED = `0x${'bc'.repeat(20)}`;
+const CORE_TOKEN = `0x${'9a'.repeat(20)}`;
 
 async function cleanup() {
+  await prisma.operatorWatchAlert.deleteMany({ where: { watch: { targetKey: CORE_ADDRESS } } });
+  await prisma.operatorWatch.deleteMany({ where: { targetKey: CORE_ADDRESS } });
+  await prisma.walletFlowRelationship.deleteMany({ where: { OR: [{ sourceWallet: CORE_ADDRESS }, { relatedWallet: { in: [CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } }] } });
+  await prisma.massTransactionEvent.deleteMany({ where: { eventId: { startsWith: `${PREFIX}:core:` } } });
+  await prisma.lineageRoot.deleteMany({ where: { wallet: { address: { in: [CORE_ADDRESS, CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } } } });
+  await prisma.wallet.deleteMany({ where: { address: { in: [CORE_ADDRESS, CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } } });
+  await prisma.token.deleteMany({ where: { address: CORE_TOKEN } });
   await prisma.massBridgeCorrelation.deleteMany({ where: { correlationId: { startsWith: PREFIX } } });
   await prisma.massTransactionEvent.deleteMany({ where: { eventId: { startsWith: PREFIX } } });
   await prisma.trackedTokenActivationAlert.deleteMany({ where: { tokenAddress: ALERT_TOKEN } });
@@ -50,6 +61,68 @@ describe('OperatorService', () => {
 
     await service.setCursor(`${PREFIX}:bot`, 123n);
     expect(await service.getCursor(`${PREFIX}:bot`)).toBe(123n);
+  });
+
+  it('adds, lists and removes a restart-safe cross-chain Core wallet without deleting history', async () => {
+    const service = new OperatorService(prisma);
+    const added = await service.addCoreWallet(PREFIX, PREFIX, CORE_ADDRESS);
+    expect(added.watch).toMatchObject({ targetType: 'core_wallet', targetKey: CORE_ADDRESS, active: true });
+    expect(added.refs.map((ref) => ref.chain).sort()).toEqual(['ARBITRUM', 'BASE', 'BSC', 'ETHEREUM']);
+    const roots = await prisma.lineageRoot.findMany({ where: { wallet: { address: CORE_ADDRESS } }, include: { subscriptions: true } });
+    expect(roots).toHaveLength(4);
+    expect(roots.every((root) => root.subscriptions.some((subscription) => subscription.priority === 'root_permanent' && subscription.active && subscription.lineageRootId === root.id))).toBe(true);
+
+    await prisma.massTransactionEvent.create({ data: {
+      eventId: `${PREFIX}:core:history`, chain: 'BASE', txHash: `${PREFIX}:core:history`, eventIndex: 0, blockOrSlot: 1n,
+      ts: new Date(), kind: 'native_transfer', status: 'succeeded', fromAddress: CORE_ADDRESS, toAddress: CORE_CONNECTED,
+      actorAddress: CORE_ADDRESS, amountToken: '1', amountUsd: 100, provider: 'test', observedAt: new Date(),
+      relevanceCategory: 'capital_transfer', relevanceScore: 90, reasonCodes: ['direct_transfer'], safeEntityLink: true,
+      enrollmentCandidate: true, metadataJson: {}
+    } });
+    const list = await service.listCoreWallets(PREFIX, PREFIX);
+    expect(list.total).toBe(1);
+    expect(list.items[0]).toMatchObject({ address: CORE_ADDRESS, eventCount: 1, monitoringPriority: 'root_permanent' });
+
+    expect(await service.removeCoreWallet(PREFIX, PREFIX, CORE_ADDRESS)).toBe(1);
+    expect((await service.listCoreWallets(PREFIX, PREFIX)).total).toBe(0);
+    expect(await prisma.massTransactionEvent.count({ where: { eventId: `${PREFIX}:core:history` } })).toBe(1);
+    expect(await prisma.monitoringSubscription.count({ where: { lineageRoot: { source: 'telegram_core' }, active: true } })).toBe(0);
+  });
+
+  it('stores transfers silently but alerts on Core and directly funded receiver token buys', async () => {
+    const service = new OperatorService(prisma);
+    const added = await service.addCoreWallet(PREFIX, PREFIX, CORE_ADDRESS);
+    const now = new Date();
+    await prisma.token.create({ data: { chain: 'BASE', address: CORE_TOKEN, symbol: 'CORE', name: 'Core Signal Token', decimals: 18, firstSeenAt: now, riskFlags: [] } });
+    await prisma.walletFlowRelationship.create({ data: {
+      sourceChain: 'BASE', sourceWallet: CORE_ADDRESS, relatedChain: 'BASE', relatedWallet: CORE_CONNECTED,
+      role: 'execution_wallet', route: 'direct_transfer', hops: 1, transferCount: 1,
+      firstTransferTs: new Date(now.getTime() - 5_000), lastTransferTs: new Date(now.getTime() - 5_000), relationshipConfidence: 0.82,
+      safeEntityLink: false, transferReceiptIds: [`${PREFIX}:core:funding`], bridgeCorrelationIds: [],
+      supportingEvidenceJson: { knownAmountUsd: 500 }, contradictingEvidenceJson: {}, tradedTokensJson: [], pnlMetricsJson: {},
+      status: 'observation_only', engineVersion: 1, computedAt: now
+    } });
+    await prisma.walletFlowRelationship.create({ data: {
+      sourceChain: 'BASE', sourceWallet: CORE_ADDRESS, relatedChain: 'ARBITRUM', relatedWallet: CORE_BRIDGE_CONNECTED,
+      role: 'bridge_linked_receiver', route: 'exact_bridge', hops: 1, transferCount: 1,
+      firstTransferTs: new Date(now.getTime() - 4_000), lastTransferTs: new Date(now.getTime() - 4_000), relationshipConfidence: 0.96,
+      safeEntityLink: true, transferReceiptIds: [`${PREFIX}:core:bridge-funding`], bridgeCorrelationIds: [`${PREFIX}:core:bridge-correlation`],
+      supportingEvidenceJson: { knownAmountUsd: 750 }, contradictingEvidenceJson: {}, tradedTokensJson: [], pnlMetricsJson: {},
+      status: 'observation_only', engineVersion: 1, computedAt: now
+    } });
+    await prisma.massTransactionEvent.createMany({ data: [
+      { eventId: `${PREFIX}:core:funding`, chain: 'BASE', txHash: `${PREFIX}:core:funding`, eventIndex: 0, blockOrSlot: 1n, ts: new Date(now.getTime() - 5_000), kind: 'native_transfer', status: 'succeeded', fromAddress: CORE_ADDRESS, toAddress: CORE_CONNECTED, actorAddress: CORE_ADDRESS, amountToken: '0.2', amountUsd: 500, provider: 'test', observedAt: new Date(now.getTime() - 5_000), relevanceCategory: 'capital_transfer', relevanceScore: 90, reasonCodes: ['direct_transfer'], safeEntityLink: true, enrollmentCandidate: true, metadataJson: {} },
+      { eventId: `${PREFIX}:core:root-buy`, chain: 'BASE', txHash: `${PREFIX}:core:root-buy`, eventIndex: 0, blockOrSlot: 2n, ts: new Date(now.getTime() - 3_000), kind: 'token_buy', status: 'succeeded', fromAddress: CORE_ADDRESS, toAddress: CORE_ADDRESS, actorAddress: CORE_ADDRESS, assetAddress: CORE_TOKEN, assetSymbol: 'CORE', amountToken: '100', amountUsd: 250, provider: 'test', observedAt: new Date(now.getTime() - 3_000), relevanceCategory: 'token_deployment', relevanceScore: 90, reasonCodes: ['buy'], metadataJson: {} },
+      { eventId: `${PREFIX}:core:receiver-buy`, chain: 'BASE', txHash: `${PREFIX}:core:receiver-buy`, eventIndex: 0, blockOrSlot: 3n, ts: new Date(now.getTime() - 1_000), kind: 'token_buy', status: 'succeeded', fromAddress: CORE_CONNECTED, toAddress: CORE_CONNECTED, actorAddress: CORE_CONNECTED, assetAddress: CORE_TOKEN, assetSymbol: 'CORE', amountToken: '50', amountUsd: 125, provider: 'test', observedAt: new Date(now.getTime() - 1_000), relevanceCategory: 'token_deployment', relevanceScore: 90, reasonCodes: ['buy'], metadataJson: {} }
+      ,{ eventId: `${PREFIX}:core:bridge-receiver-buy`, chain: 'ARBITRUM', txHash: `${PREFIX}:core:bridge-receiver-buy`, eventIndex: 0, blockOrSlot: 4n, ts: new Date(now.getTime() - 500), kind: 'token_buy', status: 'succeeded', fromAddress: CORE_BRIDGE_CONNECTED, toAddress: CORE_BRIDGE_CONNECTED, actorAddress: CORE_BRIDGE_CONNECTED, assetAddress: CORE_TOKEN, assetSymbol: 'CORE', amountToken: '25', amountUsd: 60, provider: 'test', observedAt: new Date(now.getTime() - 500), relevanceCategory: 'token_deployment', relevanceScore: 90, reasonCodes: ['buy'], metadataJson: {} }
+    ] });
+
+    expect(await service.materializeWatchAlerts(new Date(now.getTime() - 10_000))).toBe(3);
+    const alerts = await prisma.operatorWatchAlert.findMany({ where: { watchId: added.watch.id }, orderBy: { alertType: 'asc' } });
+    expect(alerts.map((alert) => alert.alertType)).toEqual(['connected_core_receiver_buy', 'connected_core_receiver_buy', 'core_wallet_token_buy']);
+    expect(alerts.some((alert) => alert.eventKey.includes('funding'))).toBe(false);
+    expect(alerts.find((alert) => alert.alertType === 'connected_core_receiver_buy')?.payloadJson).toMatchObject({ coreWallet: CORE_ADDRESS, wallet: CORE_CONNECTED, connection: 'direct_transfer', ca: CORE_TOKEN });
+    expect(alerts.some((alert) => alert.alertType === 'connected_core_receiver_buy' && JSON.stringify(alert.payloadJson).includes('exact_bridge'))).toBe(true);
   });
 
   it('returns automatic candidates through bounded profitable pagination', async () => {

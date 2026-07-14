@@ -10,6 +10,7 @@ export async function runLongPolling(options: { service: OperatorService; api: T
   const botKey = `${me.id}:${me.username ?? 'bot'}`;
   await options.api.deleteWebhook();
   await options.api.setMyCommands(TELEGRAM_COMMANDS);
+  for (const userId of options.allowedUserIds) await options.service.ensureCoreWalletWatches(userId, userId);
   let offset = await options.service.getCursor(botKey);
   let retry = 0;
   let lastAlertsAt = 0;
@@ -57,6 +58,8 @@ export async function dispatchWatchAlerts(service: OperatorService, api: Telegra
         } else {
           await api.sendMessage(alert.watch.chatId, '📡 <b>FLOWRADAR SIGNAL</b>\n━━━━━━━━━━━━━━━━━━━━\n⚪ Signal receipt is no longer available.');
         }
+      } else if (alert.watch.targetType === 'core_wallet') {
+        await api.sendMessage(alert.watch.chatId, renderCoreMonitoringAlert(alert.alertType, payload));
       } else {
         await api.sendMessage(alert.watch.chatId, renderLegacyAlert(alert.alertType, payload));
       }
@@ -67,6 +70,29 @@ export async function dispatchWatchAlerts(service: OperatorService, api: Telegra
       else await service.markWatchAlert(alert.id, message);
     }
   }
+}
+
+function renderCoreMonitoringAlert(type: string, payload: Record<string, unknown>) {
+  const title = typeof payload.title === 'string' ? payload.title : pretty(type);
+  const wallets = Array.isArray(payload.wallets) ? payload.wallets.filter((value): value is string => typeof value === 'string') : [];
+  const wallet = typeof payload.wallet === 'string' ? payload.wallet : null;
+  const ca = typeof payload.ca === 'string' ? payload.ca : null;
+  const confidence = typeof payload.relationshipConfidence === 'number' ? `${Math.round(payload.relationshipConfidence * 100)}%` : null;
+  return [
+    '📡 <b>CORE WALLET SIGNAL</b>',
+    '━━━━━━━━━━━━━━━━━━━━',
+    `⚡ <b>${escape(title.toUpperCase())}</b>`,
+    '',
+    ...(wallet ? [`Wallet\n<code>${escape(wallet)}</code>`] : []),
+    ...(wallets.length ? [`Wallets\n${wallets.slice(0, 8).map((value) => `<code>${escape(value)}</code>`).join('\n')}`] : []),
+    ...(payload.coreWallet ? [`Core source\n<code>${escape(String(payload.coreWallet))}</code>`] : []),
+    ...(payload.connection ? [`Connection  <b>${escape(pretty(String(payload.connection)))}</b>${confidence ? ` · ${confidence}` : ''}`] : []),
+    ...(payload.token || payload.symbol ? [`Token  <b>${escape(String(payload.token ?? payload.symbol))}</b>`] : []),
+    ...(ca ? [`CA\n<code>${escape(ca)}</code>`] : []),
+    ...(payload.amountUsd != null ? [`Amount  <b>$${Number(payload.amountUsd).toLocaleString('en-US')}</b>`] : []),
+    ...(payload.reason ? ['', `<i>${escape(String(payload.reason))}</i>`] : []),
+    '', '<i>Observation-only monitoring · no trade execution.</i>'
+  ].join('\n');
 }
 
 function escape(value: string) { return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'); }

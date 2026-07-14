@@ -133,7 +133,48 @@ export interface BridgeRow {
   tokenBuy: string | null;
 }
 
-export type OperatorWorkflow = 'wallet' | 'token' | 'profitable' | 'entity' | 'flow' | 'bridges' | 'recent';
+export type OperatorWorkflow = 'wallet' | 'token' | 'profitable' | 'entity' | 'flow' | 'bridges' | 'recent' | 'core' | 'core_add' | 'core_remove';
+
+export type CoreWalletView = 'list' | 'detail' | 'activity' | 'capital' | 'entity' | 'remove_confirm';
+
+export interface CoreWalletListItem {
+  address: string;
+  chains: ChainId[];
+  label: string;
+  status: 'Active' | 'Dormant';
+  historicalAlpha: number | null;
+  evidence: number | null;
+  lastActivity: string | null;
+  monitoringPriority: string;
+  eventCount: number;
+  entity: string | null;
+}
+
+export interface CoreWalletActivityRow {
+  eventId: string;
+  chain: ChainId;
+  kind: string;
+  direction: 'sent' | 'received' | 'bought' | 'sold' | 'activity';
+  counterparty: string | null;
+  token: string;
+  amount: string;
+  amountUsd: number | null;
+  ts: string;
+  txHash: string;
+}
+
+export interface CoreWalletCapitalRow {
+  sourceChain: ChainId;
+  source: string;
+  destinationChain: ChainId;
+  destination: string;
+  route: string;
+  confidence: number;
+  amountUsd: number | null;
+  firstTransfer: string;
+  lastTransfer: string;
+  tokenBuys: string[];
+}
 
 export type OperatorInvestigationView = 'summary' | 'paths' | 'priority' | 'cluster' | 'alts' | 'deployments' | 'evidence'
   | 'bridges' | 'more' | 'advanced' | 'receivers' | 'history' | 'outcomes' | 'watch';
@@ -154,4 +195,8 @@ export interface OperatorSessionState {
   page: number;
   pageSize: number;
   format?: 'json' | 'csv';
+  coreView?: CoreWalletView;
+  coreTarget?: string;
+  corePreviousView?: CoreWalletView;
+  silentCoreSync?: boolean;
 }
