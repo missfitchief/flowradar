@@ -38,6 +38,7 @@ const INVESTIGATION_WORKFLOWS = new Set<OperatorWorkflow>(['wallet', 'entity', '
 const EMPTY_KEYBOARD: InlineKeyboard = { inline_keyboard: [] };
 const activeWalletInvestigationJobs = new Map<string, Promise<void>>();
 const activeWalletRefreshJobs = new Map<string, Promise<void>>();
+const TOKEN_ANALYSIS_TIMEOUT_MS = 120_000;
 export const TELEGRAM_COMMANDS = [{ command: 'start', description: 'FlowRadar operator menu' }, ...COMMANDS];
 
 export function createUpdateHandler(service: OperatorService, api: TelegramApi, allowed: ReadonlySet<string>) {
@@ -250,7 +251,7 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
       }
       await editIfChanged(api, query, tokenProgress(required(nextState)), EMPTY_KEYBOARD);
       try {
-        const rendered = await renderWorkflow(service, workflow, nextState, next.id);
+        const rendered = await withTimeout(renderWorkflow(service, workflow, nextState, next.id), TOKEN_ANALYSIS_TIMEOUT_MS, 'Token analysis timed out');
         await editIfChanged(api, query, rendered.text, rendered.keyboard);
         await api.answerCallbackQuery(query.id);
       } catch (error) {
@@ -264,7 +265,7 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
     if (session.workflow === 'token' && parsed.action === 'tokenretry') {
       await editIfChanged(api, query, tokenProgress(required(state)), EMPTY_KEYBOARD);
       try {
-        const rendered = await renderWorkflow(service, 'token', state, session.id);
+        const rendered = await withTimeout(renderWorkflow(service, 'token', state, session.id), TOKEN_ANALYSIS_TIMEOUT_MS, 'Token analysis timed out');
         await editIfChanged(api, query, rendered.text, rendered.keyboard);
         await api.answerCallbackQuery(query.id, 'Analysis completed');
       } catch (error) {
@@ -411,7 +412,7 @@ async function sendWorkflow(service: OperatorService, api: TelegramApi, userId: 
   if (workflow === 'token') {
     await api.sendMessage(chatId, tokenProgress(required(state)));
     try {
-      const rendered = await renderWorkflow(service, workflow, state, session.id);
+      const rendered = await withTimeout(renderWorkflow(service, workflow, state, session.id), TOKEN_ANALYSIS_TIMEOUT_MS, 'Token analysis timed out');
       await api.sendMessage(chatId, rendered.text, rendered.keyboard);
     } catch (error) {
       logTokenAnalysisFailure(session.id, required(state), error);
@@ -1359,6 +1360,17 @@ function tokenAnalysisFailure(target: string, sessionId: string) {
 }
 function logTokenAnalysisFailure(sessionId: string, target: string, error: unknown) {
   console.error(`[telegram] token analysis failed session=${sessionId} target=${target}: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+}
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(message)), timeoutMs); })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 function walletProgress(target: string, stage: 'received' | 'running' | 'resumed') {
   const label = stage === 'received' ? '✓ Wallet received' : stage === 'resumed' ? '✓ Runtime resumed' : '🔄 Investigation running';
