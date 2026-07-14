@@ -138,6 +138,8 @@ export type OperatorWorkflow = 'wallet' | 'token' | 'profitable' | 'entity' | 'f
 export interface OperatorSessionState {
   target?: string;
   investigationId?: string;
+  investigationStatus?: 'queued' | 'running' | 'completed' | 'failed';
+  investigationError?: string;
   investigationView?: 'summary' | 'paths' | 'priority' | 'cluster' | 'alts' | 'deployments' | 'evidence' | 'bridges' | 'more' | 'advanced' | 'receivers';
   investigationItem?: string;
   chain?: ChainId | 'ALL';

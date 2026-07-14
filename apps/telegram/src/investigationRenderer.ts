@@ -36,6 +36,8 @@ function renderSummary(value: WalletInvestigationResult, presentation: Investiga
     '<b>Intelligence tiers</b>',
     `Tier S: ${presentation.tierCounts.S} · Tier A: ${presentation.tierCounts.A}`,
     `Tier B/C hidden: ${presentation.tierCounts.B + presentation.tierCounts.C} · Infrastructure excluded: ${presentation.infrastructureExcluded}`,
+    `Core / peripheral cluster: ${presentation.coreClusterWallets.length} / ${presentation.peripheralClusterWallets.length}`,
+    `Strongest evidence: ${h(presentation.topWallets[0]?.intelligence.evidenceSignals[0]?.label ?? 'no multi-signal relationship passed the gate')}`,
     '',
     '<b>TOP ACTIVE ALPHA</b>',
     ...(active.length ? active.map((wallet, index) => renderWallet(wallet, index + 1)) : ['No active Tier S/A wallet passed the multi-signal gate.']),
@@ -50,9 +52,9 @@ function renderSummary(value: WalletInvestigationResult, presentation: Investiga
     text,
     keyboard: { inline_keyboard: [
       ...walletRows,
-      [{ text: 'Strongest paths', callback_data: callback('invest', sessionId, 'priority') }, { text: 'Top deployments', callback_data: callback('invest', sessionId, 'deployments') }],
-      [{ text: 'Core / peripheral', callback_data: callback('invest', sessionId, 'cluster') }, { text: 'Evidence', callback_data: callback('invest', sessionId, 'evidence') }],
-      [{ text: 'Show more', callback_data: callback('invest', sessionId, 'more') }]
+      [{ text: 'Capital paths', callback_data: callback('invest', sessionId, 'priority') }, { text: 'Cluster wallets', callback_data: callback('invest', sessionId, 'cluster') }],
+      [{ text: 'Token deployments', callback_data: callback('invest', sessionId, 'deployments') }, { text: 'Evidence', callback_data: callback('invest', sessionId, 'evidence') }],
+      [{ text: 'Refresh', callback_data: callback('refresh', sessionId, 'run') }, { text: 'Watch cluster', callback_data: callback('watch', sessionId, 'cluster') }]
     ] }
   };
 }

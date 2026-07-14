@@ -1,6 +1,6 @@
 import { OperatorService } from '@flowradar/db';
 import { isTelegramRecipientUnavailable } from './api';
-import { TELEGRAM_COMMANDS, createUpdateHandler } from './handlers';
+import { TELEGRAM_COMMANDS, createUpdateHandler, resumeWalletInvestigationJobs } from './handlers';
 import { renderIntelligenceAlert } from './intelligenceAlertRenderer';
 import type { TelegramApi } from './types';
 
@@ -14,6 +14,8 @@ export async function runLongPolling(options: { service: OperatorService; api: T
   let retry = 0;
   let lastAlertsAt = 0;
   log.info(`[telegram] @${me.username ?? me.id} polling started`);
+  const resumed = await resumeWalletInvestigationJobs(options.service, options.api);
+  if (resumed) log.info(`[telegram] resumed ${resumed} wallet investigation job(s)`);
   while (!options.signal?.aborted) {
     try {
       const updates = await options.api.getUpdates(offset, options.signal);

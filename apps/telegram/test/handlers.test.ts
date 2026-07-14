@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { InvestigationMemberIntelligence, OperatorService, WalletInvestigationResult } from '@flowradar/db';
-import { createUpdateHandler } from '../src/handlers';
+import { createUpdateHandler, resumeWalletInvestigationJobs } from '../src/handlers';
 import { navKeyboard } from '../src/render';
 import type { TelegramApi } from '../src/types';
 
@@ -68,26 +68,73 @@ describe('Telegram command handlers', () => {
     expect(api.sendMessage).toHaveBeenCalledWith('123', 'Pošalji wallet adresu.', expect.objectContaining({ inline_keyboard: expect.any(Array) }));
   });
 
-  it('runs one canonical investigation for the pending wallet and sends only its summary', async () => {
+  it('acknowledges a pending wallet immediately, moves the state, and completes the investigation asynchronously', async () => {
     const api = apiMock();
+    let resolveInvestigation!: (value: WalletInvestigationResult) => void;
+    const investigationPromise = new Promise<WalletInvestigationResult>((resolve) => { resolveInvestigation = resolve; });
     const service = {
       getPendingSession: vi.fn().mockResolvedValue({ workflow: 'wallet', session: { id: 'pending1' } }),
       validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn().mockResolvedValue(1),
-      createSession: vi.fn().mockResolvedValue({ id: 'session1' }), walletInvestigationView: vi.fn().mockResolvedValue(investigation()),
+      createSession: vi.fn().mockResolvedValue({ id: 'session1' }), walletInvestigationView: vi.fn().mockReturnValue(investigationPromise),
       updateSession: vi.fn().mockResolvedValue(true)
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 2, message: { message_id: 2, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: ADDRESS } });
-    expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4 });
-    expect(service.updateSession).toHaveBeenCalledWith('session1', '123', '123', expect.objectContaining({ investigationId: 'investigation1', investigationView: 'summary', pageSize: 5 }));
-    expect(api.sendMessage).toHaveBeenCalledOnce();
-    const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[0]!;
+    expect(service.createSession).toHaveBeenCalledWith('123', '123', 'wallet', expect.objectContaining({ target: ADDRESS, investigationStatus: 'queued' }));
+    expect(service.clearPendingSession).toHaveBeenCalledWith('123', '123');
+    expect(vi.mocked(api.sendMessage).mock.calls.map((call) => call[1])).toEqual([
+      'Wallet primljen. Pokrećem analizu…',
+      'Wallet Investigation je pokrenut. Skeniram stvarne on-chain tokove kapitala; rezultat će stići ovde po završetku.'
+    ]);
+    await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4 }));
+    resolveInvestigation(investigation());
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(3));
+    expect(service.updateSession).toHaveBeenCalledWith('session1', '123', '123', expect.objectContaining({ investigationId: 'investigation1', investigationStatus: 'completed', investigationView: 'summary', pageSize: 5 }));
+    const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[2]!;
     expect(text).toContain('<b>WALLET INTELLIGENCE REPORT</b>');
     expect(text).toContain(`<code>${ADDRESS}</code>`);
     expect(text).not.toContain('Wallet DNA');
     expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual([
-      'Tier A evidence', 'Explorer', 'Strongest paths', 'Top deployments', 'Core / peripheral', 'Evidence', 'Show more'
+      'Tier A evidence', 'Explorer', 'Capital paths', 'Cluster wallets', 'Token deployments', 'Evidence', 'Refresh', 'Watch cluster'
     ]);
-    expect(keyboard?.inline_keyboard.flat().some((button) => button.text === 'Refresh')).toBe(false);
+  });
+
+  it('keeps an invalid address in the active wallet flow and always explains the accepted formats', async () => {
+    const api = apiMock();
+    const service = {
+      getPendingSession: vi.fn().mockResolvedValue({ workflow: 'wallet', session: { id: 'pending1' } }),
+      validateWorkflowTarget: vi.fn().mockResolvedValue(false), clearPendingSession: vi.fn()
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 20, message: { message_id: 20, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: 'not-an-address' } });
+    expect(service.clearPendingSession).not.toHaveBeenCalled();
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Solana base58 adresu (32–44 znaka)');
+  });
+
+  it('turns an asynchronous wallet scan failure into a visible Telegram failure', async () => {
+    const api = apiMock();
+    const service = {
+      getPendingSession: vi.fn().mockResolvedValue({ workflow: 'wallet', session: { id: 'pending1' } }),
+      validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn().mockResolvedValue(1),
+      createSession: vi.fn().mockResolvedValue({ id: 'session-failed' }), walletInvestigationView: vi.fn().mockRejectedValue(new Error('provider timeout')),
+      updateSession: vi.fn().mockResolvedValue(true)
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 21, message: { message_id: 21, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: ADDRESS } });
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(api.sendMessage).mock.calls[2]?.[1]).toContain('Wallet Investigation nije uspela');
+    expect(vi.mocked(api.sendMessage).mock.calls[2]?.[1]).toContain('provider timeout');
+    expect(service.updateSession).toHaveBeenCalledWith('session-failed', '123', '123', expect.objectContaining({ investigationStatus: 'failed', investigationError: 'provider timeout' }));
+  });
+
+  it('resumes a persisted queued wallet investigation after a poller restart', async () => {
+    const api = apiMock();
+    const service = {
+      pendingWalletInvestigationSessions: vi.fn().mockResolvedValue([{ id: 'session-resume', userId: '123', chatId: '123', stateJson: { target: ADDRESS, page: 1, pageSize: 10, investigationStatus: 'queued' } }]),
+      walletInvestigationView: vi.fn().mockResolvedValue(investigation()), updateSession: vi.fn().mockResolvedValue(true)
+    } as unknown as OperatorService;
+    expect(await resumeWalletInvestigationJobs(service, api)).toBe(1);
+    await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4 }));
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('nastavljen nakon restarta');
+    expect(vi.mocked(api.sendMessage).mock.calls[1]?.[1]).toContain('WALLET INTELLIGENCE REPORT');
   });
 
   it.each([

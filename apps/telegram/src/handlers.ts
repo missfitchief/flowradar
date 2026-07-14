@@ -27,6 +27,7 @@ const PENDING_PROMPTS: Partial<Record<OperatorWorkflow, string>> = {
 };
 const INVESTIGATION_WORKFLOWS = new Set<OperatorWorkflow>(['wallet', 'entity', 'flow', 'bridges']);
 const EMPTY_KEYBOARD: InlineKeyboard = { inline_keyboard: [] };
+const activeWalletInvestigationJobs = new Map<string, Promise<void>>();
 export const TELEGRAM_COMMANDS = [{ command: 'start', description: 'FlowRadar operator menu' }, ...COMMANDS];
 
 export function createUpdateHandler(service: OperatorService, api: TelegramApi, allowed: ReadonlySet<string>) {
@@ -88,7 +89,7 @@ async function handleMessage(service: OperatorService, api: TelegramApi, allowed
         await api.sendMessage(chatId, invalidTargetMessage(pending.workflow), pendingKeyboard(pending.session.id));
         return;
       }
-      await service.clearPendingSession(userId, chatId);
+      if (pending.workflow !== 'wallet') await service.clearPendingSession(userId, chatId);
       await sendWorkflow(service, api, userId, chatId, pending.workflow, text);
       return;
     }
@@ -142,10 +143,13 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
     if (parsed.action === 'choose') {
       const workflow = parsed.value === 'token' ? 'token' : 'wallet';
       const nextState = { ...state, page: 1 };
+      if (workflow === 'wallet') nextState.investigationStatus = 'queued';
       const next = await service.createSession(userId, chatId, workflow, nextState);
       if (workflow === 'wallet') {
+        await editIfChanged(api, query, 'Wallet primljen. Pokrećem analizu…', EMPTY_KEYBOARD);
+        enqueueWalletInvestigation(service, api, userId, chatId, nextState, next.id);
+        await api.sendMessage(chatId, 'Wallet Investigation je pokrenut. Skeniram stvarne on-chain tokove kapitala; rezultat će stići ovde po završetku.');
         await api.answerCallbackQuery(query.id, 'Investigation started');
-        await runInvestigationWorkflow(service, api, userId, chatId, workflow, nextState, next.id, query);
         return;
       }
       const rendered = await renderWorkflow(service, workflow, nextState, next.id);
@@ -218,13 +222,86 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
 
 async function sendWorkflow(service: OperatorService, api: TelegramApi, userId: string, chatId: string, workflow: OperatorWorkflow, target?: string) {
   const state = defaultState(target);
+  if (workflow === 'wallet') state.investigationStatus = 'queued';
   const session = await service.createSession(userId, chatId, workflow, state);
+  if (workflow === 'wallet') {
+    await api.sendMessage(chatId, 'Wallet primljen. Pokrećem analizu…');
+    console.info(`[telegram] wallet acknowledgement delivered session=${session.id} target=${target ?? ''}`);
+    await service.clearPendingSession(userId, chatId);
+    enqueueWalletInvestigation(service, api, userId, chatId, state, session.id);
+    await api.sendMessage(chatId, 'Wallet Investigation je pokrenut. Skeniram stvarne on-chain tokove kapitala; rezultat će stići ovde po završetku.');
+    console.info(`[telegram] wallet progress delivered session=${session.id} target=${target ?? ''}`);
+    return;
+  }
   if (INVESTIGATION_WORKFLOWS.has(workflow)) {
     await runInvestigationWorkflow(service, api, userId, chatId, workflow, state, session.id);
     return;
   }
   const rendered = await renderWorkflow(service, workflow, state, session.id);
   await api.sendMessage(chatId, rendered.text, rendered.keyboard);
+}
+
+function enqueueWalletInvestigation(
+  service: OperatorService,
+  api: TelegramApi,
+  userId: string,
+  chatId: string,
+  state: OperatorSessionState,
+  sessionId: string,
+  resumed = false
+) {
+  if (activeWalletInvestigationJobs.has(sessionId)) return false;
+  const job = new Promise<void>((resolve) => {
+    setImmediate(() => {
+      void executeWalletInvestigation(service, api, userId, chatId, state, sessionId, resumed).finally(resolve);
+    });
+  });
+  activeWalletInvestigationJobs.set(sessionId, job);
+  void job.finally(() => activeWalletInvestigationJobs.delete(sessionId));
+  return true;
+}
+
+async function executeWalletInvestigation(
+  service: OperatorService,
+  api: TelegramApi,
+  userId: string,
+  chatId: string,
+  state: OperatorSessionState,
+  sessionId: string,
+  resumed: boolean
+) {
+  const target = required(state);
+  try {
+    state.investigationStatus = 'running';
+    state.investigationError = undefined;
+    await service.updateSession(sessionId, userId, chatId, state);
+    if (resumed) await api.sendMessage(chatId, 'Wallet Investigation je nastavljen nakon restarta procesa.');
+    console.info(`[telegram] wallet investigation started session=${sessionId} target=${target}`);
+    await runInvestigationWorkflow(service, api, userId, chatId, 'wallet', state, sessionId);
+    console.info(`[telegram] wallet investigation completed session=${sessionId} target=${target}`);
+  } catch (error) {
+    const message = errorMessage(error);
+    state.investigationStatus = 'failed';
+    state.investigationError = message;
+    await service.updateSession(sessionId, userId, chatId, state).catch(() => false);
+    console.error(`[telegram] wallet investigation failed session=${sessionId} target=${target}: ${message}`);
+    try {
+      await api.sendMessage(chatId, `<b>Wallet Investigation nije uspela</b>\n${h(message)}\nPokušaj ponovo komandom <code>/wallet</code>.`);
+    } catch (deliveryError) {
+      console.error(`[telegram] wallet investigation failure notice could not be delivered session=${sessionId}: ${errorMessage(deliveryError)}`);
+    }
+  }
+}
+
+export async function resumeWalletInvestigationJobs(service: OperatorService, api: TelegramApi) {
+  const sessions = await service.pendingWalletInvestigationSessions();
+  let resumed = 0;
+  for (const session of sessions) {
+    const state = session.stateJson as unknown as OperatorSessionState;
+    if (!state.target || !enqueueWalletInvestigation(service, api, session.userId, session.chatId, state, session.id, true)) continue;
+    resumed += 1;
+  }
+  return resumed;
 }
 
 async function runInvestigationWorkflow(
@@ -239,6 +316,8 @@ async function runInvestigationWorkflow(
 ) {
   const investigation = await service.walletInvestigationView(required(state), { maxDepth: 4 });
   state.investigationId = investigation.id;
+  state.investigationStatus = 'completed';
+  state.investigationError = undefined;
   state.investigationView = workflowView(workflow);
   state.page = 1;
   state.pageSize = 5;
@@ -726,7 +805,7 @@ function pendingKeyboard(sessionId: string): InlineKeyboard { return { inline_ke
 function defaultState(target?: string): OperatorSessionState { return { target, chain: 'ALL', sort: 'pnl', page: 1, pageSize: 10 }; }
 function invalidTargetMessage(workflow: OperatorWorkflow) {
   if (workflow === 'token') return 'Token CA nije validan. Pošalji validan token CA.';
-  if (workflow === 'wallet') return 'Wallet adresa nije validna. Pošalji validnu wallet adresu.';
+  if (workflow === 'wallet') return 'Wallet adresa nije validna. Pošalji Solana base58 adresu (32–44 znaka) ili EVM 0x adresu (40 hex znakova).';
   return 'Vrednost nije validna. Pošalji validan wallet ili postojeći entity ID.';
 }
 function workflowView(workflow: OperatorWorkflow): OperatorSessionState['investigationView'] {

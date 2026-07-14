@@ -579,6 +579,21 @@ export class OperatorService {
     return result.count === 1;
   }
 
+  async pendingWalletInvestigationSessions(limit = 20) {
+    return this.prisma.operatorSession.findMany({
+      where: {
+        workflow: 'wallet',
+        expiresAt: { gt: new Date() },
+        OR: [
+          { stateJson: { path: ['investigationStatus'], equals: 'queued' } },
+          { stateJson: { path: ['investigationStatus'], equals: 'running' } }
+        ]
+      },
+      orderBy: { createdAt: 'asc' },
+      take: Math.max(1, Math.min(Math.trunc(limit), 100))
+    });
+  }
+
   async getCursor(botKey: string) { return (await this.prisma.telegramBotCursor.findUnique({ where: { botKey } }))?.nextUpdateId ?? 0n; }
   async setCursor(botKey: string, nextUpdateId: bigint) { await this.prisma.telegramBotCursor.upsert({ where: { botKey }, create: { botKey, nextUpdateId }, update: { nextUpdateId } }); }
 

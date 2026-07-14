@@ -51,10 +51,12 @@ describe('createHeliusActivityProvider', () => {
 
   it('calls the doc-verified endpoint with api-key + limit, and maps the response via heliusMapper', async () => {
     let capturedUrl = '';
+    let capturedSignal: AbortSignal | undefined;
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (url: string) => {
+      vi.fn(async (url: string, init?: RequestInit) => {
         capturedUrl = url;
+        capturedSignal = init?.signal ?? undefined;
         return new Response(JSON.stringify([swapFixture]), { status: 200 });
       })
     );
@@ -65,6 +67,7 @@ describe('createHeliusActivityProvider', () => {
     expect(capturedUrl).toContain(`/v0/addresses/${VALID_ADDRESS}/transactions`);
     expect(capturedUrl).toContain('api-key=secret-abc-123');
     expect(capturedUrl).toContain('limit=100');
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
     expect(result.txs.length).toBe(1);
     expect(result.txs[0]!.txHash).toBe(swapFixture.signature);
   });
