@@ -505,7 +505,7 @@ export class OperatorService {
       }
       await this.prisma.monitoringSubscription.update({
         where: { walletId_priority: { walletId: enrollment.wallet.id, priority: 'root_permanent' } },
-        data: { active: true, lineageRootId: root.id, nextPollAt: now, consecutiveErrors: 0, reason: 'telegram_core_wallet' }
+        data: { active: true, lineageRootId: root.id, nextPollAt: now, consecutiveErrors: 0, tierPriority: -1, reason: 'telegram_core_wallet' }
       });
       if (ref.chain === 'SOLANA') {
         await this.prisma.lineageExpansionNode.upsert({
@@ -559,8 +559,16 @@ export class OperatorService {
   async ensureCoreWalletWatches(userId: string, chatId: string) {
     const roots = await this.prisma.lineageRoot.findMany({
       where: { permanent: true, subscriptions: { some: { active: true, priority: 'root_permanent' } } },
-      select: { wallet: { select: { address: true, chain: true } } }, orderBy: { firstImportedAt: 'asc' }
+      select: { id: true, wallet: { select: { address: true, chain: true } } }, orderBy: { firstImportedAt: 'asc' }
     });
+    if (roots.length) {
+      await this.prisma.monitoringSubscription.updateMany({
+        where: { lineageRootId: { in: roots.map((root) => root.id) }, priority: 'root_permanent', active: true },
+        // Operator-managed Core roots must not starve behind a large fresh-
+        // receiver backlog. Receiver tiers retain their normal rank.
+        data: { tierPriority: -1 }
+      });
+    }
     const byAddress = new Map<string, typeof roots>();
     for (const root of roots) {
       const bucket = byAddress.get(root.wallet.address) ?? [];

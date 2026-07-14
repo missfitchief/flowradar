@@ -70,7 +70,7 @@ describe('OperatorService', () => {
     expect(added.refs.map((ref) => ref.chain).sort()).toEqual(['ARBITRUM', 'BASE', 'BSC', 'ETHEREUM']);
     const roots = await prisma.lineageRoot.findMany({ where: { wallet: { address: CORE_ADDRESS } }, include: { subscriptions: true } });
     expect(roots).toHaveLength(4);
-    expect(roots.every((root) => root.subscriptions.some((subscription) => subscription.priority === 'root_permanent' && subscription.active && subscription.lineageRootId === root.id))).toBe(true);
+    expect(roots.every((root) => root.subscriptions.some((subscription) => subscription.priority === 'root_permanent' && subscription.active && subscription.lineageRootId === root.id && subscription.tierPriority === -1))).toBe(true);
 
     await prisma.massTransactionEvent.create({ data: {
       eventId: `${PREFIX}:core:history`, chain: 'BASE', txHash: `${PREFIX}:core:history`, eventIndex: 0, blockOrSlot: 1n,
