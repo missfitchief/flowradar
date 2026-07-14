@@ -85,7 +85,7 @@ describe('Telegram command handlers', () => {
       'Wallet primljen. Pokrećem analizu…',
       'Wallet Investigation je pokrenut. Skeniram stvarne on-chain tokove kapitala; rezultat će stići ovde po završetku.'
     ]);
-    await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4 }));
+    await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4, refresh: true }));
     resolveInvestigation(investigation());
     await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(3));
     expect(service.updateSession).toHaveBeenCalledWith('session1', '123', '123', expect.objectContaining({ investigationId: 'investigation1', investigationStatus: 'completed', investigationView: 'summary', pageSize: 5 }));
@@ -131,7 +131,7 @@ describe('Telegram command handlers', () => {
       walletInvestigationView: vi.fn().mockResolvedValue(investigation()), updateSession: vi.fn().mockResolvedValue(true)
     } as unknown as OperatorService;
     expect(await resumeWalletInvestigationJobs(service, api)).toBe(1);
-    await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4 }));
+    await vi.waitFor(() => expect(service.walletInvestigationView).toHaveBeenCalledWith(ADDRESS, { maxDepth: 4, refresh: true }));
     await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(2));
     expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('nastavljen nakon restarta');
     expect(vi.mocked(api.sendMessage).mock.calls[1]?.[1]).toContain('WALLET INTELLIGENCE REPORT');

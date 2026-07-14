@@ -314,7 +314,7 @@ async function runInvestigationWorkflow(
   sessionId: string,
   query?: TelegramCallbackQuery
 ) {
-  const investigation = await service.walletInvestigationView(required(state), { maxDepth: 4 });
+  const investigation = await service.walletInvestigationView(required(state), { maxDepth: 4, ...(workflow === 'wallet' ? { refresh: true } : {}) });
   state.investigationId = investigation.id;
   state.investigationStatus = 'completed';
   state.investigationError = undefined;
