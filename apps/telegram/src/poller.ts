@@ -1,5 +1,6 @@
 import { OperatorService } from '@flowradar/db';
 import { isTelegramRecipientUnavailable } from './api';
+import { renderCoreMonitoringAlert } from './coreAlertRenderer';
 import { TELEGRAM_COMMANDS, createUpdateHandler, resumeWalletInvestigationJobs } from './handlers';
 import { renderIntelligenceAlert } from './intelligenceAlertRenderer';
 import type { TelegramApi } from './types';
@@ -69,7 +70,18 @@ export async function dispatchWatchAlerts(service: OperatorService, api: Telegra
           receipt = await api.sendMessage(alert.watch.chatId, '📡 <b>FLOWRADAR SIGNAL</b>\n━━━━━━━━━━━━━━━━━━━━\n⚪ Signal receipt is no longer available.');
         }
       } else if (alert.watch.targetType === 'core_wallet') {
-        receipt = await api.sendMessage(alert.watch.chatId, renderCoreMonitoringAlert(alert.alertType, payload));
+        const rendered = renderCoreMonitoringAlert(alert);
+        const delivery = object(payload.deliveryReceipt);
+        const priorMessageId = finite(delivery?.telegramMessageId);
+        if (alert.status === 'update_pending' && priorMessageId !== null) {
+          await api.editMessage(alert.watch.chatId, priorMessageId, rendered.text, rendered.keyboard);
+          await service.markWatchAlert(alert.id, undefined, {
+            telegramMessageId: priorMessageId, telegramChatId: finite(delivery?.telegramChatId) ?? Number(alert.watch.chatId)
+          });
+          log.info(`[core-alert-pipeline] ${JSON.stringify({ stage: 'updated', alertId: alert.id, alertType: alert.alertType, telegramMessageId: priorMessageId })}`);
+          continue;
+        }
+        receipt = await api.sendMessage(alert.watch.chatId, rendered.text, rendered.keyboard);
       } else {
         receipt = await api.sendMessage(alert.watch.chatId, renderLegacyAlert(alert.alertType, payload));
       }
@@ -84,29 +96,6 @@ export async function dispatchWatchAlerts(service: OperatorService, api: Telegra
       else await service.markWatchAlert(alert.id, message);
     }
   }
-}
-
-function renderCoreMonitoringAlert(type: string, payload: Record<string, unknown>) {
-  const title = typeof payload.title === 'string' ? payload.title : pretty(type);
-  const wallets = Array.isArray(payload.wallets) ? payload.wallets.filter((value): value is string => typeof value === 'string') : [];
-  const wallet = typeof payload.wallet === 'string' ? payload.wallet : null;
-  const ca = typeof payload.ca === 'string' ? payload.ca : null;
-  const confidence = typeof payload.relationshipConfidence === 'number' ? `${Math.round(payload.relationshipConfidence * 100)}%` : null;
-  return [
-    '📡 <b>CORE WALLET SIGNAL</b>',
-    '━━━━━━━━━━━━━━━━━━━━',
-    `⚡ <b>${escape(title.toUpperCase())}</b>`,
-    '',
-    ...(wallet ? [`Wallet\n<code>${escape(wallet)}</code>`] : []),
-    ...(wallets.length ? [`Wallets\n${wallets.slice(0, 8).map((value) => `<code>${escape(value)}</code>`).join('\n')}`] : []),
-    ...(payload.coreWallet ? [`Core source\n<code>${escape(String(payload.coreWallet))}</code>`] : []),
-    ...(payload.connection ? [`Connection  <b>${escape(pretty(String(payload.connection)))}</b>${confidence ? ` · ${confidence}` : ''}`] : []),
-    ...(payload.token || payload.symbol ? [`Token  <b>${escape(String(payload.token ?? payload.symbol))}</b>`] : []),
-    ...(ca ? [`CA\n<code>${escape(ca)}</code>`] : []),
-    ...(payload.amountUsd != null ? [`Amount  <b>$${Number(payload.amountUsd).toLocaleString('en-US')}</b>`] : []),
-    ...(payload.reason ? ['', `<i>${escape(String(payload.reason))}</i>`] : []),
-    '', '<i>Observation-only monitoring · no trade execution.</i>'
-  ].join('\n');
 }
 
 function escape(value: string) { return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'); }
@@ -124,4 +113,12 @@ function renderLegacyAlert(type: string, payload: Record<string, unknown>) {
   ].join('\n');
 }
 function pretty(value: string) { return value.replace(/([A-Z])/g, ' $1').replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()).trim(); }
+function object(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+function finite(value: unknown) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 function delay(ms: number, signal?: AbortSignal) { return new Promise<void>((resolve) => { const timer = setTimeout(resolve, ms); signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); }); }

@@ -11,10 +11,11 @@ const CORE_ADDRESS = `0x${'78'.repeat(20)}`;
 const CORE_CONNECTED = `0x${'89'.repeat(20)}`;
 const CORE_BRIDGE_CONNECTED = `0x${'bc'.repeat(20)}`;
 const CORE_TOKEN = `0x${'9a'.repeat(20)}`;
+const CORE_SOLO_TOKEN = `0x${'9b'.repeat(20)}`;
 
 async function cleanup() {
-  await prisma.operatorWatchAlert.deleteMany({ where: { watch: { targetKey: CORE_ADDRESS } } });
-  await prisma.operatorWatch.deleteMany({ where: { targetKey: CORE_ADDRESS } });
+  await prisma.operatorWatchAlert.deleteMany({ where: { watch: { targetKey: { in: [CORE_ADDRESS, CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } } } });
+  await prisma.operatorWatch.deleteMany({ where: { targetKey: { in: [CORE_ADDRESS, CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } } });
   await prisma.walletFlowRelationship.deleteMany({ where: { OR: [{ sourceWallet: CORE_ADDRESS }, { relatedWallet: { in: [CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } }] } });
   await prisma.massTransactionEvent.deleteMany({ where: { eventId: { startsWith: `${PREFIX}:core:` } } });
   await prisma.lineageRoot.deleteMany({ where: { wallet: { address: { in: [CORE_ADDRESS, CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } } } });
@@ -89,7 +90,7 @@ describe('OperatorService', () => {
     expect(await prisma.monitoringSubscription.count({ where: { lineageRoot: { source: 'telegram_core' }, active: true } })).toBe(0);
   });
 
-  it('stores transfers silently but alerts on Core and directly funded receiver token buys', async () => {
+  it('keeps solo and dust buys silent, then creates and updates one funded confluence alert', async () => {
     const service = new OperatorService(prisma);
     const added = await service.addCoreWallet(PREFIX, PREFIX, CORE_ADDRESS);
     const now = new Date(added.watch.updatedAt.getTime() + 10_000);
@@ -113,25 +114,52 @@ describe('OperatorService', () => {
     await prisma.massTransactionEvent.createMany({ data: [
       { eventId: `${PREFIX}:core:funding`, chain: 'BASE', txHash: `${PREFIX}:core:funding`, eventIndex: 0, blockOrSlot: 1n, ts: new Date(now.getTime() - 5_000), kind: 'native_transfer', status: 'succeeded', fromAddress: CORE_ADDRESS, toAddress: CORE_CONNECTED, actorAddress: CORE_ADDRESS, amountToken: '0.2', amountUsd: 500, provider: 'test', observedAt: new Date(now.getTime() - 5_000), relevanceCategory: 'capital_transfer', relevanceScore: 90, reasonCodes: ['direct_transfer'], safeEntityLink: true, enrollmentCandidate: true, metadataJson: {} },
       { eventId: `${PREFIX}:core:root-buy`, chain: 'BASE', txHash: `${PREFIX}:core:root-buy`, eventIndex: 0, blockOrSlot: 2n, ts: new Date(now.getTime() - 3_000), kind: 'token_buy', status: 'succeeded', fromAddress: CORE_ADDRESS, toAddress: CORE_ADDRESS, actorAddress: CORE_ADDRESS, assetAddress: CORE_TOKEN, assetSymbol: 'CORE', amountToken: '100', amountUsd: 250, provider: 'test', observedAt: new Date(now.getTime() - 3_000), relevanceCategory: 'token_deployment', relevanceScore: 90, reasonCodes: ['buy'], metadataJson: {} },
+      { eventId: `${PREFIX}:core:solo-buy`, chain: 'BASE', txHash: `${PREFIX}:core:solo-buy`, eventIndex: 0, blockOrSlot: 2n, ts: new Date(now.getTime() - 2_500), kind: 'token_buy', status: 'succeeded', fromAddress: CORE_ADDRESS, toAddress: CORE_ADDRESS, actorAddress: CORE_ADDRESS, assetAddress: CORE_SOLO_TOKEN, assetSymbol: 'SOLO', amountToken: '10', amountUsd: 100, provider: 'test', observedAt: new Date(now.getTime() - 2_500), relevanceCategory: 'token_deployment', relevanceScore: 90, reasonCodes: ['buy'], metadataJson: {} },
       { eventId: `${PREFIX}:core:receiver-buy`, chain: 'BASE', txHash: `${PREFIX}:core:receiver-buy`, eventIndex: 0, blockOrSlot: 3n, ts: new Date(now.getTime() - 1_000), kind: 'token_buy', status: 'succeeded', fromAddress: CORE_CONNECTED, toAddress: CORE_CONNECTED, actorAddress: CORE_CONNECTED, assetAddress: CORE_TOKEN, assetSymbol: 'CORE', amountToken: '50', amountUsd: 125, provider: 'test', observedAt: new Date(now.getTime() - 1_000), relevanceCategory: 'token_deployment', relevanceScore: 90, reasonCodes: ['buy'], metadataJson: {} }
       ,{ eventId: `${PREFIX}:core:bridge-receiver-buy`, chain: 'ARBITRUM', txHash: `${PREFIX}:core:bridge-receiver-buy`, eventIndex: 0, blockOrSlot: 4n, ts: new Date(now.getTime() - 500), kind: 'token_buy', status: 'succeeded', fromAddress: CORE_BRIDGE_CONNECTED, toAddress: CORE_BRIDGE_CONNECTED, actorAddress: CORE_BRIDGE_CONNECTED, assetAddress: CORE_TOKEN, assetSymbol: 'CORE', amountToken: '25', amountUsd: 60, provider: 'test', observedAt: new Date(now.getTime() - 500), relevanceCategory: 'token_deployment', relevanceScore: 90, reasonCodes: ['buy'], metadataJson: {} }
     ] });
 
-    expect(await service.materializeWatchAlerts(new Date(now.getTime() - 10_000))).toBe(3);
-    const alerts = await prisma.operatorWatchAlert.findMany({ where: { watchId: added.watch.id }, orderBy: { alertType: 'asc' } });
-    expect(alerts.map((alert) => alert.alertType)).toEqual(['connected_core_receiver_buy', 'connected_core_receiver_buy', 'core_wallet_token_buy']);
-    expect(alerts.some((alert) => alert.eventKey.includes('funding'))).toBe(false);
-    expect(alerts.find((alert) => alert.alertType === 'connected_core_receiver_buy')?.payloadJson).toMatchObject({ coreWallet: CORE_ADDRESS, wallet: CORE_CONNECTED, connection: 'direct_transfer', ca: CORE_TOKEN });
-    expect(alerts.some((alert) => alert.alertType === 'connected_core_receiver_buy' && JSON.stringify(alert.payloadJson).includes('exact_bridge'))).toBe(true);
+    expect(await service.materializeWatchAlerts(new Date(now.getTime() - 10_000))).toBe(1);
+    const alerts = await prisma.operatorWatchAlert.findMany({ where: { watchId: added.watch.id } });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ alertType: 'core_multi_wallet_buy', status: 'pending' });
+    expect(alerts[0]?.payloadJson).toMatchObject({
+      triggerType: 'funded_execution_buy', ca: CORE_TOKEN, rawWalletCount: 2,
+      coreWalletCount: 1, relatedWalletCount: 1, combinedBuyUsd: 375
+    });
+    expect(await prisma.operatorWatchAlert.count({ where: { alertType: { in: ['core_wallet_token_buy', 'connected_core_receiver_buy'] } } })).toBe(0);
+    expect((await prisma.massTransactionEvent.findUniqueOrThrow({ where: { eventId: `${PREFIX}:core:bridge-receiver-buy` } })).metadataJson).toMatchObject({
+      coreAlertAudit: { rejectionReason: 'below_minimum_buy_threshold', cumulativeWalletBuyUsd: 60 }
+    });
+    expect((await prisma.massTransactionEvent.findUniqueOrThrow({ where: { eventId: `${PREFIX}:core:solo-buy` } })).metadataJson).toMatchObject({
+      coreAlertAudit: { eligibility: 'eligible_for_future_confluence', rejectionReason: 'solo_core_buy_no_confluence', cumulativeWalletBuyUsd: 100 }
+    });
     expect(await service.materializeWatchAlerts(new Date(now.getTime() - 10_000))).toBe(0);
 
-    const delivered = alerts.find((alert) => alert.alertType === 'core_wallet_token_buy')!;
+    const delivered = alerts[0]!;
     await service.recordWatchAlertDispatchAttempt(delivered.id);
     await service.markWatchAlert(delivered.id, undefined, { telegramMessageId: 456, telegramChatId: 123 });
     expect((await prisma.operatorWatchAlert.findUniqueOrThrow({ where: { id: delivered.id } })).payloadJson).toMatchObject({
-      pipeline: { persisted: true, eligibility: 'eligible' },
+      pipeline: { persisted: true, eligibility: 'eligible_cluster_confluence', rejectionReason: null },
       deliveryReceipt: { attempts: 1, status: 'delivered', telegramMessageId: 456, telegramChatId: 123 }
     });
+
+    await prisma.massTransactionEvent.create({ data: {
+      eventId: `${PREFIX}:core:receiver-buy-more`, chain: 'BASE', txHash: `${PREFIX}:core:receiver-buy-more`, eventIndex: 0,
+      blockOrSlot: 5n, ts: new Date(now.getTime() + 1_000), kind: 'token_buy', status: 'succeeded',
+      fromAddress: CORE_CONNECTED, toAddress: CORE_CONNECTED, actorAddress: CORE_CONNECTED,
+      assetAddress: CORE_TOKEN, assetSymbol: 'CORE', amountToken: '40', amountUsd: 100,
+      provider: 'test', observedAt: new Date(now.getTime() + 1_000), relevanceCategory: 'token_deployment',
+      relevanceScore: 90, reasonCodes: ['buy'], metadataJson: {}
+    } });
+    expect(await service.materializeWatchAlerts(new Date(now.getTime() - 10_000))).toBe(0);
+    const updated = await prisma.operatorWatchAlert.findUniqueOrThrow({ where: { id: delivered.id } });
+    expect(updated).toMatchObject({ status: 'update_pending' });
+    expect(updated.payloadJson).toMatchObject({
+      rawWalletCount: 2, combinedBuyUsd: 475,
+      deliveryReceipt: { telegramMessageId: 456, telegramChatId: 123, status: 'delivered' }
+    });
+    expect(await prisma.operatorWatchAlert.count({ where: { watchId: added.watch.id } })).toBe(1);
   });
 
   it('returns automatic candidates through bounded profitable pagination', async () => {

@@ -10,7 +10,7 @@
 import { createMassTrackerSession, expandWalletCapitalGraph, runMonitoringScheduler, type MonitoringPollContext, type MonitoringPollFn } from '@flowradar/db';
 import { createLiveWalletCapitalScanner } from '@flowradar/providers';
 import type { ChainId } from '@prisma/client';
-import type { MassTransactionEvent } from '@flowradar/core';
+import { MIN_QUALIFYING_BUY_USD, type MassTransactionEvent } from '@flowradar/core';
 import type { JobContext } from '../context';
 
 // Bounded per tick — the scheduler's tier cadences keep most wallets not-due.
@@ -29,12 +29,16 @@ export function coreMonitoringSince(cursor: string | null | undefined, now = new
   return new Date(now.getTime() - CORE_INITIAL_LOOKBACK_MS);
 }
 
-export function coreAlertDecision(event: Pick<MassTransactionEvent, 'kind' | 'status'> & { asset: { address: string | null } }) {
+export function coreAlertDecision(event: Pick<MassTransactionEvent, 'kind' | 'status'> & { asset: { address: string | null; amountUsd: number | null } }) {
   if (event.status === 'failed') return { eligible: false, alertType: null, rejectionReason: 'failed_transaction' } as const;
   if (event.kind === 'token_buy') {
-    return event.asset.address
-      ? { eligible: true, alertType: 'core_wallet_token_buy', rejectionReason: null } as const
-      : { eligible: false, alertType: null, rejectionReason: 'token_buy_missing_asset' } as const;
+    if (!event.asset.address) return { eligible: false, alertType: null, rejectionReason: 'token_buy_missing_asset' } as const;
+    if (event.asset.amountUsd === null || !Number.isFinite(event.asset.amountUsd)) {
+      return { eligible: false, alertType: null, rejectionReason: 'usd_value_unavailable' } as const;
+    }
+    return event.asset.amountUsd < MIN_QUALIFYING_BUY_USD
+      ? { eligible: false, alertType: null, rejectionReason: 'below_minimum_buy_threshold' } as const
+      : { eligible: false, alertType: null, rejectionReason: 'solo_core_buy_no_confluence' } as const;
   }
   if (event.kind === 'native_transfer' || event.kind === 'token_transfer') {
     return { eligible: false, alertType: null, rejectionReason: 'silent_transfer_policy' } as const;

@@ -26,6 +26,7 @@ export * from './rules/index';
 export * from './window/aggregate';
 export * from './alerts/templates';
 export * from './alerts/cooldown';
+export * from './alerts/coreConfluence';
 export * from './cluster/linkConfidence';
 export * from './cluster/unionFind';
 export * from './cluster/clusterer';

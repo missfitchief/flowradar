@@ -1,5 +1,8 @@
-import { Prisma, type AddressCategory, type ChainId, type OperatorSession, type PrismaClient } from '@prisma/client';
-import type { MassTransactionEvent } from '@flowradar/core';
+import { Prisma, type AddressCategory, type ChainId, type MassTransactionEvent as PersistedMassTransactionEvent, type OperatorSession, type PrismaClient } from '@prisma/client';
+import {
+  CORE_ALERT_POLICY_VERSION, CORE_CONFLUENCE_WINDOW_MS, MIN_QUALIFYING_BUY_USD,
+  evaluateCoreBuyWindow, type CoreBuyAuditDecision, type CoreBuyCandidate, type MassTransactionEvent
+} from '@flowradar/core';
 import type { WalletBridgeScanProvider, WalletCapitalScanProvider } from '@flowradar/providers';
 import { normalizeAddress, runUnifiedProfitableWalletDiscovery, validAddress, type HistoricalTraderProvider } from '../discovery/unified';
 import { WalletInvestigationService } from '../investigation/walletInvestigation';
@@ -16,7 +19,7 @@ import type {
 const ALL_CHAINS: ChainId[] = ['SOLANA', 'ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'];
 const EVM_CHAINS: ChainId[] = ['ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'];
 const DEFAULT_ALERTS = ['funded_new_wallet', 'bridge_transfer', 'dormant_wallet_reactivated', 'receiver_bought_token', 'profit_rotated', 'high_priority_transfer', 'probable_side_wallet_discovered'];
-const CORE_ALERTS = ['core_wallet_token_buy', 'dormant_wallet_reactivated', 'core_multi_wallet_buy', 'independent_entity_confluence', 'connected_core_receiver_buy'];
+const CORE_ALERTS = ['dormant_wallet_reactivated', 'core_multi_wallet_buy', 'independent_entity_confluence'];
 const PENDING_WORKFLOWS: OperatorWorkflow[] = ['wallet', 'token', 'entity', 'flow', 'bridges', 'core_add', 'core_remove'];
 const pendingWorkflowKey = (workflow: OperatorWorkflow) => `pending:${workflow}`;
 
@@ -953,10 +956,22 @@ export class OperatorService {
 
   private async materializeCoreWalletAlerts(
     watches: Awaited<ReturnType<PrismaClient['operatorWatch']['findMany']>>,
-    activations: Awaited<ReturnType<PrismaClient['trackedTokenActivationAlert']['findMany']>>,
+    _activations: Awaited<ReturnType<PrismaClient['trackedTokenActivationAlert']['findMany']>>,
     since: Date
   ) {
     let created = 0;
+    if (watches.length) {
+      await this.prisma.operatorWatchAlert.updateMany({
+        where: {
+          watchId: { in: watches.map((watch) => watch.id) }, status: { in: ['pending', 'retryable', 'update_pending'] },
+          OR: [
+            { alertType: { in: ['core_wallet_token_buy', 'connected_core_receiver_buy', 'independent_entity_confluence'] } },
+            { alertType: 'core_multi_wallet_buy', eventKey: { startsWith: 'core-confluence:', not: { startsWith: 'core-confluence-v2:' } } }
+          ]
+        },
+        data: { status: 'failed', lastError: 'superseded_by_core_confluence_v2' }
+      });
+    }
     const refsByWatch = new Map<string, ReturnType<typeof inferredAddressRefs>>();
     const connectedByWatch = new Map<string, Array<{ chain: ChainId; address: string; route: string; confidence: number; source: string }>>();
     for (const watch of watches) {
@@ -981,33 +996,6 @@ export class OperatorService {
       })));
       connectedByWatch.set(watch.id, connected);
 
-      const buys = refs.length ? await this.prisma.massTransactionEvent.findMany({
-        where: {
-          chain: { in: refs.map((ref) => ref.chain) }, kind: 'token_buy', status: { not: 'failed' },
-          assetAddress: { not: null }, observedAt: { gt: since }, ts: { gte: watch.updatedAt },
-          OR: refs.flatMap((ref) => [{ chain: ref.chain, actorAddress: ref.address }, { chain: ref.chain, fromAddress: ref.address }])
-        }, orderBy: [{ observedAt: 'asc' }, { eventId: 'asc' }], take: 10_000
-      }) : [];
-      for (const event of buys) {
-        if (!event.assetAddress || !watch.alertTypes.includes('core_wallet_token_buy')) continue;
-        const token = await this.prisma.token.findUnique({ where: { chain_address: { chain: event.chain, address: event.assetAddress } }, select: { name: true, symbol: true } });
-        const result = await this.prisma.operatorWatchAlert.createMany({ data: [{
-          watchId: watch.id, eventKey: `core-buy:${event.eventId}`, alertType: 'core_wallet_token_buy',
-          payloadJson: json({
-            title: 'Core Wallet Token Buy', wallet: event.actorAddress ?? event.fromAddress, chain: event.chain,
-            token: token?.name ?? token?.symbol ?? event.assetAddress, symbol: token?.symbol ?? event.assetSymbol,
-            ca: event.assetAddress, amount: event.amountToken, amountUsd: decimal(event.amountUsd), txHash: event.txHash,
-            occurredAt: event.ts.toISOString(), reason: 'Core wallet executed a locally observed token buy.',
-            pipeline: {
-              providerEventSeen: true, normalized: true, persisted: true,
-              eventId: event.eventId, provider: event.provider, observedAt: event.observedAt.toISOString(),
-              eligibility: 'eligible', alertType: 'core_wallet_token_buy', alertCreatedAt: new Date().toISOString()
-            }
-          })
-        }], skipDuplicates: true });
-        created += result.count;
-      }
-
       if (watch.alertTypes.includes('dormant_wallet_reactivated') && refs.length) {
         const dormant = await this.prisma.walletIntelligenceEvent.findMany({
           where: {
@@ -1024,45 +1012,6 @@ export class OperatorService {
         }
       }
 
-      if (watch.alertTypes.includes('connected_core_receiver_buy') && connected.length) {
-        for (const chain of ALL_CHAINS) {
-          const chainConnected = connected.filter((row) => row.chain === chain);
-          if (!chainConnected.length) continue;
-          const buys = await this.prisma.massTransactionEvent.findMany({
-            where: {
-              chain, kind: 'token_buy', status: { not: 'failed' }, assetAddress: { not: null },
-              observedAt: { gt: since }, ts: { gte: watch.updatedAt },
-              OR: [{ actorAddress: { in: chainConnected.map((row) => row.address) } }, { fromAddress: { in: chainConnected.map((row) => row.address) } }]
-            }, orderBy: [{ observedAt: 'asc' }, { eventId: 'asc' }], take: 10_000
-          });
-          const relationOf = new Map(chainConnected.map((row) => [row.address, row]));
-          for (const event of buys) {
-            if (!event.assetAddress) continue;
-            const receiver = event.actorAddress ?? event.fromAddress;
-            const relation = relationOf.get(receiver);
-            if (!relation) continue;
-            const token = await this.prisma.token.findUnique({ where: { chain_address: { chain, address: event.assetAddress } }, select: { name: true, symbol: true } });
-            const result = await this.prisma.operatorWatchAlert.createMany({ data: [{
-              watchId: watch.id, eventKey: `core-connected-buy:${event.eventId}`, alertType: 'connected_core_receiver_buy',
-              payloadJson: json({
-                title: 'Core-Linked Wallet Token Buy', coreWallet: watch.targetKey, wallet: receiver, chain,
-                connection: relation.route, relationshipConfidence: relation.confidence, fundingSource: relation.source,
-                token: token?.name ?? token?.symbol ?? event.assetAddress, symbol: token?.symbol ?? event.assetSymbol,
-                ca: event.assetAddress, amount: event.amountToken, amountUsd: decimal(event.amountUsd), txHash: event.txHash,
-                occurredAt: event.ts.toISOString(), reason: relation.route === 'exact_bridge'
-                  ? 'Wallet is linked to the Core root by a verified exact bridge path.'
-                  : 'Wallet directly received capital from the Core root.',
-                pipeline: {
-                  providerEventSeen: true, normalized: true, persisted: true,
-                  eventId: event.eventId, provider: event.provider, observedAt: event.observedAt.toISOString(),
-                  eligibility: 'eligible', alertType: 'connected_core_receiver_buy', alertCreatedAt: new Date().toISOString()
-                }
-              })
-            }], skipDuplicates: true });
-            created += result.count;
-          }
-        }
-      }
     }
 
     const byChat = new Map<string, typeof watches>();
@@ -1075,69 +1024,212 @@ export class OperatorService {
       const anchor = [...chatWatches].sort((a, b) => a.id.localeCompare(b.id))[0];
       if (!anchor) continue;
       const coreRefs = uniqueRefs(chatWatches.flatMap((watch) => refsByWatch.get(watch.id) ?? []));
-      const activeSinceByRef = new Map(chatWatches.flatMap((watch) =>
-        (refsByWatch.get(watch.id) ?? []).map((ref) => [`${ref.chain}:${ref.address}`, watch.updatedAt] as const)
-      ));
-      const buyGroups = new Map<string, Array<{ eventId: string; wallet: string; chain: ChainId; token: string; ts: Date }>>();
+      const monitoredByRef = new Map<string, {
+        chain: ChainId; address: string; role: 'core' | 'related'; activeSince: Date;
+        relation: { route: string; confidence: number; source: string } | null;
+      }>();
+      for (const watch of chatWatches) {
+        for (const ref of refsByWatch.get(watch.id) ?? []) {
+          monitoredByRef.set(`${ref.chain}:${ref.address}`, { ...ref, role: 'core', activeSince: watch.updatedAt, relation: null });
+        }
+        for (const related of connectedByWatch.get(watch.id) ?? []) {
+          const key = `${related.chain}:${related.address}`;
+          const current = monitoredByRef.get(key);
+          if (current?.role === 'core') continue;
+          if (!current || related.confidence > (current.relation?.confidence ?? 0)) {
+            monitoredByRef.set(key, {
+              chain: related.chain, address: related.address, role: 'related', activeSince: watch.updatedAt,
+              relation: { route: related.route, confidence: related.confidence, source: related.source }
+            });
+          }
+        }
+      }
+      const monitored = [...monitoredByRef.values()];
+      const profiles = monitored.length ? await this.prisma.walletIntelligenceProfile.findMany({
+        where: { OR: ALL_CHAINS.flatMap((chain) => {
+          const addresses = monitored.filter((ref) => ref.chain === chain).map((ref) => ref.address);
+          return addresses.length ? [{ chain, address: { in: addresses } }] : [];
+        }) },
+        include: {
+          cluster: { select: { clusterKey: true } },
+          entityMemberships: {
+            where: { status: { not: 'rejected' }, entity: { status: 'active' } },
+            include: { entity: { select: { entityKey: true, label: true, identityConfidence: true, historicalAlphaScore: true } } },
+            orderBy: [{ identityConfidence: 'desc' }, { evidenceScore: 'desc' }]
+          }
+        }
+      }) : [];
+      const profileByRef = new Map(profiles.map((profile) => [`${profile.chain}:${profile.address}`, profile]));
+      const dormantEvents = monitored.length ? await this.prisma.walletIntelligenceEvent.findMany({
+        where: {
+          eventType: 'Dormant Wallet Awakened', occurredAt: { gte: since },
+          OR: ALL_CHAINS.flatMap((chain) => {
+            const addresses = monitored.filter((ref) => ref.chain === chain).map((ref) => ref.address);
+            return addresses.length ? [{ chain, walletAddress: { in: addresses } }] : [];
+          })
+        }, orderBy: { occurredAt: 'asc' }, take: 20_000
+      }) : [];
+      const dormantByRef = new Map<string, typeof dormantEvents>();
+      for (const event of dormantEvents) {
+        const key = `${event.chain}:${event.walletAddress}`;
+        const bucket = dormantByRef.get(key) ?? [];
+        bucket.push(event); dormantByRef.set(key, bucket);
+      }
+
+      const buyGroups = new Map<string, PersistedMassTransactionEvent[]>();
       for (const chain of ALL_CHAINS) {
-        const addresses = coreRefs.filter((ref) => ref.chain === chain).map((ref) => ref.address);
+        const addresses = monitored.filter((ref) => ref.chain === chain).map((ref) => ref.address);
         if (!addresses.length) continue;
         const buys = await this.prisma.massTransactionEvent.findMany({
-          where: { chain, kind: 'token_buy', assetAddress: { not: null }, observedAt: { gt: since }, OR: [{ actorAddress: { in: addresses } }, { fromAddress: { in: addresses } }] },
-          orderBy: [{ observedAt: 'asc' }, { eventId: 'asc' }], take: 20_000
+          where: {
+            chain, kind: 'token_buy', status: { not: 'failed' }, assetAddress: { not: null }, observedAt: { gt: since },
+            OR: [{ actorAddress: { in: addresses } }, { fromAddress: { in: addresses } }]
+          }, orderBy: [{ ts: 'asc' }, { eventId: 'asc' }], take: 20_000
         });
         for (const event of buys) {
           if (!event.assetAddress) continue;
           const wallet = event.actorAddress ?? event.fromAddress;
-          const activeSince = activeSinceByRef.get(`${chain}:${wallet}`);
-          if (!activeSince || event.ts < activeSince) continue;
+          const ref = monitoredByRef.get(`${chain}:${wallet}`);
+          if (!ref || event.ts < ref.activeSince) continue;
           const key = `${chain}:${event.assetAddress}`;
           const bucket = buyGroups.get(key) ?? [];
-          bucket.push({ eventId: event.eventId, wallet, chain, token: event.assetAddress, ts: event.ts });
-          buyGroups.set(key, bucket);
+          bucket.push(event); buyGroups.set(key, bucket);
         }
       }
-      if (anchor.alertTypes.includes('core_multi_wallet_buy')) {
-        for (const events of buyGroups.values()) {
-          const wallets = [...new Set(events.map((event) => event.wallet))].sort();
-          if (wallets.length < 2) continue;
-          const first = events[0];
-          const token = await this.prisma.token.findUnique({ where: { chain_address: { chain: first.chain, address: first.token } }, select: { name: true, symbol: true } });
-          const eventIds = [...new Set(events.map((event) => event.eventId))].sort();
-          const result = await this.prisma.operatorWatchAlert.createMany({ data: [{
-            watchId: anchor.id, eventKey: `core-confluence:${eventIds.join(':')}`, alertType: 'core_multi_wallet_buy',
-            payloadJson: json({ title: 'Multiple Core Wallets Bought', chain: first.chain, token: token?.name ?? token?.symbol ?? first.token, symbol: token?.symbol, ca: first.token, wallets, occurredAt: events.at(-1)?.ts.toISOString(), reason: `${wallets.length} Core wallets bought the same token.` })
-          }], skipDuplicates: true });
-          created += result.count;
-          await this.prisma.operatorWatchAlert.updateMany({
-            where: {
-              watchId: { in: chatWatches.map((watch) => watch.id) },
-              eventKey: { in: eventIds.map((eventId) => `core-buy:${eventId}`) },
-              alertType: 'core_wallet_token_buy', status: { in: ['pending', 'retryable'] }
-            },
-            data: { status: 'failed', lastError: 'superseded_by_core_multi_wallet_buy' }
+
+      if (!anchor.alertTypes.includes('core_multi_wallet_buy') && !anchor.alertTypes.includes('independent_entity_confluence')) continue;
+      for (const [groupKey, groupEvents] of buyGroups) {
+        const separator = groupKey.indexOf(':');
+        const chain = groupKey.slice(0, separator) as ChainId;
+        const tokenAddress = groupKey.slice(separator + 1);
+        for (const windowEvents of splitCoreBuyWindows(groupEvents, CORE_CONFLUENCE_WINDOW_MS)) {
+          const windowEnd = windowEvents.at(-1)!.ts;
+          const [token, quality] = await Promise.all([
+            this.prisma.token.findUnique({
+              where: { chain_address: { chain, address: tokenAddress } },
+              select: {
+                name: true, symbol: true, dex: true, firstSeenAt: true, tokenCreatedAt: true, riskFlags: true,
+                marketSnapshots: { where: { ts: { lte: windowEnd } }, orderBy: { ts: 'desc' }, take: 1 }
+              }
+            }),
+            this.prisma.tokenQualityAssessment.findFirst({
+              where: { chain, tokenAddress, assessedAt: { lte: windowEnd } }, orderBy: { assessedAt: 'desc' }
+            })
+          ]);
+          const criticalRisk = hasCriticalTokenRisk(token?.riskFlags, quality?.reasonCodes ?? []);
+          const candidates: CoreBuyCandidate[] = windowEvents.map((event) => {
+            const wallet = event.actorAddress ?? event.fromAddress;
+            const ref = monitoredByRef.get(`${chain}:${wallet}`)!;
+            const profile = profileByRef.get(`${chain}:${wallet}`);
+            const membership = profile?.entityMemberships[0];
+            const intelligenceQuality = Math.max(profile?.evidenceScore ?? 0, profile?.historicalAlphaScore ?? 0, membership?.identityConfidence ? membership.identityConfidence * 100 : 0);
+            return {
+              eventId: event.eventId, wallet, role: ref.role, ts: event.ts,
+              amountUsd: decimal(event.amountUsd), amountToken: finiteNumber(event.amountToken),
+              entityKey: membership?.entity.entityKey ?? profile?.entityKey ?? null,
+              entityLabel: membership?.entity.label ?? null, clusterKey: profile?.cluster.clusterKey ?? null,
+              evidenceScore: profile?.evidenceScore ?? null,
+              historicalAlphaScore: Math.max(profile?.historicalAlphaScore ?? 0, membership?.entity.historicalAlphaScore ?? 0) || null,
+              qualityQualified: ref.role === 'core' || Boolean(ref.relation && (ref.relation.route === 'exact_bridge' || ref.relation.confidence >= 0.5) && (!profile || intelligenceQuality >= 50)),
+              relationshipRoute: ref.relation?.route ?? null, relationshipConfidence: ref.relation?.confidence ?? null,
+              fundingSource: ref.relation?.source ?? null,
+              dormantDays: latestDormantDays(dormantByRef.get(`${chain}:${wallet}`) ?? [], event.ts)
+            };
           });
-        }
-      }
-      if (anchor.alertTypes.includes('independent_entity_confluence')) {
-        const monitored = new Set([
-          ...coreRefs.map((ref) => ref.address),
-          ...chatWatches.flatMap((watch) => (connectedByWatch.get(watch.id) ?? []).map((row) => row.address))
-        ]);
-        for (const activation of activations) {
-          if (activation.alertType !== 'independent_entity_confluence' || activation.independentEntityCount < 2 || !activation.trackedWallets.some((wallet) => monitored.has(wallet))) continue;
-          const result = await this.prisma.operatorWatchAlert.createMany({ data: [{
-            watchId: anchor.id, eventKey: `core-independent:${activation.dedupeKey}`, alertType: 'independent_entity_confluence',
-            payloadJson: json({ title: 'Independent Entity Confluence', chain: activation.chain, ca: activation.tokenAddress, wallets: activation.trackedWallets, entities: activation.entityKeys, confidence: activation.confidence, occurredAt: activation.activatedAt.toISOString(), reason: `${activation.independentEntityCount} independent tracked entities bought the same token.` })
-          }], skipDuplicates: true });
-          created += result.count;
+          const evaluation = evaluateCoreBuyWindow(candidates, { criticalRisk, qualityPassed: quality?.passed ?? null });
+          const evaluationByEvent = new Map(evaluation.audits.map((audit) => [audit.eventId, audit]));
+          const candidateByEvent = new Map(candidates.map((candidate) => [candidate.eventId, candidate]));
+          const snapshot = token?.marketSnapshots[0];
+          for (const event of windowEvents) {
+            const audit = evaluationByEvent.get(event.eventId);
+            const candidate = candidateByEvent.get(event.eventId);
+            if (audit) await persistCoreBuyAudit(this.prisma, event, audit, {
+              tokenAddress, windowStart: evaluation.windowStart, windowEnd: evaluation.windowEnd,
+              qualifies: evaluation.qualifies, triggerType: evaluation.triggerType,
+              entityKey: candidate?.entityKey ?? null, clusterKey: candidate?.clusterKey ?? null,
+              marketCapUsd: snapshot ? decimal(snapshot.marketCapUsd) : decimal(quality?.marketCapUsd)
+            });
+          }
+          if (!evaluation.qualifies || !evaluation.tier || !evaluation.triggerType || !evaluation.windowStart || !evaluation.windowEnd) continue;
+          const birth = token?.tokenCreatedAt ?? token?.firstSeenAt ?? null;
+          const entryDelaySec = birth ? Math.max(0, Math.round((evaluation.windowStart.getTime() - birth.getTime()) / 1_000)) : null;
+          const eventById = new Map(windowEvents.map((event) => [event.eventId, event]));
+          const qualifiedEvents = evaluation.sourceEventIds.map((eventId) => eventById.get(eventId)).filter(nonNull);
+          const entityKeys = uniqueStrings(evaluation.participants.map((participant) => participant.entityKey).filter(nonNull));
+          const entityLabels = uniqueStrings(evaluation.participants.map((participant) => participant.entityLabel).filter(nonNull));
+          const fundingPaths = evaluation.participants.flatMap((participant) => participant.fundingSource ? [{
+            source: participant.fundingSource, destination: participant.wallet,
+            route: participant.relationshipRoute, confidence: participant.relationshipConfidence
+          }] : []);
+          const lifecycleRevision = [evaluation.sourceEventIds.join(','), evaluation.tier, evaluation.rawWalletCount,
+            evaluation.independentEntityCount, evaluation.combinedBuyUsd.toFixed(4)].join('|');
+          const payload = {
+            schemaVersion: 2, title: coreConfluenceTitle(evaluation.triggerType), triggerType: evaluation.triggerType,
+            signalTier: evaluation.tier, chain, token: token?.name ?? token?.symbol ?? tokenAddress,
+            symbol: token?.symbol ?? qualifiedEvents[0]?.assetSymbol ?? null, ca: tokenAddress, protocol: token?.dex ?? null,
+            participants: evaluation.participants.map((participant) => ({
+              wallet: participant.wallet, role: participant.role, amountUsd: participant.cumulativeBuyUsd,
+              amountToken: participant.cumulativeTokenAmount, entityKey: participant.entityKey,
+              entityLabel: participant.entityLabel, clusterKey: participant.clusterKey,
+              evidenceScore: participant.evidenceScore, historicalAlphaScore: participant.historicalAlphaScore,
+              relationshipRoute: participant.relationshipRoute, relationshipConfidence: participant.relationshipConfidence,
+              fundingSource: participant.fundingSource, dormantDays: participant.dormantDays,
+              firstBuyAt: participant.firstBuyAt.toISOString(), lastBuyAt: participant.lastBuyAt.toISOString()
+            })),
+            wallets: evaluation.participants.map((participant) => participant.wallet), entityKeys, entityLabels,
+            rawWalletCount: evaluation.rawWalletCount, coreWalletCount: evaluation.coreWalletCount,
+            relatedWalletCount: evaluation.relatedWalletCount, entityCount: evaluation.entityCount,
+            independentEntityCount: evaluation.independentEntityCount,
+            sameEntityWalletCount: evaluation.sameEntityWalletCount,
+            effectiveConfirmationCount: evaluation.effectiveConfirmationCount,
+            combinedBuyUsd: evaluation.combinedBuyUsd, combinedTokenAmount: evaluation.combinedTokenAmount,
+            windowMs: evaluation.windowMs, windowStart: evaluation.windowStart.toISOString(), windowEnd: evaluation.windowEnd.toISOString(),
+            confidence: evaluation.confidence, historicalAlphaScore: maxOrNull(evaluation.participants.map((participant) => participant.historicalAlphaScore).filter(nonNull)),
+            dormantWakeUpCount: evaluation.dormantWakeUpCount,
+            maxDormantDays: maxOrNull(evaluation.participants.map((participant) => participant.dormantDays).filter(nonNull)),
+            fundingPathCount: evaluation.fundingPathCount, fundingPaths,
+            marketCapUsd: snapshot ? decimal(snapshot.marketCapUsd) : decimal(quality?.marketCapUsd),
+            liquidityUsd: snapshot ? decimal(snapshot.liquidityUsd) : decimal(quality?.liquidityUsd),
+            holderCount: snapshot?.holderCount ?? quality?.holderCount ?? null,
+            marketSnapshotAt: snapshot?.ts.toISOString() ?? quality?.assessedAt.toISOString() ?? null,
+            entryDelaySec, tokenAgeSec: birth ? Math.max(0, Math.round((evaluation.windowEnd.getTime() - birth.getTime()) / 1_000)) : null,
+            tokenQualityPassed: quality?.passed ?? null, tokenQualityScore: quality?.score ?? null,
+            riskFlags: token?.riskFlags ?? [], criticalRisk,
+            sourceEventIds: evaluation.sourceEventIds, txHashes: uniqueStrings(qualifiedEvents.map((event) => event.txHash)),
+            whyThisMatters: coreConfluenceReason(evaluation), lifecycleRevision,
+            pipeline: { persisted: true, eligibility: 'eligible_cluster_confluence', rejectionReason: null },
+            policy: { version: CORE_ALERT_POLICY_VERSION, minimumQualifyingBuyUsd: MIN_QUALIFYING_BUY_USD, windowMs: CORE_CONFLUENCE_WINDOW_MS }
+          };
+          const eventKey = `core-confluence-v2:${windowEvents[0]!.eventId}`;
+          const existing = await this.prisma.operatorWatchAlert.findUnique({
+            where: { watchId_eventKey_alertType: { watchId: anchor.id, eventKey, alertType: 'core_multi_wallet_buy' } }
+          });
+          if (!existing) {
+            await this.prisma.operatorWatchAlert.create({ data: { watchId: anchor.id, eventKey, alertType: 'core_multi_wallet_buy', payloadJson: json(payload) } });
+            created += 1;
+          } else if (objectJson(existing.payloadJson)?.lifecycleRevision !== lifecycleRevision) {
+            const existingPayload = objectJson(existing.payloadJson) ?? {};
+            const deliveryReceipt = objectJson(existingPayload.deliveryReceipt as Prisma.JsonValue);
+            await this.prisma.operatorWatchAlert.update({
+              where: { id: existing.id },
+              data: {
+                payloadJson: json({ ...payload, ...(deliveryReceipt ? { deliveryReceipt } : {}) }), lastError: null,
+                status: existing.status === 'sent' ? 'update_pending' : existing.status === 'failed' ? 'pending' : existing.status
+              }
+            });
+          }
         }
       }
     }
     return created;
   }
 
-  async pendingWatchAlerts(limit = 100) { return this.prisma.operatorWatchAlert.findMany({ where: { status: { in: ['pending', 'retryable'] } }, include: { watch: true }, orderBy: { createdAt: 'asc' }, take: Math.max(1, Math.min(limit, 1_000)) }); }
+  async pendingWatchAlerts(limit = 100) { return this.prisma.operatorWatchAlert.findMany({ where: { status: { in: ['pending', 'retryable', 'update_pending'] } }, include: { watch: true }, orderBy: { createdAt: 'asc' }, take: Math.max(1, Math.min(limit, 1_000)) }); }
+  async coreMonitoringAlert(alertId: string, userId: string, chatId: string) {
+    return this.prisma.operatorWatchAlert.findFirst({
+      where: { id: alertId, watch: { userId, chatId, targetType: 'core_wallet' } }, include: { watch: true }
+    });
+  }
   async intelligenceAlert(alertId: string) {
     const alert = await this.prisma.operatorWatchAlert.findUnique({ where: { id: alertId }, include: { watch: true } });
     if (!alert) return null;
@@ -1197,7 +1289,7 @@ export class OperatorService {
     await this.prisma.$transaction([
       this.prisma.operatorWatch.updateMany({ where: { id: { in: watchIds }, active: true }, data: { active: false } }),
       this.prisma.operatorWatchAlert.updateMany({
-        where: { watchId: { in: watchIds }, status: { in: ['pending', 'retryable'] } },
+        where: { watchId: { in: watchIds }, status: { in: ['pending', 'retryable', 'update_pending'] } },
         data: { status: 'failed', lastError: error.slice(0, 1_000) }
       })
     ]);
@@ -1285,6 +1377,76 @@ function uniqueConnected<T extends { chain: ChainId; address: string; confidence
     if (!current || value.confidence > current.confidence) result.set(key, value);
   }
   return [...result.values()];
+}
+function splitCoreBuyWindows(events: PersistedMassTransactionEvent[], windowMs: number) {
+  const ordered = [...events].sort((left, right) => left.ts.getTime() - right.ts.getTime() || left.eventId.localeCompare(right.eventId));
+  const windows: PersistedMassTransactionEvent[][] = [];
+  for (const event of ordered) {
+    const current = windows.at(-1);
+    if (!current || event.ts.getTime() - current[0]!.ts.getTime() > windowMs) windows.push([event]);
+    else current.push(event);
+  }
+  return windows;
+}
+function finiteNumber(value: Prisma.Decimal | number | string | null | undefined) {
+  if (value === null || value === undefined) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+function latestDormantDays(events: Array<{ occurredAt: Date; evidenceJson: Prisma.JsonValue }>, buyAt: Date) {
+  const event = events.filter((candidate) => candidate.occurredAt <= buyAt && buyAt.getTime() - candidate.occurredAt.getTime() <= 24 * 60 * 60_000).at(-1);
+  const evidence = event ? objectJson(event.evidenceJson) : null;
+  return finiteJsonNumber(evidence?.dormantDays ?? evidence?.preWakeDormancy ?? evidence?.days);
+}
+function hasCriticalTokenRisk(riskFlags: Prisma.JsonValue | null | undefined, reasonCodes: string[]) {
+  const text = `${JSON.stringify(riskFlags ?? [])} ${reasonCodes.join(' ')}`.toLowerCase();
+  return ['honeypot', 'rug', 'scam', 'malicious', 'blocked_transfer', 'critical_risk'].some((flag) => text.includes(flag));
+}
+function coreConfluenceTitle(trigger: NonNullable<ReturnType<typeof evaluateCoreBuyWindow>['triggerType']>) {
+  if (trigger === 'multi_entity_confluence') return 'Multi-Entity Token Entry';
+  if (trigger === 'funded_execution_buy') return 'Funded Execution Entry';
+  if (trigger === 'same_entity_cluster_buy') return 'Cluster Buy Detected';
+  return 'Core Confluence Detected';
+}
+function coreConfluenceReason(evaluation: ReturnType<typeof evaluateCoreBuyWindow>) {
+  const minutes = Math.max(1, Math.ceil(evaluation.windowMs / 60_000));
+  const lines = evaluation.independentEntityCount >= 2
+    ? `${evaluation.independentEntityCount} independent quality entities entered within ${minutes} minutes.`
+    : evaluation.sameEntityWalletCount >= 2
+      ? `${evaluation.sameEntityWalletCount} quality wallets from the same entity entered within ${minutes} minutes; counted as one independent confirmation.`
+      : evaluation.coreWalletCount >= 2
+        ? `${evaluation.coreWalletCount} Core wallets entered within ${minutes} minutes.`
+        : 'Core capital reached a qualified execution wallet before its token entry.';
+  const dormant = evaluation.dormantWakeUpCount > 0
+    ? ` ${evaluation.dormantWakeUpCount} dormant participant${evaluation.dormantWakeUpCount === 1 ? '' : 's'} reactivated.` : '';
+  return `${lines}${dormant}`;
+}
+async function persistCoreBuyAudit(
+  prisma: PrismaClient,
+  event: PersistedMassTransactionEvent,
+  audit: CoreBuyAuditDecision,
+  context: {
+    tokenAddress: string; windowStart: Date | null; windowEnd: Date | null; qualifies: boolean;
+    triggerType: ReturnType<typeof evaluateCoreBuyWindow>['triggerType']; entityKey: string | null;
+    clusterKey: string | null; marketCapUsd: number | null;
+  }
+) {
+  const metadata = objectJson(event.metadataJson) ?? {};
+  const next = {
+    policyVersion: CORE_ALERT_POLICY_VERSION, minimumQualifyingBuyUsd: MIN_QUALIFYING_BUY_USD,
+    confluenceWindowMs: CORE_CONFLUENCE_WINDOW_MS, wallet: audit.wallet, entityKey: context.entityKey,
+    clusterKey: context.clusterKey, tokenAddress: context.tokenAddress, amountUsd: decimal(event.amountUsd),
+    marketCapUsd: context.marketCapUsd, timestamp: event.ts.toISOString(), transaction: event.txHash,
+    cumulativeWalletBuyUsd: audit.cumulativeWalletBuyUsd, eligibility: audit.eligibility,
+    rejectionReason: audit.rejectionReason, confluenceQualified: context.qualifies,
+    triggerType: context.triggerType, windowStart: context.windowStart?.toISOString() ?? null,
+    windowEnd: context.windowEnd?.toISOString() ?? null
+  };
+  if (JSON.stringify(metadata.coreAlertAudit ?? null) === JSON.stringify(next)) return;
+  await prisma.massTransactionEvent.update({
+    where: { eventId: event.eventId },
+    data: { metadataJson: json({ ...metadata, coreAlertAudit: next }) }
+  });
 }
 function sumDecimal(values: Array<Prisma.Decimal | null>) { const total = values.reduce<number>((sum, x) => sum + (decimal(x) ?? 0), 0); return total || null; }
 function explorerUrl(template: string | undefined, value: string | null) { if (!template || !value) return null; return template.includes('{') ? template.replace(/\{(?:tx|address)\}/g, value) : `${template}${value}`; }

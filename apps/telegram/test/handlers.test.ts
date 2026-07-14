@@ -117,6 +117,31 @@ describe('Telegram command handlers', () => {
     expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual(['📋 Activity', '💸 Capital Path', '🧩 Entity', '🗑 Remove', '← Back']);
   });
 
+  it('opens qualified wallet details from a Core confluence alert callback', async () => {
+    const api = apiMock();
+    const service = {
+      coreMonitoringAlert: vi.fn().mockResolvedValue({
+        id: 'cluster-alert', alertType: 'core_multi_wallet_buy',
+        payloadJson: {
+          token: 'NEW', chain: 'SOLANA', rawWalletCount: 2, independentEntityCount: 2,
+          participants: [{ wallet: ADDRESS, role: 'core', amountUsd: 125, entityLabel: 'Alpha Entity' }]
+        }
+      })
+    } as unknown as OperatorService;
+
+    await createUpdateHandler(service, api, new Set(['123']))({
+      update_id: 23,
+      callback_query: {
+        id: 'core-alert-cb', from: { id: 123 }, data: 'c2|w|cluster-alert',
+        message: { message_id: 23, chat: { id: 123, type: 'private' }, text: 'cluster summary' }
+      }
+    });
+
+    expect(service.coreMonitoringAlert).toHaveBeenCalledWith('cluster-alert', '123', '123');
+    expect(api.editMessage).toHaveBeenCalledWith('123', 23, expect.stringContaining(`<code>${ADDRESS}</code>`), expect.any(Object));
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith('core-alert-cb');
+  });
+
   it('acknowledges a pending wallet immediately, moves the state, and completes the investigation asynchronously', async () => {
     const api = apiMock();
     let resolveInvestigation!: (value: WalletInvestigationResult) => void;

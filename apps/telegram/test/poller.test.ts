@@ -27,7 +27,8 @@ describe('Telegram watch alert delivery', () => {
     const service = {
       materializeWatchAlerts: vi.fn(),
       pendingWatchAlerts: vi.fn().mockResolvedValue([{
-        id: 'alert2', alertType: 'core_wallet_token_buy', payloadJson: { token: 'NEW' },
+        id: 'alert2', alertType: 'core_multi_wallet_buy', status: 'pending',
+        payloadJson: { token: 'NEW', ca: 'NewMint', chain: 'SOLANA', rawWalletCount: 2, independentEntityCount: 2 },
         watch: { chatId: '123', targetType: 'core_wallet' }
       }]),
       recordWatchAlertDispatchAttempt: vi.fn(),
@@ -50,7 +51,8 @@ describe('Telegram watch alert delivery', () => {
     const service = {
       materializeWatchAlerts: vi.fn().mockRejectedValue(new Error('materializer unavailable')),
       pendingWatchAlerts: vi.fn().mockResolvedValue([{
-        id: 'alert3', alertType: 'core_wallet_token_buy', payloadJson: { token: 'NEW' },
+        id: 'alert3', alertType: 'core_multi_wallet_buy', status: 'pending',
+        payloadJson: { token: 'NEW', ca: 'NewMint', chain: 'SOLANA', rawWalletCount: 2, independentEntityCount: 1 },
         watch: { chatId: '123', targetType: 'core_wallet' }
       }]),
       recordWatchAlertDispatchAttempt: vi.fn(), markWatchAlert: vi.fn(), stopTelegramDelivery: vi.fn()
@@ -64,6 +66,32 @@ describe('Telegram watch alert delivery', () => {
     expect(api.sendMessage).toHaveBeenCalledOnce();
     expect(service.markWatchAlert).toHaveBeenCalledWith('alert3', undefined, {
       telegramMessageId: 789, telegramChatId: 123
+    });
+  });
+
+  it('edits the existing Telegram message when confluence grows instead of sending a duplicate', async () => {
+    const service = {
+      materializeWatchAlerts: vi.fn(),
+      pendingWatchAlerts: vi.fn().mockResolvedValue([{
+        id: 'alert4', alertType: 'core_multi_wallet_buy', status: 'update_pending',
+        payloadJson: {
+          token: 'NEW', ca: 'NewMint', chain: 'SOLANA', rawWalletCount: 3, independentEntityCount: 2,
+          combinedBuyUsd: 420, deliveryReceipt: { telegramMessageId: 456, telegramChatId: 123 }
+        },
+        watch: { chatId: '123', targetType: 'core_wallet' }
+      }]),
+      recordWatchAlertDispatchAttempt: vi.fn(), markWatchAlert: vi.fn(), stopTelegramDelivery: vi.fn()
+    } as unknown as OperatorService;
+    const api = {
+      sendMessage: vi.fn(), editMessage: vi.fn().mockResolvedValue(undefined)
+    } as unknown as TelegramApi;
+
+    await dispatchWatchAlerts(service, api, { info: vi.fn(), error: vi.fn() });
+
+    expect(api.editMessage).toHaveBeenCalledWith('123', 456, expect.stringContaining('3</b> tracked wallets'), expect.any(Object));
+    expect(api.sendMessage).not.toHaveBeenCalled();
+    expect(service.markWatchAlert).toHaveBeenCalledWith('alert4', undefined, {
+      telegramMessageId: 456, telegramChatId: 123
     });
   });
 });
