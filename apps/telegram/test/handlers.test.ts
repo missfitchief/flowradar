@@ -181,6 +181,19 @@ describe('Telegram command handlers', () => {
     expect(vi.mocked(api.editMessage).mock.calls[0]?.[2]).toContain('WALLET INTELLIGENCE REPORT');
   });
 
+  it('enables the persisted entity watch from the Wallet Investigation callback', async () => {
+    const api = apiMock();
+    const service = {
+      clearPendingSession: vi.fn(),
+      getSession: vi.fn().mockResolvedValue({ id: 'session1', workflow: 'wallet', stateJson: { target: ADDRESS, investigationId: 'investigation1', investigationView: 'summary', page: 1, pageSize: 5 } }),
+      loadWalletInvestigation: vi.fn().mockResolvedValue(investigation()),
+      watch: vi.fn().mockResolvedValue({})
+    } as unknown as OperatorService;
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 51, callback_query: { id: 'cb-watch', from: { id: 123 }, data: 'v1|watch|session1|cluster', message: { message_id: 51, chat: { id: 123, type: 'private' }, text: 'summary' } } });
+    expect(service.watch).toHaveBeenCalledWith('123', '123', 'entity:1');
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith('cb-watch', 'Cluster watch enabled');
+  });
+
   it('clears pending state on /cancel and Back', async () => {
     const api = apiMock();
     const service = { clearPendingSession: vi.fn().mockResolvedValue(1) } as unknown as OperatorService;
