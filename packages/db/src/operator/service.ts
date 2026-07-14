@@ -266,11 +266,6 @@ export class OperatorService {
       });
     }
     if (persistedCandidateCount > 0) {
-      for (let index = 0; index < refs.length; index += 1) {
-        if ((persistedCounts[index] ?? 0) > 0) {
-          await analyzeTokenWalletIntelligence(this.prisma, { chain: refs[index]!.chain, tokenAddress: refs[index]!.address, topLimit: 10, now });
-        }
-      }
       return { chains: refs.map((ref) => ref.chain), candidateCount: persistedCandidateCount };
     }
     const providers = Object.fromEntries(refs.flatMap((ref) => {
