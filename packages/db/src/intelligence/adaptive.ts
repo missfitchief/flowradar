@@ -255,7 +255,9 @@ export function scoreAdaptiveActivation(participants: ActivationParticipant[]): 
     return totalWeight ? weighted.reduce((sum, item) => sum + pick(item.row) * item.weight, 0) / totalWeight : 0;
   };
   const raw = {
-    entityConfluence: Math.max(clamp01(independentEntities.size - 1), sameEntityMultiWallet ? 1 : 0),
+    // Multiple wallets controlled by one entity are useful behavioral
+    // confirmation, but can never equal a second independent entity.
+    entityConfluence: Math.max(clamp01(independentEntities.size - 1), sameEntityMultiWallet ? 0.35 : 0),
     independentCapital: clamp01(roots.size - 1),
     dormantAwakening: clamp01(eligible.filter((row) => row.dormantAwakened).length / 2),
     fundingExecution: clamp01(eligible.filter((row) => row.fundingExecution).length / 2),
@@ -317,7 +319,7 @@ export interface DeterministicOutcomeMetrics {
 }
 
 export function deterministicOutcomeLabel(input: DeterministicOutcomeMetrics) {
-  if (input.coverage === 'insufficient' || input.maxReturnPct === null) return 'insufficient_data';
+  if (input.coverage !== 'full' || input.maxReturnPct === null) return 'insufficient_data';
   if (input.rugPullDetected) return 'rug_pull';
   if (input.tradingHalted) return 'invalidated';
   if ((input.realizedReturnPct ?? input.maxReturnPct) <= -70 || (input.maxDrawdownPct ?? 0) <= -85) return 'severe_failure';

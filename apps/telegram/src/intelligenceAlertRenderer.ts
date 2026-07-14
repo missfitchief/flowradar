@@ -2,7 +2,7 @@ import type { OperatorService } from '@flowradar/db';
 import type { InlineKeyboard } from './types';
 
 type AdaptiveAlert = NonNullable<Awaited<ReturnType<OperatorService['intelligenceAlert']>>>;
-type AdaptiveAlertView = 'summary' | 'why' | 'evidence' | 'history' | 'outcomes';
+type AdaptiveAlertView = 'summary' | 'why' | 'evidence' | 'history' | 'outcomes' | 'path' | 'risk';
 
 export function renderIntelligenceAlert(data: AdaptiveAlert, view: AdaptiveAlertView = 'summary'): { text: string; keyboard: InlineKeyboard } {
   if (!data.signal) return renderLegacy(data);
@@ -10,6 +10,8 @@ export function renderIntelligenceAlert(data: AdaptiveAlert, view: AdaptiveAlert
   if (view === 'evidence') return detail(data, 'Evidence', evidenceLines(data), view);
   if (view === 'history') return detail(data, 'Full entity history', historyLines(data), view);
   if (view === 'outcomes') return detail(data, 'Outcome tracking', outcomeLines(data), view);
+  if (view === 'path') return detail(data, 'Capital path', capitalPathLines(data), view);
+  if (view === 'risk') return detail(data, 'Token risk', riskLines(data), view);
   const signal = data.signal;
   const payload = data.payload ?? {};
   const quality = signal.qualityAssessment;
@@ -47,13 +49,17 @@ export function renderIntelligenceAlert(data: AdaptiveAlert, view: AdaptiveAlert
 
 function scoreLines(data: AdaptiveAlert) {
   const decomposition = record(data.signal?.scoreDecompositionJson);
+  const dimensions = record(decomposition.dimensions);
+  const dimensionLines = Object.entries(dimensions).flatMap(([key, value]) => typeof value === 'number'
+    ? [`• ${pretty(key)}: ${Math.round(value)}/100${key === 'riskScore' ? ' (lower is better)' : ''}`]
+    : []);
   const lines = Object.entries(decomposition).map(([key, value]) => {
     const row = record(value);
     return `• ${pretty(key)}: ${number(row.contribution) ?? 0} pts · ${stringValue(row.explanation) ?? 'no explanation'}`;
-  });
+  }).filter((line) => !line.startsWith('• dimensions:'));
   return [
     `Stage: ${data.signal?.lifecycleStage ?? 'unknown'} · total ${data.signal?.score ?? 0}/100`,
-    ...lines,
+    ...(dimensionLines.length ? dimensionLines : lines),
     '',
     'Wallets inside the same entity count as one independent confirmation.'
   ];
@@ -90,6 +96,35 @@ function outcomeLines(data: AdaptiveAlert) {
   ];
 }
 
+function capitalPathLines(data: AdaptiveAlert) {
+  const evidence = record(data.signal?.evidenceJson);
+  const funding = array(evidence.funding);
+  const buys = array(evidence.buys);
+  const lines = [
+    ...funding.slice(0, 8).map((value) => {
+      const event = record(record(value).event);
+      return `funding ${short(stringValue(event.from) ?? 'unknown')} → ${short(stringValue(event.to) ?? 'unknown')} · tx ${short(stringValue(event.txHash) ?? 'unknown')}`;
+    }),
+    ...buys.slice(0, 8).map((value) => {
+      const event = record(value);
+      return `buy ${short(stringValue(event.actor) ?? stringValue(event.from) ?? 'unknown')} → ${short(data.signal?.tokenAddress ?? 'unknown')} · tx ${short(stringValue(event.txHash) ?? 'unknown')}`;
+    })
+  ];
+  return lines.length ? lines : ['No receipt-linked capital path is available for this alert.'];
+}
+
+function riskLines(data: AdaptiveAlert) {
+  const quality = data.signal?.qualityAssessment;
+  if (!quality) return ['Token quality assessment unavailable. Signal cannot become a Buy Candidate.'];
+  const checks = record(quality.checksJson);
+  const results = record(checks.results);
+  return [
+    `Gate: ${quality.passed ? 'PASS' : 'BLOCKED'} · score ${Math.round(quality.score)}/100 · coverage ${quality.coverage}`,
+    ...Object.entries(results).map(([key, value]) => `• ${pretty(key)}: ${value === true ? 'pass' : value === false ? 'fail' : 'unknown'}`),
+    ...quality.reasonCodes.slice(0, 12).map((code) => `• ${code}`)
+  ];
+}
+
 function detail(data: AdaptiveAlert, title: string, lines: string[], view: AdaptiveAlertView) {
   return {
     text: [`<b>${h(title)}</b>`, ...lines.map((line) => h(line))].join('\n'),
@@ -101,6 +136,7 @@ function keyboard(alertId: string, view: AdaptiveAlertView): InlineKeyboard {
   if (view !== 'summary') return { inline_keyboard: [[{ text: 'Back', callback_data: alertCallback('summary', alertId) }]] };
   return { inline_keyboard: [
     [{ text: 'Evidence', callback_data: alertCallback('evidence', alertId) }, { text: 'Why this signal', callback_data: alertCallback('why', alertId) }],
+    [{ text: 'Capital path', callback_data: alertCallback('path', alertId) }, { text: 'Token risk', callback_data: alertCallback('risk', alertId) }],
     [{ text: 'Full entity history', callback_data: alertCallback('history', alertId) }, { text: 'Outcome tracking', callback_data: alertCallback('outcomes', alertId) }]
   ] };
 }
@@ -110,7 +146,7 @@ function renderLegacy(data: AdaptiveAlert) {
 }
 export function parseIntelligenceAlertCallback(value: string | undefined): { view: AdaptiveAlertView; alertId: string } | null {
   const parts = value?.split('|');
-  if (parts?.length !== 3 || parts[0] !== 'ia' || !['summary', 'why', 'evidence', 'history', 'outcomes'].includes(parts[1]!)) return null;
+  if (parts?.length !== 3 || parts[0] !== 'ia' || !['summary', 'why', 'evidence', 'history', 'outcomes', 'path', 'risk'].includes(parts[1]!)) return null;
   return { view: parts[1] as AdaptiveAlertView, alertId: parts[2]! };
 }
 function alertCallback(view: AdaptiveAlertView, alertId: string) { return `ia|${view}|${alertId}`; }

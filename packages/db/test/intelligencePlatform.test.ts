@@ -4,7 +4,7 @@ import { prisma } from '../src/client';
 import { persistInvestigationKnowledge } from '../src/intelligence/knowledge';
 import { intelligenceSignalLevelForScore, runIntelligenceLifecycle } from '../src/intelligence/lifecycle';
 import { applyEntityMerge, proposeEntityMerge, rollbackEntityAction } from '../src/intelligence/entities';
-import { runIntelligenceOutcomePass } from '../src/intelligence/outcomes';
+import { loadAdaptivePerformanceMetrics, runIntelligenceOutcomePass } from '../src/intelligence/outcomes';
 import { OperatorService } from '../src/operator/service';
 
 const PREFIX = 'INTELLIGENCE_PLATFORM_TEST';
@@ -93,7 +93,7 @@ describe('persistent intelligence platform', () => {
   it('rejects single-wallet buys, emits dormant/cluster signals, and creates Buy Candidates only after token quality passes', async () => {
     await persistInvestigationKnowledge(prisma, investigation('lifecycle-seed', new Date(NOW.getTime() - 70 * 86_400_000), [
       member(ADDRESSES[0], 'entity-live', 90, 82, 88),
-      member(ADDRESSES[1], 'entity-live', 88, 78, 85)
+      member(ADDRESSES[1], 'entity-live-independent', 88, 78, 85)
     ]), { now: new Date(NOW.getTime() - 70 * 86_400_000) });
     await prisma.walletIntelligenceProfile.updateMany({
       where: { address: { in: ADDRESSES.slice(0, 2) } },
@@ -185,13 +185,17 @@ describe('persistent intelligence platform', () => {
       tokenId: token.id, ts: new Date(activatedAt.getTime() + 30 * 60_000), priceUsd: 2, marketCapUsd: 200_000, fdvUsd: 200_000,
       liquidityUsd: 60_000, vol5m: 300, vol1h: 2_000, vol6h: 3_000, vol24h: 7_000, holderCount: 125, source: 'persisted-provider-test'
     } });
+    const fiftyNine = await prisma.tokenMarketSnapshot.create({ data: {
+      tokenId: token.id, ts: new Date(activatedAt.getTime() + 59 * 60_000), priceUsd: 2.1, marketCapUsd: 210_000, fdvUsd: 210_000,
+      liquidityUsd: 61_000, vol5m: 320, vol1h: 2_100, vol6h: 3_100, vol24h: 7_100, holderCount: 128, source: 'persisted-provider-test'
+    } });
     const afterOneHour = await prisma.tokenMarketSnapshot.create({ data: {
       tokenId: token.id, ts: new Date(activatedAt.getTime() + 90 * 60_000), priceUsd: 0.5, marketCapUsd: 50_000, fdvUsd: 50_000,
       liquidityUsd: 30_000, vol5m: 50, vol1h: 500, vol6h: 1_000, vol24h: 2_000, holderCount: 90, source: 'persisted-provider-test'
     } });
     const signal = await prisma.intelligenceSignal.create({ data: {
       dedupeKey: `${PREFIX}:outcome`, chain: 'BASE', tokenAddress: TOKENS[0], signalType: 'same_cluster_multi_wallet_buy',
-      level: 'STRONG_WATCH', lifecycleStage: 'STRONG_WATCH', score: 75, activatedAt,
+      level: 'STRONG_WATCH', lifecycleStage: 'STRONG_WATCH', score: 75, status: 'controlled_replay', activatedAt,
       clusterKeys: ['test-cluster'], entityKeys: [], entityIds: [], walletAddresses: ADDRESSES.slice(0, 2), sourceEventIds: [], reasons: ['test'],
       evidenceJson: {}, historySupportJson: {}, scoreDecompositionJson: { entityConfluence: { raw: 1, weight: 24, contribution: 24 } },
       entryMarketJson: { snapshotId: entry.id, capturedAt: activatedAt.toISOString(), noLookahead: true }, explanation: 'test outcome',
@@ -203,9 +207,10 @@ describe('persistent intelligence platform', () => {
     expect(first.horizonsUpserted).toBe(8);
     const oneHour = await prisma.intelligenceSignalOutcome.findUniqueOrThrow({ where: { signalId_horizon: { signalId: signal.id, horizon: '1h' } } });
     expect(oneHour.status).toBe('complete');
-    expect(oneHour.sourceSnapshotIds).toEqual(expect.arrayContaining([entry.id, five.id, thirty.id]));
+    expect(oneHour.sourceSnapshotIds).toEqual(expect.arrayContaining([entry.id, five.id, thirty.id, fiftyNine.id]));
     expect(oneHour.sourceSnapshotIds).not.toContain(afterOneHour.id);
     expect((await prisma.intelligenceSignalOutcomeLabel.findUniqueOrThrow({ where: { signalId: signal.id } }))).toMatchObject({ label: 'strong', basisHorizon: '1h' });
+    expect((await loadAdaptivePerformanceMetrics(prisma)).signals).toBe(0);
 
     await runIntelligenceOutcomePass(prisma, { now: NOW, signalIds: [signal.id] });
     expect(await prisma.intelligenceSignalOutcome.count({ where: { signalId: signal.id } })).toBe(8);

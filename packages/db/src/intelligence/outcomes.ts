@@ -31,7 +31,9 @@ export async function runIntelligenceOutcomePass(
   const now = options.now ?? new Date();
   const startedMs = Date.now();
   const signals = await prisma.intelligenceSignal.findMany({
-    where: { status: 'active', ...(options.signalIds?.length ? { id: { in: options.signalIds } } : {}) },
+    where: options.signalIds?.length
+      ? { id: { in: options.signalIds }, status: { in: ['active', 'controlled_replay'] } }
+      : { status: 'active' },
     orderBy: [{ activatedAt: 'asc' }, { id: 'asc' }],
     take: Math.max(1, Math.min(options.take ?? 10_000, 100_000))
   });
@@ -39,17 +41,17 @@ export async function runIntelligenceOutcomePass(
   const touchedEntities = new Set<string>();
   for (const signal of signals) {
     const token = await prisma.token.findUnique({ where: { chain_address: { chain: signal.chain, address: signal.tokenAddress } }, select: { id: true } });
-    const entry = token ? await prisma.tokenMarketSnapshot.findFirst({ where: { tokenId: token.id, ts: { lte: signal.activatedAt } }, orderBy: [{ ts: 'desc' }, { id: 'desc' }] }) : null;
+    const entry = token ? await prisma.tokenMarketSnapshot.findFirst({ where: { tokenId: token.id, ts: { lte: signal.activatedAt }, source: { not: { contains: 'synthetic' } } }, orderBy: [{ ts: 'desc' }, { id: 'desc' }] }) : null;
     const outcomes = [];
     for (const [horizon, minutes] of INTELLIGENCE_OUTCOME_HORIZONS) {
       const targetAt = new Date(signal.activatedAt.getTime() + minutes * 60_000);
       const until = new Date(Math.min(targetAt.getTime(), now.getTime()));
       const snapshots = token ? await prisma.tokenMarketSnapshot.findMany({
-        where: { tokenId: token.id, ts: { gt: signal.activatedAt, lte: until } },
+        where: { tokenId: token.id, ts: { gt: signal.activatedAt, lte: until }, source: { not: { contains: 'synthetic' } } },
         orderBy: [{ ts: 'asc' }, { id: 'asc' }]
       }) : [];
       const complete = now >= targetAt;
-      const coverage = !entry || snapshots.length === 0 ? 'insufficient' : snapshots.length >= 2 ? 'full' : 'partial';
+      const coverage = horizonCoverage(entry, snapshots, targetAt, complete, minutes);
       const evaluated = evaluateHorizon(entry, snapshots, signal.activatedAt, targetAt, complete, coverage);
       const lpRemove = await prisma.massTransactionEvent.findFirst({
         where: { chain: signal.chain, assetAddress: signal.tokenAddress, kind: 'lp_remove', ts: { gte: signal.activatedAt, lte: until }, status: { not: 'failed' } },
@@ -76,6 +78,9 @@ export async function runIntelligenceOutcomePass(
             snapshotRange: snapshots.length ? [snapshots[0]!.ts.toISOString(), snapshots.at(-1)!.ts.toISOString()] : [],
             lpRemoval: lpRemove ? { eventId: lpRemove.eventId, txHash: lpRemove.txHash, ts: lpRemove.ts.toISOString(), amountUsd: decimal(lpRemove.amountUsd) } : null,
             providerSources: unique([entry?.source, ...snapshots.map((row) => row.source)].filter(nonNull)),
+            holderConcentrationChangePct: null,
+            holderConcentrationCoverage: 'unavailable_in_market_snapshot_schema',
+            coveragePolicy: coveragePolicy(minutes),
             evaluatorVersion: OUTCOME_EVALUATOR_VERSION
           }),
           evaluatorVersion: OUTCOME_EVALUATOR_VERSION
@@ -97,6 +102,9 @@ export async function runIntelligenceOutcomePass(
             snapshotRange: snapshots.length ? [snapshots[0]!.ts.toISOString(), snapshots.at(-1)!.ts.toISOString()] : [],
             lpRemoval: lpRemove ? { eventId: lpRemove.eventId, txHash: lpRemove.txHash, ts: lpRemove.ts.toISOString(), amountUsd: decimal(lpRemove.amountUsd) } : null,
             providerSources: unique([entry?.source, ...snapshots.map((row) => row.source)].filter(nonNull)),
+            holderConcentrationChangePct: null,
+            holderConcentrationCoverage: 'unavailable_in_market_snapshot_schema',
+            coveragePolicy: coveragePolicy(minutes),
             evaluatorVersion: OUTCOME_EVALUATOR_VERSION
           }), evaluatorVersion: OUTCOME_EVALUATOR_VERSION
         }
@@ -106,7 +114,8 @@ export async function runIntelligenceOutcomePass(
       if (complete) report.completeHorizons += 1;
       if (coverage === 'insufficient') report.insufficientHorizons += 1;
     }
-    const basis = [...outcomes].filter((row) => row.status === 'complete').sort((a, b) => b.targetAt.getTime() - a.targetAt.getTime())[0]
+    const basis = [...outcomes].filter((row) => row.status === 'complete' && row.coverage === 'full').sort((a, b) => b.targetAt.getTime() - a.targetAt.getTime())[0]
+      ?? [...outcomes].filter((row) => row.status === 'complete').sort((a, b) => b.targetAt.getTime() - a.targetAt.getTime())[0]
       ?? outcomes.find((row) => row.coverage !== 'insufficient') ?? outcomes[0];
     if (basis) {
       const label = deterministicOutcomeLabel({
@@ -222,10 +231,20 @@ export interface AdaptivePerformanceMetrics {
   wins: number;
   failures: number;
   precision: number | null;
+  recall: number | null;
+  recallCoverage: string;
+  hitRate: number | null;
   falsePositiveRate: number | null;
+  failureRate: number | null;
+  rugRate: number | null;
+  survivalRate: number | null;
   averageReturnPct: number | null;
   medianReturnPct: number | null;
   maxDrawdownPct: number | null;
+  medianMaxDrawdownPct: number | null;
+  medianTimeToPeakMinutes: number | null;
+  medianSignalLatencyMinutes: number | null;
+  medianEntryMarketCapUsd: number | null;
   byStage: Record<string, { signals: number; evaluated: number; wins: number; precision: number | null }>;
   byScoreBucket: Record<string, { signals: number; evaluated: number; wins: number; precision: number | null }>;
   labelCounts: Record<string, number>;
@@ -238,7 +257,21 @@ export async function loadAdaptivePerformanceMetrics(prisma: PrismaClient): Prom
     prisma.walletIntelligenceEvent.count(), prisma.intelligenceBuyCandidate.count(),
     prisma.intelligenceWeightProposal.findMany({ orderBy: { createdAt: 'desc' }, take: 5 })
   ]);
-  const metrics = performanceMetrics(signals.map(toMetricRow));
+  const sourceEventIds = unique(signals.flatMap((signal) => signal.sourceEventIds));
+  const sourceEvents = sourceEventIds.length ? await prisma.massTransactionEvent.findMany({ where: { eventId: { in: sourceEventIds } }, select: { eventId: true, ts: true } }) : [];
+  const sourceEventTs = new Map(sourceEvents.map((event) => [event.eventId, event.ts]));
+  const entityById = new Map(entities.map((entity) => [entity.id, entity]));
+  const metricRowsBySignal = new Map(signals.map((signal) => {
+    const sourceTimes = signal.sourceEventIds.map((id) => sourceEventTs.get(id)).filter(nonNull);
+    const entityConfidences = signal.entityIds.map((id) => entityById.get(id)?.identityConfidence).filter(finiteNumber);
+    return [signal.id, toMetricRow(signal, {
+      earliestSourceAt: sourceTimes.sort((a, b) => a.getTime() - b.getTime())[0] ?? null,
+      entityConfidence: entityConfidences.length ? average(entityConfidences) : null
+    })] as const;
+  }));
+  const metricRows = [...metricRowsBySignal.values()];
+  const metrics = performanceMetrics(metricRows);
+  const entitySignalRows = signals.flatMap((signal) => signal.entityIds.map((entityId) => ({ entityId, row: metricRowsBySignal.get(signal.id)! })));
   return {
     ...metrics,
     funnel: {
@@ -262,9 +295,13 @@ export async function loadAdaptivePerformanceMetrics(prisma: PrismaClient): Prom
       recentProposals: proposals.map((row) => ({ id: row.id, status: row.status, sampleSize: row.sampleSize, precisionDelta: row.precisionDelta, falsePositiveDelta: row.falsePositiveDelta }))
     },
     analysisSlices: {
-      byPattern: Object.fromEntries([...groupBy(signals, (row) => row.signalType)].map(([pattern, rows]) => [pattern, performanceMetrics(rows.map(toMetricRow))])),
-      dormantAwakening: performanceMetrics(signals.filter((row) => row.signalType.includes('dormant')).map(toMetricRow)),
-      crossChain: performanceMetrics(signals.filter((row) => /bridge|cross.?chain/i.test(row.signalType)).map(toMetricRow)),
+      byPattern: Object.fromEntries([...groupBy(signals, (row) => row.signalType)].map(([pattern, rows]) => [pattern, performanceMetrics(rows.map((row) => metricRowsBySignal.get(row.id)!))])),
+      byChain: Object.fromEntries([...groupBy(metricRows, (row) => row.chain)].map(([chain, rows]) => [chain, performanceMetrics(rows)])),
+      byEntity: Object.fromEntries([...groupBy(entitySignalRows, (row) => row.entityId)].map(([entityId, rows]) => [entityById.get(entityId)?.label ?? entityId, performanceMetrics(rows.map((row) => row.row))])),
+      byEntityConfidenceBucket: Object.fromEntries([...groupBy(metricRows, (row) => row.entityConfidenceBucket)].map(([bucket, rows]) => [bucket, performanceMetrics(rows)])),
+      byModelVersion: Object.fromEntries([...groupBy(signals, (row) => `v${row.modelVersion}`)].map(([version, rows]) => [version, performanceMetrics(rows.map((row) => metricRowsBySignal.get(row.id)!))])),
+      dormantAwakening: performanceMetrics(signals.filter((row) => row.signalType.includes('dormant')).map((row) => metricRowsBySignal.get(row.id)!)),
+      crossChain: performanceMetrics(signals.filter((row) => /bridge|cross.?chain/i.test(row.signalType)).map((row) => metricRowsBySignal.get(row.id)!)),
       earlyConfirmations: signals.filter((row) => row.outcomes[0]?.earlyLateLabel === 'early').length,
       lateConfirmations: signals.filter((row) => row.outcomes[0]?.earlyLateLabel === 'late').length
     }
@@ -323,7 +360,7 @@ type FeedbackSignal = {
   outcomeLabel: { label: string } | null;
   score: number;
   lifecycleStage: string;
-  outcomes: Array<{ realizedReturnPct: number | null; maxDrawdownPct: number | null }>;
+  outcomes: Array<{ realizedReturnPct: number | null; maxDrawdownPct: number | null; timeToPeakMinutes: number | null; survivalStatus: string }>;
 };
 
 async function proposeWeightAdjustment(prisma: PrismaClient, signals: FeedbackSignal[], metrics: Record<string, unknown>, now: Date) {
@@ -364,20 +401,38 @@ interface MetricRow {
   label: string | null;
   returnPct: number | null;
   maxDrawdownPct: number | null;
+  timeToPeakMinutes: number | null;
+  signalLatencyMinutes: number | null;
+  entryMarketCapUsd: number | null;
+  survivalStatus: string;
+  chain: string;
+  entityConfidenceBucket: string;
 }
 
 function performanceMetrics(rows: MetricRow[]): AdaptivePerformanceMetrics {
   const evaluated = rows.filter((row) => row.label && row.label !== 'insufficient_data');
   const wins = evaluated.filter((row) => outcomeWin(row.label)).length;
   const failures = evaluated.filter((row) => outcomeFailure(row.label)).length;
+  const rugs = evaluated.filter((row) => row.label === 'rug_pull').length;
   const returns = evaluated.map((row) => row.returnPct).filter(finiteNumber);
   const drawdowns = evaluated.map((row) => row.maxDrawdownPct).filter(finiteNumber);
+  const timeToPeak = evaluated.map((row) => row.timeToPeakMinutes).filter(finiteNumber);
+  const signalLatency = rows.map((row) => row.signalLatencyMinutes).filter(finiteNumber);
+  const entryMarketCaps = rows.map((row) => row.entryMarketCapUsd).filter(finiteNumber);
+  const survival = evaluated.map((row) => row.survivalStatus).filter((value) => value !== 'unknown');
   return {
     signals: rows.length, evaluated: evaluated.length, insufficient: rows.length - evaluated.length,
-    wins, failures, precision: ratio(wins, evaluated.length), falsePositiveRate: ratio(failures, evaluated.length),
+    wins, failures, precision: ratio(wins, evaluated.length), recall: null,
+    recallCoverage: 'unavailable_without_exhaustive_positive_ground_truth', hitRate: ratio(wins, evaluated.length),
+    falsePositiveRate: ratio(failures, evaluated.length), failureRate: ratio(failures, evaluated.length),
+    rugRate: ratio(rugs, evaluated.length), survivalRate: ratio(survival.filter((value) => value === 'survived').length, survival.length),
     averageReturnPct: returns.length ? round(average(returns), 2) : null,
     medianReturnPct: returns.length ? round(percentile([...returns].sort((a, b) => a - b), 0.5), 2) : null,
     maxDrawdownPct: drawdowns.length ? round(Math.min(...drawdowns), 2) : null,
+    medianMaxDrawdownPct: drawdowns.length ? round(percentile([...drawdowns].sort((a, b) => a - b), 0.5), 2) : null,
+    medianTimeToPeakMinutes: timeToPeak.length ? round(percentile([...timeToPeak].sort((a, b) => a - b), 0.5), 2) : null,
+    medianSignalLatencyMinutes: signalLatency.length ? round(percentile([...signalLatency].sort((a, b) => a - b), 0.5), 2) : null,
+    medianEntryMarketCapUsd: entryMarketCaps.length ? round(percentile([...entryMarketCaps].sort((a, b) => a - b), 0.5), 2) : null,
     byStage: groupedPerformance(rows, (row) => row.stage),
     byScoreBucket: groupedPerformance(rows, (row) => scoreBucket(row.score)),
     labelCounts: countBy(rows.filter((row) => row.label).map((row) => row.label!))
@@ -391,12 +446,18 @@ function groupedPerformance(rows: MetricRow[], key: (row: MetricRow) => string) 
     return [name, { signals: group.length, evaluated: evaluated.length, wins, precision: ratio(wins, evaluated.length) }];
   }));
 }
-function evaluateCandidate(rows: Array<{ scoreDecompositionJson: Prisma.JsonValue; outcomeLabel: { label: string } | null; outcomes: Array<{ realizedReturnPct: number | null; maxDrawdownPct: number | null }> }>, weights: Record<string, number>) {
+function evaluateCandidate(rows: Array<{ scoreDecompositionJson: Prisma.JsonValue; outcomeLabel: { label: string } | null; outcomes: Array<{ realizedReturnPct: number | null; maxDrawdownPct: number | null; timeToPeakMinutes: number | null; survivalStatus: string }> }>, weights: Record<string, number>) {
   const rescored = rows.map((row) => ({
     stage: 'candidate', score: Object.entries(weights).reduce((sum, [key, weight]) => sum + decompositionRaw(row.scoreDecompositionJson, key) * weight, 0),
     label: row.outcomeLabel?.label ?? null,
     returnPct: row.outcomes[0]?.realizedReturnPct ?? null,
-    maxDrawdownPct: row.outcomes[0]?.maxDrawdownPct ?? null
+    maxDrawdownPct: row.outcomes[0]?.maxDrawdownPct ?? null,
+    timeToPeakMinutes: row.outcomes[0]?.timeToPeakMinutes ?? null,
+    signalLatencyMinutes: null,
+    entryMarketCapUsd: null,
+    survivalStatus: row.outcomes[0]?.survivalStatus ?? 'unknown',
+    chain: 'unknown',
+    entityConfidenceBucket: 'unknown'
   })).filter((row) => row.score >= ADAPTIVE_THRESHOLDS.watch);
   return performanceMetrics(rescored);
 }
@@ -406,8 +467,19 @@ function splitWindows(split: ReturnType<typeof chronologicalSplit<Awaited<Return
   const training = window(split.training); const validation = window(split.validation); const holdout = window(split.holdout);
   return { trainingFrom: training.from, trainingTo: training.to, validationFrom: validation.from, validationTo: validation.to, holdoutFrom: holdout.from, holdoutTo: holdout.to };
 }
-function toMetricRow(row: { lifecycleStage: string; score: number; outcomeLabel: { label: string } | null; outcomes: Array<{ realizedReturnPct: number | null; maxDrawdownPct: number | null }> }): MetricRow { return { stage: row.lifecycleStage, score: row.score, label: row.outcomeLabel?.label ?? null, returnPct: row.outcomes[0]?.realizedReturnPct ?? null, maxDrawdownPct: row.outcomes[0]?.maxDrawdownPct ?? null }; }
-function toMetricRows(rows: Array<{ lifecycleStage: string; score: number; outcomeLabel: { label: string } | null; outcomes: Array<{ realizedReturnPct: number | null; maxDrawdownPct: number | null }> }>) { return rows.map(toMetricRow); }
+function toMetricRow(row: { lifecycleStage: string; score: number; outcomeLabel: { label: string } | null; outcomes: Array<{ realizedReturnPct: number | null; maxDrawdownPct: number | null; timeToPeakMinutes: number | null; survivalStatus: string }>; chain?: string; activatedAt?: Date; entryMarketJson?: Prisma.JsonValue }, context: { earliestSourceAt?: Date | null; entityConfidence?: number | null } = {}): MetricRow {
+  const outcome = row.outcomes[0];
+  const latency = row.activatedAt && context.earliestSourceAt ? Math.max(0, (row.activatedAt.getTime() - context.earliestSourceAt.getTime()) / 60_000) : null;
+  return {
+    stage: row.lifecycleStage, score: row.score, label: row.outcomeLabel?.label ?? null,
+    returnPct: outcome?.realizedReturnPct ?? null, maxDrawdownPct: outcome?.maxDrawdownPct ?? null,
+    timeToPeakMinutes: outcome?.timeToPeakMinutes ?? null, signalLatencyMinutes: latency,
+    entryMarketCapUsd: row.entryMarketJson ? marketValue(row.entryMarketJson, 'marketCapUsd') : null,
+    survivalStatus: outcome?.survivalStatus ?? 'unknown', chain: row.chain ?? 'unknown',
+    entityConfidenceBucket: confidenceBucket(context.entityConfidence ?? null)
+  };
+}
+function toMetricRows(rows: Array<{ lifecycleStage: string; score: number; outcomeLabel: { label: string } | null; outcomes: Array<{ realizedReturnPct: number | null; maxDrawdownPct: number | null; timeToPeakMinutes: number | null; survivalStatus: string }>; chain?: string; activatedAt?: Date; entryMarketJson?: Prisma.JsonValue }>) { return rows.map((row) => toMetricRow(row)); }
 function outcomeWin(label: string | null | undefined) { return label === 'exceptional' || label === 'strong' || label === 'moderate'; }
 function outcomeFailure(label: string | null | undefined) { return label === 'failed' || label === 'severe_failure' || label === 'rug_pull' || label === 'invalidated'; }
 function outcomeRationale(label: string, row: { maxReturnPct: number | null; realizedReturnPct: number | null; maxDrawdownPct: number | null; liquidityRetentionPct: number | null; rugPullDetected: boolean; tradingHalted: boolean }) { return [`deterministic_label_${label}`, `max_return_${row.maxReturnPct ?? 'unknown'}`, `realized_return_${row.realizedReturnPct ?? 'unknown'}`, `max_drawdown_${row.maxDrawdownPct ?? 'unknown'}`, `liquidity_retention_${row.liquidityRetentionPct ?? 'unknown'}`, ...(row.rugPullDetected ? ['rug_pull_detected'] : []), ...(row.tradingHalted ? ['trading_halted'] : [])]; }
@@ -415,7 +487,15 @@ function outcomeMetrics(row: { maxReturnPct: number | null; realizedReturnPct: n
 function decompositionRaw(value: Prisma.JsonValue, key: string) { const row = asRecord(value); const component = asRecord(row[key]); return typeof component.raw === 'number' ? component.raw : 0; }
 function marketValue(value: Prisma.JsonValue, key: string) { const row = asRecord(value); return typeof row[key] === 'number' ? row[key] as number : null; }
 function scoreBucket(score: number) { if (score >= 94) return '94-100'; if (score >= 85) return '85-93'; if (score >= 70) return '70-84'; if (score >= 50) return '50-69'; return '0-49'; }
+function confidenceBucket(value: number | null) { if (value === null) return 'unknown'; if (value >= 0.85) return '85-100'; if (value >= 0.7) return '70-84'; if (value >= 0.5) return '50-69'; return '0-49'; }
 function volumeLabel(entry: number | null, current: number | null) { if (entry === null || current === null) return 'unknown'; const ratio = entry > 0 ? current / entry : null; return ratio === null ? 'unknown' : ratio >= 1 ? 'expanding' : ratio >= 0.4 ? 'continuing' : 'fading'; }
+function coveragePolicy(horizonMinutes: number) { return { minimumSnapshots: 2, maximumTrailingGapMinutes: Math.max(2, Math.min(60, horizonMinutes * 0.1)), syntheticSnapshotsAccepted: false }; }
+function horizonCoverage(entry: { ts: Date } | null, snapshots: Array<{ ts: Date }>, targetAt: Date, complete: boolean, horizonMinutes: number) {
+  if (!entry || snapshots.length === 0) return 'insufficient';
+  if (!complete || snapshots.length < 2) return 'partial';
+  const toleranceMs = coveragePolicy(horizonMinutes).maximumTrailingGapMinutes * 60_000;
+  return targetAt.getTime() - snapshots.at(-1)!.ts.getTime() <= toleranceMs ? 'full' : 'partial';
+}
 function holderLabel(entry: number, current: number) { if (!entry || !current) return 'unknown'; const ratio = current / entry; return ratio >= 1.05 ? 'expanding' : ratio >= 0.85 ? 'stable' : 'contracting'; }
 function ratioPct(current: number | null, entry: number | null) { return current !== null && entry !== null && entry > 0 ? round(current / entry * 100, 3) : null; }
 function positive(value: number | null) { return value !== null && value > 0 ? value : null; }

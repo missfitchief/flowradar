@@ -45,6 +45,7 @@ describe('adaptive intelligence safety boundaries', () => {
     expect(independent.independentEntityCount).toBe(2);
     expect(independent.independentCapitalRootCount).toBe(2);
     expect(independent.score).toBeGreaterThan(sameEntity.score);
+    expect(sameEntity.decomposition.entityConfluence.raw).toBeLessThan(independent.decomposition.entityConfluence.raw);
 
     const peripheral = scoreAdaptiveActivation([
       { ...base, profileId: 'p1', entityId: 'e1', scope: 'peripheral' },
@@ -77,6 +78,7 @@ describe('adaptive intelligence safety boundaries', () => {
 
   it('applies deterministic failure/rug/insufficient labels', () => {
     expect(deterministicOutcomeLabel({ maxReturnPct: null, realizedReturnPct: null, maxDrawdownPct: null, rugPullDetected: false, tradingHalted: false, liquidityRetentionPct: null, coverage: 'insufficient' })).toBe('insufficient_data');
+    expect(deterministicOutcomeLabel({ maxReturnPct: 500, realizedReturnPct: 300, maxDrawdownPct: -10, rugPullDetected: false, tradingHalted: false, liquidityRetentionPct: 100, coverage: 'partial' })).toBe('insufficient_data');
     expect(deterministicOutcomeLabel({ maxReturnPct: 40, realizedReturnPct: -95, maxDrawdownPct: -98, rugPullDetected: true, tradingHalted: false, liquidityRetentionPct: 5, coverage: 'full' })).toBe('rug_pull');
     expect(deterministicOutcomeLabel({ maxReturnPct: 350, realizedReturnPct: 210, maxDrawdownPct: -30, rugPullDetected: false, tradingHalted: false, liquidityRetentionPct: 70, coverage: 'full' })).toBe('exceptional');
   });

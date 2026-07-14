@@ -209,20 +209,25 @@ export async function runIntelligenceLifecycle(
       }));
       if (adaptive.lifecycleStage === 'OBSERVATION') continue;
       const score = adaptive.score;
-      const level: IntelligenceSignalLevel = adaptive.lifecycleStage === 'WATCH' ? 'WATCH'
-        : adaptive.lifecycleStage === 'STRONG_WATCH' ? 'STRONG_WATCH' : 'HIGH_CONVICTION';
       const allEvents = uniqueBy([...recentBuys, ...funding.map((row) => row.event)], (event) => event.eventId);
       const sourceEventIds = allEvents.map((event) => event.eventId).sort();
       const dedupeKey = hash(`intelligence-signal|${chain}|${tokenAddress}|${patterns.sort().join(',')}|${sourceEventIds.join(',')}|v${INTELLIGENCE_LIFECYCLE_ENGINE_VERSION}`);
       if (await prisma.intelligenceSignal.findUnique({ where: { dedupeKey }, select: { id: true } })) continue;
 
       const quality = await assessTokenQuality(prisma, { chain, tokenAddress, sourceEventIds, assessedAt: activationEnd });
+      const lifecycleStage = qualityGatedLifecycleStage(adaptive, quality.passed, highAlphaWallets.length);
+      const level: IntelligenceSignalLevel = lifecycleStage === 'WATCH' ? 'WATCH'
+        : lifecycleStage === 'STRONG_WATCH' ? 'STRONG_WATCH' : 'HIGH_CONVICTION';
+      const scoreDecomposition = {
+        ...adaptive.decomposition,
+        dimensions: explainableScoreDimensions(adaptive, participants, membershipByProfile, quality)
+      };
       const reasons = signalReasons({ sameCluster, independentClusters, executionSequences, dormantFunded, highAlphaWallets, buyerProfiles });
       const clusterKeys = unique(participants.map((profile) => profile.cluster.clusterKey)).sort();
       const entityKeys = unique(participants.map((profile) => profile.entityKey).filter(nonNull)).sort();
       const entityIds = unique(participants.map((profile) => membershipByProfile.get(profile.id)?.entityId).filter(nonNull)).sort();
       const walletAddresses = unique(participants.map((profile) => profile.address)).sort();
-      const explanation = `${adaptive.lifecycleStage.replaceAll('_', ' ')}: ${reasons.join(' ')} ${adaptive.independentEntityCount} independent entity confirmation(s), ${adaptive.independentCapitalRootCount} capital root(s), ${adaptive.coreWalletCount} core wallet(s). Token quality ${quality.passed ? `passed (${Math.round(quality.score)}/100)` : `did not pass (${Math.round(quality.score)}/100)`}.`;
+      const explanation = `${lifecycleStage.replaceAll('_', ' ')}: ${reasons.join(' ')} ${adaptive.independentEntityCount} independent entity confirmation(s), ${adaptive.independentCapitalRootCount} capital root(s), ${adaptive.coreWalletCount} core wallet(s). Token quality ${quality.passed ? `passed (${Math.round(quality.score)}/100)` : `did not pass (${Math.round(quality.score)}/100; conviction capped`}.`;
       const signal = await prisma.intelligenceSignal.create({
         data: {
           dedupeKey,
@@ -230,7 +235,7 @@ export async function runIntelligenceLifecycle(
           tokenAddress,
           signalType: patterns.join('+'),
           level,
-          lifecycleStage: adaptive.lifecycleStage,
+          lifecycleStage,
           score,
           activatedAt: activationEnd,
           clusterKeys,
@@ -265,7 +270,7 @@ export async function runIntelligenceLifecycle(
             signalTimeCutoff: activationEnd.toISOString(),
             noLookahead: true
           }),
-          scoreDecompositionJson: json(adaptive.decomposition),
+          scoreDecompositionJson: json(scoreDecomposition),
           entryMarketJson: json({
             capturedAt: activationEnd.toISOString(), assessedAt: quality.assessedAt.toISOString(),
             liquidityUsd: decimal(quality.liquidityUsd), marketCapUsd: decimal(quality.marketCapUsd),
@@ -314,8 +319,8 @@ export async function runIntelligenceLifecycle(
           confidence: score / 100,
           historicalToken: Boolean(historical),
           evidenceJson: json({
-            intelligenceSignalId: signal.id, lifecycleStage: adaptive.lifecycleStage, explanation, reasons,
-            qualityAssessmentId: quality.id, scoreDecomposition: adaptive.decomposition,
+            intelligenceSignalId: signal.id, lifecycleStage, explanation, reasons,
+            qualityAssessmentId: quality.id, scoreDecomposition,
             entityIds, coreWalletCount: adaptive.coreWalletCount, independentCapitalRootCount: adaptive.independentCapitalRootCount
           }),
           caveats: ['cluster activation required; no single-wallet buy can create this alert', 'research-only; no automatic trade execution'],
@@ -326,7 +331,7 @@ export async function runIntelligenceLifecycle(
         update: { status: 'active', computedAt: now }
       });
 
-      if (score >= ADAPTIVE_THRESHOLDS.buyCandidateSignal && level !== 'WATCH' && quality.passed && quality.score >= ADAPTIVE_THRESHOLDS.buyCandidateQuality) {
+      if (score >= ADAPTIVE_THRESHOLDS.buyCandidateSignal && lifecycleStage !== 'WATCH' && quality.passed && quality.score >= ADAPTIVE_THRESHOLDS.buyCandidateQuality) {
         const confidence = Math.min(score / 100, quality.score / 100, average(participants.map((profile) => profile.confidence)));
         await prisma.intelligenceBuyCandidate.create({
           data: {
@@ -336,8 +341,8 @@ export async function runIntelligenceLifecycle(
             chain,
             tokenAddress,
             confidence,
-            reasonCodes: ['entity_intelligence_pass', 'independent_confirmation_pass', 'token_quality_pass', `signal_stage_${adaptive.lifecycleStage.toLowerCase()}`],
-            evidenceJson: json({ signalId: signal.id, signalScore: score, lifecycleStage: adaptive.lifecycleStage, qualityAssessmentId: quality.id, qualityScore: quality.score, scoreDecomposition: adaptive.decomposition, noAutomaticExecution: true })
+            reasonCodes: ['entity_intelligence_pass', 'independent_confirmation_pass', 'token_quality_pass', `signal_stage_${lifecycleStage.toLowerCase()}`],
+            evidenceJson: json({ signalId: signal.id, signalScore: score, lifecycleStage, qualityAssessmentId: quality.id, qualityScore: quality.score, scoreDecomposition, noAutomaticExecution: true })
           }
         });
         report.buyCandidatesCreated += 1;
@@ -556,6 +561,50 @@ function signalReasons(input: {
 function eventReceipt(event: MassEvent) {
   return { eventId: event.eventId, txHash: event.txHash, ts: event.ts.toISOString(), kind: event.kind, from: event.fromAddress, to: event.toAddress, actor: event.actorAddress, amountUsd: decimal(event.amountUsd) };
 }
+function qualityGatedLifecycleStage(
+  adaptive: ReturnType<typeof scoreAdaptiveActivation>,
+  qualityPassed: boolean,
+  highAlphaWalletCount: number
+): ReturnType<typeof scoreAdaptiveActivation>['lifecycleStage'] {
+  if (!qualityPassed && (adaptive.lifecycleStage === 'HIGH_CONVICTION' || adaptive.lifecycleStage === 'EXCEPTIONAL')) return 'STRONG_WATCH';
+  if (adaptive.lifecycleStage === 'EXCEPTIONAL' && (
+    adaptive.independentEntityCount < 2 || adaptive.independentCapitalRootCount < 2 || highAlphaWalletCount < 2
+  )) return 'HIGH_CONVICTION';
+  return adaptive.lifecycleStage;
+}
+function explainableScoreDimensions(
+  adaptive: ReturnType<typeof scoreAdaptiveActivation>,
+  participants: Profile[],
+  memberships: Map<string, { identityConfidence: number }>,
+  quality: { passed: boolean; score: number; riskPenalty: number | null; checksJson: Prisma.JsonValue; liquidityUsd: Prisma.Decimal | null }
+) {
+  const checks = asRecord(asRecord(quality.checksJson).results);
+  const thresholds = asRecord(asRecord(quality.checksJson).thresholds);
+  const tokenAgeMinutes = finiteJsonNumber(asRecord(quality.checksJson).tokenAgeMinutes);
+  const executionChecks = ['sellabilityPass', 'slippagePass', 'routePass', 'tradingPass'].map((key) => checks[key] === true ? 1 : 0);
+  const minimumLiquidity = finiteJsonNumber(thresholds.minLiquidityUsd);
+  const liquidity = decimal(quality.liquidityUsd);
+  const liquidityScore = liquidity !== null && minimumLiquidity !== null && minimumLiquidity > 0
+    ? Math.min(100, liquidity / minimumLiquidity * 100)
+    : checks.liquidityPass === true ? 100 : 0;
+  const entityConfidence = average(participants.map((profile) => memberships.get(profile.id)?.identityConfidence ?? profile.confidence)) * 100;
+  const raw = (key: keyof typeof adaptive.decomposition) => adaptive.decomposition[key].raw;
+  const riskPenalty = quality.riskPenalty === null ? null : Math.max(0, Math.min(100, quality.riskPenalty > 1 ? quality.riskPenalty : quality.riskPenalty * 100));
+  return {
+    evidenceScore: round(raw('evidenceQuality') * 100),
+    entityConfidence: round(entityConfidence),
+    historicalAlpha: round(raw('historicalAlpha') * 100),
+    independentConfirmation: round((raw('entityConfluence') * 0.7 + raw('independentCapital') * 0.3) * 100),
+    timingScore: round((raw('dormantAwakening') * 0.5 + raw('fundingExecution') * 0.5) * 100),
+    tokenQuality: round(quality.score),
+    riskScore: riskPenalty ?? round(100 - quality.score),
+    noveltyScore: tokenAgeMinutes === null ? 0 : round(tokenAgeMinutes <= 60 ? 100 : tokenAgeMinutes <= 1_440 ? 75 : tokenAgeMinutes <= 10_080 ? 50 : 25),
+    liquidityScore: round(liquidityScore),
+    executionReadiness: round(average(executionChecks) * 100),
+    overallOpportunityScore: round(quality.passed && quality.score >= ADAPTIVE_THRESHOLDS.buyCandidateQuality ? adaptive.score * 0.65 + quality.score * 0.35 : adaptive.score * 0.65),
+    note: 'Risk Score is lower-is-better; every other dimension is higher-is-better.'
+  };
+}
 function refKey(chain: ChainId, address: string) { return `${chain}:${normalizeAddress(chain, address)}`; }
 function splitRef(value: string): [ChainId, string] { const index = value.indexOf(':'); return [value.slice(0, index) as ChainId, value.slice(index + 1)]; }
 function groupBy<T>(rows: T[], key: (row: T) => string) { const result = new Map<string, T[]>(); for (const row of rows) result.set(key(row), [...(result.get(key(row)) ?? []), row]); return result; }
@@ -565,6 +614,9 @@ function chunks<T>(rows: T[], size: number) { const result: T[][] = []; for (let
 function clampInt(value: number, min: number, max: number) { return Math.max(min, Math.min(max, Math.trunc(value))); }
 function average(values: number[]) { return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0; }
 function decimal(value: unknown) { if (value === null || value === undefined) return null; const number = Number(value); return Number.isFinite(number) ? number : null; }
+function finiteJsonNumber(value: unknown) { const number = Number(value); return Number.isFinite(number) ? number : null; }
+function asRecord(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+function round(value: number, digits = 2) { const scale = 10 ** digits; return Math.round(value * scale) / scale; }
 function hash(value: string) { return createHash('sha256').update(value).digest('hex'); }
 function nonNull<T>(value: T | null | undefined): value is T { return value !== null && value !== undefined; }
 function json(value: unknown): Prisma.InputJsonValue { return value as Prisma.InputJsonValue; }
