@@ -162,7 +162,11 @@ async function backfillLegacyKnowledge(prisma: PrismaClient, now: Date) {
       const profile = await prisma.walletIntelligenceProfile.create({ data: {
         walletId: enrollment.wallet.id, chain: address.chain, address: address.address, clusterId: cluster.id,
         entityKey: unifiedEntity.entityKey, role: preferredRole(address.role, role?.role), evidenceScore,
+        sourceScore: null, rawHistoricalAlphaScore: alpha.rawScore,
+        sampleAdjustedAlphaScore: alpha.score, alphaConfidence: alpha.sampleConfidence,
+        alphaSampleSize: alpha.sampleSize, alphaCalibrationJson: json(alpha),
         historicalAlphaScore: alpha.score, wakeUpPotential: wake, confidence,
+        intelligenceStatus: intelligenceStatus(enrollment.wallet.lastActiveAt, alpha.score, wake, now),
         tier: evidenceScore >= 80 && alpha.score >= 60 ? 'A' : evidenceScore >= 55 || alpha.score >= 50 ? 'B' : 'C',
         discoverySource: 'legacy_unified_entity_backfill', lastDiscoverySource: 'legacy_unified_entity_backfill',
         firstDiscoveredAt: discoveredAt, lastObservedAt, lastActivityAt: enrollment.wallet.lastActiveAt,
@@ -181,7 +185,10 @@ async function backfillLegacyKnowledge(prisma: PrismaClient, now: Date) {
       const observationKey = hash(`legacy-profile-observation|${profile.id}|${unifiedEntity.computedAt.toISOString()}|v${ADAPTIVE_RULE_VERSION}`);
       await prisma.walletIntelligenceObservation.upsert({ where: { observationKey }, create: {
         observationKey, profileId: profile.id, discoverySource: 'legacy_unified_entity_backfill', entityKey: unifiedEntity.entityKey,
-        role: profile.role, evidenceScore, historicalAlphaScore: alpha.score, wakeUpPotential: wake, confidence,
+        role: profile.role, evidenceScore, sourceScore: null, rawHistoricalAlphaScore: alpha.rawScore,
+        sampleAdjustedAlphaScore: alpha.score, alphaConfidence: alpha.sampleConfidence,
+        alphaSampleSize: alpha.sampleSize, alphaCalibrationJson: json(alpha),
+        historicalAlphaScore: alpha.score, wakeUpPotential: wake, intelligenceStatus: profile.intelligenceStatus, confidence,
         previousConfidence: null, confidenceDelta: 0, tier: profile.tier, independentSignals: evidenceTypes.length,
         evidenceSignals: evidenceTypes, supportingEvidenceJson: json(profile.supportingEvidenceJson),
         contradictingEvidenceJson: json(profile.contradictingEvidenceJson),
@@ -199,7 +206,7 @@ async function backfillLegacyKnowledge(prisma: PrismaClient, now: Date) {
 
 type DnaRow = NonNullable<Awaited<ReturnType<PrismaClient['walletDnaProfile']['findFirst']>>>;
 function dnaAlpha(dna: DnaRow | null | undefined) {
-  if (!dna) return { score: 35, sampleConfidence: 0, sampleSize: 0, source: 'unknown' };
+  if (!dna) return { rawScore: 35, score: 35, sampleConfidence: 0, sampleSize: 0, source: 'unknown' };
   const n = dna.completedPositions;
   const sampleConfidence = 1 - Math.exp(-n / 18);
   const hit = dna.winRate ?? 0.35;
@@ -209,7 +216,13 @@ function dnaAlpha(dna: DnaRow | null | undefined) {
   const oneWinnerPenalty = Math.max(0, Math.min(1, dna.oneWinnerDependence ?? 0));
   const rugPenalty = Math.max(0, Math.min(1, dna.deadRugExposureRate ?? 0));
   const raw = 100 * (hit * 0.4 + returnQuality * 0.25 + repeatQuality * 0.15 + (1 - oneWinnerPenalty) * 0.1 + (1 - rugPenalty) * 0.1);
-  return { score: round(raw * sampleConfidence + 35 * (1 - sampleConfidence), 2), sampleConfidence: round(sampleConfidence, 4), sampleSize: n, source: 'wallet_dna_bayesian_summary', oneWinnerPenalty, rugPenalty };
+  return { rawScore: round(raw, 2), score: round(raw * sampleConfidence + 35 * (1 - sampleConfidence), 2), sampleConfidence: round(sampleConfidence, 4), sampleSize: n, source: 'wallet_dna_bayesian_summary', oneWinnerPenalty, rugPenalty };
+}
+function intelligenceStatus(lastActivityAt: Date | null, alpha: number, wake: number, now: Date) {
+  const dormant = Boolean(lastActivityAt && now.getTime() - lastActivityAt.getTime() >= 30 * 86_400_000);
+  if (dormant && (alpha >= 50 || wake >= 55)) return 'dormant_high_value';
+  if (dormant) return 'dormant_alpha';
+  return alpha >= 45 ? 'active_alpha' : 'inactive_low_value';
 }
 function dnaWake(dna: DnaRow | null | undefined) {
   if (!dna) return 20;

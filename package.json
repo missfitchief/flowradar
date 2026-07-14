@@ -27,6 +27,7 @@
     "intelligence:daemon": "tsx scripts/intelligence-lifecycle-daemon.mts",
     "intelligence:adaptive-pilot": "tsx scripts/adaptive-intelligence-pilot.mts",
     "intelligence:real-outcome-replay": "tsx scripts/adaptive-real-outcome-replay.mts",
+    "intelligence:promote-model": "tsx scripts/promote-intelligence-model.mts",
     "intelligence:telegram-smoke": "tsx scripts/adaptive-telegram-smoke.mts",
     "intelligence:import-core-seeds": "tsx scripts/import-priority-core-wallet-seeds.mts",
     "telegram:smoke": "tsx scripts/telegram-smoke.mts",

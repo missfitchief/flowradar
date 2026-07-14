@@ -16,11 +16,16 @@ export function renderIntelligenceAlert(data: AdaptiveAlert, view: AdaptiveAlert
   const payload = data.payload ?? {};
   const quality = signal.qualityAssessment;
   const token = stringValue(payload.token) ?? stringValue(payload.symbol) ?? signal.tokenAddress;
+  const tier = signal.buyCandidate ? 'BUY CANDIDATE' : signal.lifecycleStage.replaceAll('_', ' ');
+  const snapshotWalletRows = snapshotWallets(signal.featureSnapshotJson);
+  const activeCore = data.entities.flatMap((entity) => entity.memberships.filter((membership) => membership.scope === 'core').map((membership) => membership.profile.address)).slice(0, 5);
+  const dormantAwakened = snapshotWalletRows.filter((wallet) => wallet.dormantAwakened === true);
+  const fundingSequences = array(record(signal.evidenceJson).funding).length;
   const riskPassed = quality?.reasonCodes.filter((code) => code.endsWith('_pass') || code.includes('_verified')).slice(0, 5) ?? [];
   const riskFailed = quality?.reasonCodes.filter((code) => code.includes('fail') || code.includes('risk') || code.includes('unknown')).slice(0, 5) ?? [];
   const invalidation = invalidationConditions(quality?.reasonCodes ?? []);
   const text = [
-    `<b>FlowRadar · ${h(signal.lifecycleStage.replaceAll('_', ' '))}</b>`,
+    `<b>FlowRadar · ${h(tier)}</b>`,
     `<b>${h(token)}</b> · ${h(signal.chain)}`,
     `<code>${h(signal.tokenAddress)}</code>`,
     '',
@@ -30,6 +35,8 @@ export function renderIntelligenceAlert(data: AdaptiveAlert, view: AdaptiveAlert
     `<b>Activation</b>`,
     `Entities: ${signal.independentEntityCount} independent · capital roots: ${signal.independentCapitalRootCount}`,
     `Wallets: ${signal.coreWalletCount} core · ${signal.peripheralWalletCount} peripheral`,
+    ...(activeCore.length ? [`Core active: ${activeCore.map(short).join(', ')}`] : []),
+    `Dormant awakened: ${dormantAwakened.length} · funding→execution→buy: ${fundingSequences ? 'yes' : 'no'}`,
     `Confidence: ${Math.round(signal.score)} / 100`,
     ...entitySummary(data),
     '',
@@ -68,9 +75,11 @@ function scoreLines(data: AdaptiveAlert) {
 function evidenceLines(data: AdaptiveAlert) {
   const lines = data.entities.flatMap((entity) => [
     `Entity ${entity.label} · identity ${pct(entity.identityConfidence)} · relevance ${pct(entity.currentRelevance)}`,
+    `Strongest: ${summarizeEvidence(entity.strongestEvidenceJson)}`,
+    `Counter-evidence: ${summarizeCounterEvidence(entity.counterEvidenceJson)}`,
     ...entity.memberships.slice(0, 8).map((membership) => `• ${membership.scope}/${membership.status} · ${membership.profile.role} · ${short(membership.profile.address)} · ${membership.evidenceTypes.join(', ') || 'evidence unknown'}`)
   ]);
-  return lines.length ? lines : ['No adaptive entity membership receipt is available for this legacy alert.'];
+  return lines.length ? [...lines, 'Infrastructure/router/CEX-only memberships are excluded from independence counts.'] : ['No adaptive entity membership receipt is available for this legacy alert.'];
 }
 
 function historyLines(data: AdaptiveAlert) {
@@ -79,7 +88,7 @@ function historyLines(data: AdaptiveAlert) {
     ...data.entities.map((entity) => `${entity.label}: alpha ${Math.round(entity.historicalAlphaScore)}/100 (${pct(entity.historicalAlphaConfidence)} sample confidence), wake-up ${Math.round(entity.wakeUpPotential)}/100, outcomes ${entity.outcomeCount}`),
     ...participants.slice(0, 10).map((value) => {
       const row = record(value);
-      return `• ${short(stringValue(row.address) ?? 'unknown')} · role ${stringValue(row.role) ?? 'unknown'} · alpha ${number(row.historicalAlphaScore) ?? 'n/a'} · evidence ${number(row.evidenceScore) ?? 'n/a'}`;
+      return `• ${short(stringValue(row.address) ?? 'unknown')} · role ${stringValue(row.role) ?? 'unknown'} · source ${number(row.sourceScore) ?? 'n/a'} · raw/sample alpha ${number(row.rawHistoricalAlphaScore) ?? 'n/a'}/${number(row.sampleAdjustedHistoricalAlphaScore) ?? number(row.historicalAlphaScore) ?? 'n/a'} · confidence ${pct(number(row.alphaConfidence) ?? 0)}`;
     }),
     ...(participants.length === 0 && data.entities.length === 0 ? ['Historical support unavailable. It is not inferred.'] : [])
   ];
@@ -151,6 +160,18 @@ export function parseIntelligenceAlertCallback(value: string | undefined): { vie
 }
 function alertCallback(view: AdaptiveAlertView, alertId: string) { return `ia|${view}|${alertId}`; }
 function entitySummary(data: AdaptiveAlert) { return data.entities.slice(0, 3).map((entity) => `${h(entity.label)} · alpha ${Math.round(entity.historicalAlphaScore)} · evidence ${pct(entity.identityConfidence)}`); }
+function snapshotWallets(value: unknown) { const wallets = record(value).wallets; return Array.isArray(wallets) ? wallets.map(record) : []; }
+function summarizeEvidence(value: unknown) {
+  const evidence = record(value).evidence;
+  if (!Array.isArray(evidence) || !evidence.length) return 'unavailable';
+  return evidence.slice(0, 4).map((item) => stringValue(record(item).type) ?? 'unknown').join(', ');
+}
+function summarizeCounterEvidence(value: unknown) {
+  const contradictions = record(value).contradictions;
+  const infrastructure = record(value).infrastructureExclusions;
+  const count = (Array.isArray(contradictions) ? contradictions.length : 0) + (Array.isArray(infrastructure) ? infrastructure.length : 0);
+  return count ? `${count} recorded limitation(s)` : 'none recorded';
+}
 function invalidationConditions(reasons: string[]) { const base = ['LP removal or liquidity collapse', 'sellability/ownership control risk', 'entity evidence invalidated or split']; if (reasons.some((row) => row.includes('holder'))) base.push('holder concentration deterioration'); return base; }
 function pretty(value: string) { return value.replace(/([A-Z])/g, ' $1').replaceAll('_', ' ').trim(); }
 function fmt(value: number | null) { return value === null ? 'n/a' : `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`; }

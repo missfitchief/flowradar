@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 function pct(value: number | null) { return value === null ? 'insufficient data' : `${(value * 100).toFixed(1)}%`; }
 function number(value: number | null) { return value === null ? 'n/a' : value.toLocaleString(undefined, { maximumFractionDigits: 2 }); }
-type SliceMetric = { signals?: number; evaluated?: number; wins?: number; precision?: number | null; falsePositiveRate?: number | null; medianReturnPct?: number | null; medianMaxDrawdownPct?: number | null };
+type SliceMetric = { signals?: number; evaluated?: number; wins?: number; precision?: number | null; falsePositiveRate?: number | null; medianReturnPct?: number | null; medianAthMultiple?: number | null; medianMaxDrawdownPct?: number | null };
 
 export default async function IntelligencePerformancePage() {
   const [metrics, entities, latestReplay, latestBackfill, latestLifecycle] = await Promise.all([
@@ -25,21 +25,33 @@ export default async function IntelligencePerformancePage() {
   const byEntity = sliceMap('byEntity');
   const byEntityConfidence = sliceMap('byEntityConfidenceBucket');
   const byModel = sliceMap('byModelVersion');
+  const performanceSlice = (key: string) => (slices[key] && typeof slices[key] === 'object' ? slices[key] : {}) as SliceMetric;
+  const entityDiversity = (slices.entityDiversity && typeof slices.entityDiversity === 'object' ? slices.entityDiversity : {}) as Record<string, unknown>;
+  const outcomeCoverage = (slices.outcomeCoverage && typeof slices.outcomeCoverage === 'object' ? slices.outcomeCoverage : {}) as Record<string, unknown>;
+  const cohortRows: Array<[string, SliceMetric]> = [
+    ['Dormant awakenings', performanceSlice('dormantAwakening')],
+    ['Source Score 85+', performanceSlice('sourceScore85Plus')],
+    ['Insider-tagged wallets', performanceSlice('insiderWallets')],
+    ['Dormant wallets', performanceSlice('dormantWallets')]
+  ];
 
   return (
     <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Adaptive Intelligence Performance</h1>
-        <p className="mt-2 text-sm text-muted-foreground">Persisted entity confidence, no-lookahead outcome tracking and shadow-only feedback validation. No automatic trading or weight promotion.</p>
+        <p className="mt-2 text-sm text-muted-foreground">Persisted entity confidence, no-lookahead outcome tracking and shadow-only feedback validation. No automatic trading; model promotion requires an explicit reviewed operator action.</p>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+      <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-8">
         <Metric title="Signals evaluated" value={`${metrics.evaluated}/${metrics.signals}`} note={`${metrics.insufficient} insufficient`} />
         <Metric title="Precision" value={pct(metrics.precision)} note={`false positives ${pct(metrics.falsePositiveRate)}`} />
         <Metric title="Failure / rug" value={`${pct(metrics.failureRate)} / ${pct(metrics.rugRate)}`} note={`survival ${pct(metrics.survivalRate)}`} />
         <Metric title="Median return" value={percentValue(metrics.medianReturnPct)} note={`median drawdown ${percentValue(metrics.medianMaxDrawdownPct)}`} />
+        <Metric title="Median ATH" value={multiple(metrics.medianAthMultiple)} note="from persisted max-return outcomes" />
         <Metric title="Latency / entry MC" value={`${minutes(metrics.medianSignalLatencyMinutes)} / ${money(metrics.medianEntryMarketCapUsd)}`} note={`time to peak ${minutes(metrics.medianTimeToPeakMinutes)}`} />
         <Metric title="Entity alpha coverage" value={`${alphaReliable}/${entities.length}`} note="sample confidence ≥60%" />
+        <Metric title="Entity diversity" value={String(entityDiversity.uniqueEntities ?? 'n/a')} note={`independent/wallet ratio ${pct(nullableNumber(entityDiversity.independentEntityRatio))}`} />
+        <Metric title="Outcome coverage" value={pct(nullableNumber(outcomeCoverage.evaluatedRatio))} note={String(outcomeCoverage.status ?? 'insufficient data').replaceAll('_', ' ')} />
       </div>
 
       <div className="rounded-lg border border-border bg-card p-4 text-sm">
@@ -58,6 +70,11 @@ export default async function IntelligencePerformancePage() {
 
       <Section title="Signal level performance">
         <Table headers={['Stage', 'Signals', 'Evaluated', 'Wins', 'Precision']} rows={stages.map(([stage, row]) => [stage, row.signals, row.evaluated, row.wins, pct(row.precision)])} />
+      </Section>
+
+      <Section title="Priority cohort performance">
+        <Table headers={['Cohort', 'Signals', 'Evaluated', 'Precision', 'False positives', 'Median ATH', 'Median realized']} rows={cohortRows.map(([name, row]) => [name, row.signals ?? 0, row.evaluated ?? 0, pct(row.precision ?? null), pct(row.falsePositiveRate ?? null), multiple(row.medianAthMultiple ?? null), percentValue(row.medianReturnPct ?? null)])} />
+        <p className="mt-2 text-xs text-muted-foreground">Empty cohorts remain zero/insufficient. Source Score defines only a reporting cohort; it is never ownership evidence or signal eligibility.</p>
       </Section>
 
       <Section title="Pattern performance">
@@ -91,7 +108,7 @@ export default async function IntelligencePerformancePage() {
       <Section title="Feedback safety">
         <div className="rounded-lg border border-border bg-card p-4 text-sm">
           <p>Production model v{String(metrics.feedback.productionModelVersion)} · automatic weight changes: <b>{String(metrics.feedback.automaticWeightChanges)}</b></p>
-          <p className="mt-2 text-muted-foreground">Candidate weights remain shadow-only unless validation and holdout precision do not regress. Latest replay: {latestReplay?.id ?? 'none'}.</p>
+          <p className="mt-2 text-muted-foreground">Candidate weights remain shadow-only unless validation and holdout precision do not regress; promotion is manual and audited. Latest replay: {latestReplay?.id ?? 'none'}.</p>
           <p className="mt-1 text-muted-foreground">No-lookahead replay: {latestReplay?.status ?? 'not run'} · {latestReplay?.noLookaheadViolations ?? 0} violations.</p>
           <p className="mt-1 text-muted-foreground">Latest backfill: {latestBackfill ? `${latestBackfill.status} · scanned ${latestBackfill.scannedCount} · unknown ${latestBackfill.unknownCount} · errors ${latestBackfill.errorCount}` : 'none'}.</p>
         </div>
@@ -122,5 +139,7 @@ function metric(value: unknown, key: string) { const row = value && typeof value
 function metricNumber(value: unknown, key: string) { const row = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; const number = Number(row[key]); return Number.isFinite(number) ? number : null; }
 function bytes(value: number | null) { if (value === null) return 'n/a'; return `${(value / 1_048_576).toFixed(1)} MiB`; }
 function percentValue(value: number | null) { return value === null ? 'n/a' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`; }
+function multiple(value: number | null) { return value === null ? 'insufficient data' : `${value.toFixed(2)}x`; }
+function nullableNumber(value: unknown) { const number = Number(value); return Number.isFinite(number) ? number : null; }
 function minutes(value: number | null) { return value === null ? 'n/a' : `${value.toFixed(1)}m`; }
 function money(value: number | null) { return value === null ? 'n/a' : `$${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`; }

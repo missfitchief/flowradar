@@ -56,6 +56,7 @@ export interface InvestigationPath {
 
 export type InvestigationIntelligenceTier = 'S' | 'A' | 'B' | 'C';
 export type InvestigationTrackingPriority = 'track_now' | 'watch' | 'context_only' | 'exclude';
+export type InvestigationIntelligenceStatus = 'active_alpha' | 'dormant_alpha' | 'awakened_wallet' | 'awakened_entity' | 'inactive_low_value' | 'dormant_high_value';
 
 export interface InvestigationEvidenceSignal {
   code: string;
@@ -67,8 +68,15 @@ export interface InvestigationEvidenceSignal {
 
 export interface InvestigationMemberIntelligence {
   evidenceScore: number;
+  sourceScore: number | null;
+  rawHistoricalAlphaScore: number;
+  sampleAdjustedHistoricalAlphaScore: number;
+  alphaConfidence: number;
+  alphaSampleSize: number;
+  alphaCalibration: Record<string, number | string | null>;
   historicalAlphaScore: number;
   wakeUpPotential: number;
+  status: InvestigationIntelligenceStatus;
   tier: InvestigationIntelligenceTier;
   trackingPriority: InvestigationTrackingPriority;
   independentSignalCount: number;

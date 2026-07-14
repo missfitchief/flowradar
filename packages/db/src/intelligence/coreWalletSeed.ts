@@ -229,6 +229,7 @@ export async function importPriorityCoreWalletSeeds(
         const addedAt = earliestDate(...group.map((entry) => entry.sourceAddedAt));
         const sourceLastActiveAt = latestDate(...group.map((entry) => entry.sourceLastActiveAt));
         const sourceDormant = group.some((entry) => /dormant/i.test(entry.sourceStatus ?? ''));
+        const sourceScore = Math.max(...group.map((entry) => entry.sourceScore ?? 0));
         const existingWallet = await prisma.wallet.findUnique({
           where: { address_chain: { address, chain } },
           select: { id: true, status: true, _count: { select: { stats: true } } }
@@ -288,8 +289,15 @@ export async function importPriorityCoreWalletSeeds(
               entityKey: null,
               role: SEED_ROLE,
               evidenceScore: 0,
+              sourceScore,
+              rawHistoricalAlphaScore: 35,
+              sampleAdjustedAlphaScore: 35,
+              alphaConfidence: 0,
+              alphaSampleSize: 0,
+              alphaCalibrationJson: json({ status: 'unverified', sourceScoreExcluded: true }),
               historicalAlphaScore: 35,
               wakeUpPotential: sourceDormant ? 45 : 35,
+              intelligenceStatus: 'inactive_low_value',
               confidence: 0,
               tier: 'C',
               discoverySource: 'priority_core_wallet_seed',
@@ -333,6 +341,7 @@ export async function importPriorityCoreWalletSeeds(
               where: { id: profile.id },
               data: {
                 lastDiscoverySource: 'priority_core_wallet_seed',
+                sourceScore: Math.max(profile.sourceScore ?? 0, sourceScore),
                 observationCount: { increment: 1 }
               }
             });
@@ -349,8 +358,15 @@ export async function importPriorityCoreWalletSeeds(
               entityKey: profile.entityKey,
               role: profile.role,
               evidenceScore: profile.evidenceScore,
+              sourceScore,
+              rawHistoricalAlphaScore: profile.rawHistoricalAlphaScore,
+              sampleAdjustedAlphaScore: profile.sampleAdjustedAlphaScore,
+              alphaConfidence: profile.alphaConfidence,
+              alphaSampleSize: profile.alphaSampleSize,
+              alphaCalibrationJson: json(profile.alphaCalibrationJson),
               historicalAlphaScore: profile.historicalAlphaScore,
               wakeUpPotential: profile.wakeUpPotential,
+              intelligenceStatus: profile.intelligenceStatus,
               confidence: profile.confidence,
               previousConfidence: profile.confidence,
               confidenceDelta: 0,

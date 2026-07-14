@@ -124,6 +124,7 @@ enum IntelligenceSignalLevel {
   WATCH
   STRONG_WATCH
   HIGH_CONVICTION
+  OPPORTUNITY
 }
 
 /// Alert.type
@@ -3314,6 +3315,9 @@ model IntelligenceEntity {
   coreWalletCount           Int                @default(0)
   peripheralWalletCount     Int                @default(0)
   tokenCount                Int                @default(0)
+  historicalTokenAddresses  String[]           @default([])
+  strongestEvidenceJson     Json               @default("{}")
+  counterEvidenceJson       Json               @default("{}")
   signalCount               Int                @default(0)
   outcomeCount              Int                @default(0)
   firstDiscoveredAt         DateTime
@@ -3468,8 +3472,15 @@ model WalletIntelligenceProfile {
   entityKey                 String?
   role                      String
   evidenceScore             Float
+  sourceScore               Float?
+  rawHistoricalAlphaScore   Float              @default(35)
+  sampleAdjustedAlphaScore  Float              @default(35)
+  alphaConfidence           Float              @default(0)
+  alphaSampleSize           Int                @default(0)
+  alphaCalibrationJson      Json               @default("{}")
   historicalAlphaScore      Float
   wakeUpPotential           Float
+  intelligenceStatus        String             @default("inactive_low_value")
   confidence                Float
   tier                      String
   discoverySource           String
@@ -3511,8 +3522,15 @@ model WalletIntelligenceObservation {
   entityKey                 String?
   role                      String
   evidenceScore             Float
+  sourceScore               Float?
+  rawHistoricalAlphaScore   Float    @default(35)
+  sampleAdjustedAlphaScore  Float    @default(35)
+  alphaConfidence           Float    @default(0)
+  alphaSampleSize           Int      @default(0)
+  alphaCalibrationJson      Json     @default("{}")
   historicalAlphaScore      Float
   wakeUpPotential           Float
+  intelligenceStatus        String   @default("inactive_low_value")
   confidence                Float
   previousConfidence        Float?
   confidenceDelta           Float
@@ -3655,6 +3673,7 @@ model IntelligenceSignal {
   reasons                     String[]
   evidenceJson                Json
   historySupportJson          Json
+  featureSnapshotJson         Json                    @default("{}")
   scoreDecompositionJson      Json
   entryMarketJson             Json
   rejectionReceiptJson        Json?
@@ -3754,7 +3773,9 @@ model IntelligenceModelVersion {
   metricsJson          Json
   source               String
   approvedAt           DateTime?
+  approvedBy           String?
   activatedAt          DateTime?
+  supersededAt         DateTime?
   createdAt            DateTime  @default(now())
 
   @@index([status, version])
@@ -3778,6 +3799,8 @@ model IntelligenceWeightProposal {
   falsePositiveDelta    Float?
   sampleSize            Int
   evaluatedAt           DateTime?
+  approvedAt            DateTime?
+  approvedBy            String?
   createdAt             DateTime  @default(now())
 
   @@index([status, createdAt])

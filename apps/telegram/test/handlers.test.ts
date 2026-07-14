@@ -85,7 +85,7 @@ describe('Telegram command handlers', () => {
     expect(text).toContain(`<code>${ADDRESS}</code>`);
     expect(text).not.toContain('Wallet DNA');
     expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual([
-      'Tier A evidence', 'Explorer', 'Strongest paths', 'Top deployments', 'Evidence', 'Show more'
+      'Tier A evidence', 'Explorer', 'Strongest paths', 'Top deployments', 'Core / peripheral', 'Evidence', 'Show more'
     ]);
     expect(keyboard?.inline_keyboard.flat().some((button) => button.text === 'Refresh')).toBe(false);
   });
@@ -93,7 +93,7 @@ describe('Telegram command handlers', () => {
   it.each([
     ['/flow', 'priority', 'STRONGEST CAPITAL PATHS'],
     ['/bridges', 'bridges', 'STRONGEST BRIDGE PATHS'],
-    ['/entity', 'cluster', 'WALLET INTELLIGENCE REPORT']
+    ['/entity', 'cluster', 'ENTITY CLUSTER']
   ])('uses the same canonical investigation for %s', async (command, view, heading) => {
     const api = apiMock();
     const service = {

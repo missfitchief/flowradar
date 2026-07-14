@@ -151,6 +151,7 @@ export async function persistInvestigationKnowledge(
         role: member.role
       }));
       const nextConfidence = evolveConfidence(existing, member, evidenceHash);
+      const memberAlpha = normalizedMemberAlpha(member);
       const priority = monitoringPriority(member);
       const evidenceSignals = member.intelligence.evidenceSignals.map((signal) => signal.code);
       const reason = reasonAdded(member);
@@ -160,10 +161,17 @@ export async function persistInvestigationKnowledge(
         entityKey: safeEntityKey(member),
         role: preferredRole(existing?.role, member.role),
         evidenceScore: rollingScore(existing?.evidenceScore, member.intelligence.evidenceScore),
-        historicalAlphaScore: rollingScore(existing?.historicalAlphaScore, member.intelligence.historicalAlphaScore),
+        sourceScore: maxOptional(existing?.sourceScore, memberAlpha.sourceScore),
+        rawHistoricalAlphaScore: rollingScore(existing?.rawHistoricalAlphaScore, memberAlpha.rawScore),
+        sampleAdjustedAlphaScore: rollingScore(existing?.sampleAdjustedAlphaScore, memberAlpha.sampleAdjustedScore),
+        alphaConfidence: Math.max(existing?.alphaConfidence ?? 0, memberAlpha.confidence),
+        alphaSampleSize: Math.max(existing?.alphaSampleSize ?? 0, memberAlpha.sampleSize),
+        alphaCalibrationJson: json(memberAlpha.calibration),
+        historicalAlphaScore: rollingScore(existing?.historicalAlphaScore, memberAlpha.sampleAdjustedScore),
         // A previously valuable dormant wallet is never devalued merely because
         // it woke up; the awakening is captured separately by the lifecycle.
         wakeUpPotential: Math.max(existing?.wakeUpPotential ?? 0, member.intelligence.wakeUpPotential),
+        intelligenceStatus: memberAlpha.status,
         confidence: nextConfidence,
         tier: betterTier(existing?.tier, member.intelligence.tier),
         lastDiscoverySource: source,
@@ -178,6 +186,9 @@ export async function persistInvestigationKnowledge(
           whyImportant: member.intelligence.whyImportant,
           evidenceSignals: member.intelligence.evidenceSignals,
           metrics: member.intelligence.metrics,
+          deploymentTokenAddresses: unique(investigation.deployments.filter((row) => row.chain === member.chain && normalizeAddress(row.chain, row.buyerAddress) === member.address).map((row) => row.tokenAddress)),
+          alphaCalibration: memberAlpha.calibration,
+          sourceScoreExcludedFromIdentityAndSignals: true,
           investigationId: investigation.id
         }),
         contradictingEvidenceJson: json({ contradictions: member.intelligence.contradictions }),
@@ -195,8 +206,15 @@ export async function persistInvestigationKnowledge(
             entityKey: safeEntityKey(member),
             role: member.role,
             evidenceScore: member.intelligence.evidenceScore,
-            historicalAlphaScore: member.intelligence.historicalAlphaScore,
+            sourceScore: memberAlpha.sourceScore,
+            rawHistoricalAlphaScore: memberAlpha.rawScore,
+            sampleAdjustedAlphaScore: memberAlpha.sampleAdjustedScore,
+            alphaConfidence: memberAlpha.confidence,
+            alphaSampleSize: memberAlpha.sampleSize,
+            alphaCalibrationJson: json(memberAlpha.calibration),
+            historicalAlphaScore: memberAlpha.sampleAdjustedScore,
             wakeUpPotential: member.intelligence.wakeUpPotential,
+            intelligenceStatus: memberAlpha.status,
             confidence: nextConfidence,
             tier: member.intelligence.tier,
             discoverySource: source,
@@ -227,8 +245,15 @@ export async function persistInvestigationKnowledge(
           entityKey: safeEntityKey(member),
           role: member.role,
           evidenceScore: member.intelligence.evidenceScore,
-          historicalAlphaScore: member.intelligence.historicalAlphaScore,
+          sourceScore: memberAlpha.sourceScore,
+          rawHistoricalAlphaScore: memberAlpha.rawScore,
+          sampleAdjustedAlphaScore: memberAlpha.sampleAdjustedScore,
+          alphaConfidence: memberAlpha.confidence,
+          alphaSampleSize: memberAlpha.sampleSize,
+          alphaCalibrationJson: json(memberAlpha.calibration),
+          historicalAlphaScore: memberAlpha.sampleAdjustedScore,
           wakeUpPotential: member.intelligence.wakeUpPotential,
+          intelligenceStatus: memberAlpha.status,
           confidence: nextConfidence,
           previousConfidence: existing?.confidence ?? null,
           confidenceDelta: nextConfidence - (existing?.confidence ?? nextConfidence),
@@ -347,6 +372,42 @@ function reasonAdded(member: QualifiedMember) {
     ? member.intelligence.whyImportant
     : member.intelligence.evidenceSignals.map((signal) => signal.label);
   return `intelligence:${member.intelligence.tier}:${reasons.slice(0, 3).join('; ')}`.slice(0, 500);
+}
+
+function maxOptional(a: number | null | undefined, b: number | null | undefined) {
+  if (a === null || a === undefined) return b ?? null;
+  if (b === null || b === undefined) return a;
+  return Math.max(a, b);
+}
+
+function normalizedMemberAlpha(member: QualifiedMember) {
+  const intel = member.intelligence as QualifiedMember['intelligence'] & Partial<{
+    sourceScore: number | null;
+    rawHistoricalAlphaScore: number;
+    sampleAdjustedHistoricalAlphaScore: number;
+    alphaConfidence: number;
+    alphaSampleSize: number;
+    alphaCalibration: Record<string, number | string | null>;
+    status: string;
+  }>;
+  const sampleSize = intel.alphaSampleSize ?? intel.metrics.completedPositions ?? 0;
+  const confidence = intel.alphaConfidence ?? (sampleSize ? 1 - Math.exp(-sampleSize / 18) : 0);
+  const rawScore = intel.rawHistoricalAlphaScore ?? intel.historicalAlphaScore;
+  const sampleAdjustedScore = intel.sampleAdjustedHistoricalAlphaScore ?? intel.historicalAlphaScore;
+  const dormantDays = intel.metrics.maxCoveredDormantDays ?? 0;
+  const status = intel.status ?? (dormantDays >= 30 && (sampleAdjustedScore >= 50 || intel.wakeUpPotential >= 55)
+    ? 'dormant_high_value'
+    : dormantDays >= 30 ? 'dormant_alpha'
+      : sampleAdjustedScore >= 45 ? 'active_alpha' : 'inactive_low_value');
+  return {
+    sourceScore: intel.sourceScore ?? null,
+    rawScore,
+    sampleAdjustedScore,
+    confidence,
+    sampleSize,
+    calibration: intel.alphaCalibration ?? { sampleSize, sampleConfidence: confidence, compatibilityProjection: 'legacy_intelligence_payload' },
+    status
+  };
 }
 
 const ROLE_ORDER = ['root_main', 'operator_root', 'funding_wallet', 'execution_wallet', 'profit_collector', 'profit_collection_wallet', 'bridge_destination', 'bridge_linked_receiver', 'dormant_funded_receiver', 'fresh_funded_receiver', 'probable_side_alt_wallet', 'probable_side_wallet', 'unknown_related_wallet'];

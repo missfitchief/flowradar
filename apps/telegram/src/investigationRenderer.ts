@@ -16,6 +16,7 @@ export function renderInvestigationReport(investigation: WalletInvestigationResu
   if (view === 'priority' || view === 'paths') return renderPaths(presentation.strongestPaths, page, sessionId, presentation, 'STRONGEST CAPITAL PATHS');
   if (view === 'bridges') return renderPaths(presentation.strongestPaths.filter((path) => path.label.includes('BRIDGE')), page, sessionId, presentation, 'STRONGEST BRIDGE PATHS');
   if (view === 'deployments') return renderDeployments(presentation, page, sessionId);
+  if (view === 'cluster' || view === 'alts') return renderCluster(presentation, page, sessionId);
   if (view === 'more' || view === 'advanced' || view === 'receivers') return renderMoreWallets(presentation, page, sessionId);
   if (view === 'evidence') return renderEvidence(presentation, state.investigationItem, sessionId);
   return renderSummary(investigation, presentation, sessionId);
@@ -23,7 +24,8 @@ export function renderInvestigationReport(investigation: WalletInvestigationResu
 
 function renderSummary(value: WalletInvestigationResult, presentation: InvestigationPresentation, sessionId: string) {
   const coverage = `${value.coverage.filter((row) => row.coverageStatus === 'complete').length}/${value.coverage.length} chains complete`;
-  const top = presentation.topWallets;
+  const active = presentation.topActiveWallets;
+  const dormant = presentation.topDormantWallets;
   const text = [
     '<b>WALLET INTELLIGENCE REPORT</b>',
     '',
@@ -35,19 +37,22 @@ function renderSummary(value: WalletInvestigationResult, presentation: Investiga
     `Tier S: ${presentation.tierCounts.S} · Tier A: ${presentation.tierCounts.A}`,
     `Tier B/C hidden: ${presentation.tierCounts.B + presentation.tierCounts.C} · Infrastructure excluded: ${presentation.infrastructureExcluded}`,
     '',
-    '<b>TOP INTELLIGENCE · Tier S/A only</b>',
-    ...(top.length ? top.map((wallet, index) => renderWallet(wallet, index + 1)) : [
-      'No Tier S/A wallets meet the multi-signal confidence gate.',
-      'Use <b>Show more</b> for the highest Tier B/C candidates; no wallet is promoted from a single signal.'
+    '<b>TOP ACTIVE ALPHA</b>',
+    ...(active.length ? active.map((wallet, index) => renderWallet(wallet, index + 1)) : ['No active Tier S/A wallet passed the multi-signal gate.']),
+    '',
+    '<b>TOP DORMANT WALLETS TO WATCH</b>',
+    ...(dormant.length ? dormant.map((wallet, index) => renderWallet(wallet, index + 1)) : [
+      'No dormant Tier S/A wallet passed the multi-signal confidence gate.'
     ])
   ].join('\n\n');
-  const walletRows = top.map((wallet) => walletButtons(wallet, presentation, sessionId));
+  const walletRows = presentation.topWallets.map((wallet) => walletButtons(wallet, presentation, sessionId));
   return {
     text,
     keyboard: { inline_keyboard: [
       ...walletRows,
       [{ text: 'Strongest paths', callback_data: callback('invest', sessionId, 'priority') }, { text: 'Top deployments', callback_data: callback('invest', sessionId, 'deployments') }],
-      [{ text: 'Evidence', callback_data: callback('invest', sessionId, 'evidence') }, { text: 'Show more', callback_data: callback('invest', sessionId, 'more') }]
+      [{ text: 'Core / peripheral', callback_data: callback('invest', sessionId, 'cluster') }, { text: 'Evidence', callback_data: callback('invest', sessionId, 'evidence') }],
+      [{ text: 'Show more', callback_data: callback('invest', sessionId, 'more') }]
     ] }
   };
 }
@@ -57,10 +62,30 @@ function renderWallet(row: PresentedIntelligenceWallet, rank: number) {
   return [
     `${rank}. <b>TIER ${intelligence.tier} · ${h(row.member.role.replaceAll('_', ' '))}</b>`,
     `<code>${h(row.member.address)}</code>`,
-    `Evidence <b>${intelligence.evidenceScore}</b> · Historical Alpha <b>${intelligence.historicalAlphaScore}</b> · Wake-up <b>${intelligence.wakeUpPotential}</b>`,
+    `Source ${intelligence.sourceScore ?? 'n/a'} · Evidence <b>${intelligence.evidenceScore}</b> · Alpha <b>${intelligence.sampleAdjustedHistoricalAlphaScore}</b> · Wake-up <b>${intelligence.wakeUpPotential}</b>`,
+    `Entity: ${h(row.member.entityKey ?? 'unresolved')} · Status: ${h(intelligence.status.replaceAll('_', ' '))}`,
     `Why: ${h(intelligence.whyImportant[0] ?? 'No multi-signal intelligence reason available.')}`,
     `Tracking: ${h(intelligence.trackingPriority.replaceAll('_', ' '))}`
   ].join('\n');
+}
+
+function renderCluster(presentation: InvestigationPresentation, page: number, sessionId: string) {
+  const rows = [
+    ...presentation.coreClusterWallets.map((wallet) => ({ scope: 'CORE CLUSTER', wallet })),
+    ...presentation.peripheralClusterWallets.map((wallet) => ({ scope: 'PERIPHERAL CLUSTER', wallet }))
+  ];
+  const { items, hasNext } = pageRows(rows, page, 5);
+  const text = [
+    `<b>ENTITY CLUSTER</b> · page ${page}`,
+    'Core requires a relevant role plus at least two independent evidence types. Peripheral wallets remain context and never count as equal confirmations.',
+    ...(items.length ? items.map(({ scope, wallet }, index) => [
+      `${(page - 1) * 5 + index + 1}. <b>${scope} · TIER ${wallet.intelligence.tier}</b>`,
+      `<code>${h(wallet.member.address)}</code>`,
+      `Role: ${h(wallet.member.role.replaceAll('_', ' '))} · Entity: ${h(wallet.member.entityKey ?? 'unresolved')}`,
+      `Why ${scope.startsWith('CORE') ? 'core' : 'peripheral'}: ${h(scope.startsWith('CORE') ? `${wallet.intelligence.independentSignalCount} independent signals and an operational role.` : 'Useful relationship, but the core multi-signal/role gate is not satisfied.')}`
+    ].join('\n')) : ['No entity-linked wallets passed the display gate.'])
+  ].join('\n\n');
+  return { text, keyboard: listKeyboard(sessionId, page, hasNext, items.map(({ wallet }) => walletButtons(wallet, presentation, sessionId))) };
 }
 
 function renderMoreWallets(presentation: InvestigationPresentation, page: number, sessionId: string) {
@@ -125,6 +150,7 @@ function renderDeployment(row: PresentedDeployment, rank: number) {
     `${rank}. <b>${h(deployment.tokenSymbol ?? 'TOKEN')}</b> · importance ${row.importanceScore}`,
     `Token: <code>${h(deployment.tokenAddress)}</code>`,
     `Wallet: <code>${h(deployment.buyerAddress)}</code> · Tier ${row.wallet.intelligence.tier}`,
+    `Entity: ${h(deployment.sourceEntityKey ?? row.wallet.member.entityKey ?? 'unresolved')} · Entry timing: ${deployment.fundingToBuyDelaySec === null ? 'unavailable' : duration(deployment.fundingToBuyDelaySec)}`,
     `ATH: ${intelligence?.athMcapUsd === null || intelligence?.athMcapUsd === undefined ? 'unavailable' : money(intelligence.athMcapUsd)}${intelligence?.athBasis && intelligence.athBasis !== 'unavailable' ? ` (${h(intelligence.athBasis.replaceAll('_', ' '))})` : ''}`,
     `ROI: ${intelligence?.roi === null || intelligence?.roi === undefined ? 'unavailable' : `${Math.round(intelligence.roi * 100)}%`}${intelligence?.roiBasis && intelligence.roiBasis !== 'unavailable' ? ` (${h(intelligence.roiBasis.replaceAll('_', ' '))})` : ''}`,
     `Why important: ${h(row.whyImportant[0] ?? 'Ranked from wallet intelligence and funding receipt.')}`
@@ -156,13 +182,21 @@ function renderEvidence(presentation: InvestigationPresentation, selector: strin
     `Role: ${h(wallet.member.role.replaceAll('_', ' '))} · Chain: ${h(chainLabel(wallet.member.chain))}`,
     '',
     `<b>Scores</b>`,
+    `Source Score: ${intel.sourceScore ?? 'unavailable'} <i>(discovery prior only; never ownership/signal evidence)</i>`,
     `Evidence: ${intel.evidenceScore}/100 · ${intel.independentSignalCount} independent signals`,
-    `Historical Alpha: ${intel.historicalAlphaScore}/100 · coverage ${h(intel.historicalCoverage)}`,
+    `Raw Historical Alpha: ${intel.rawHistoricalAlphaScore}/100`,
+    `Sample-adjusted Alpha: ${intel.sampleAdjustedHistoricalAlphaScore}/100 · confidence ${Math.round(intel.alphaConfidence * 100)}% · n=${intel.alphaSampleSize}`,
+    `Historical coverage: ${h(intel.historicalCoverage)} · Status: ${h(intel.status.replaceAll('_', ' '))}`,
     `Wake-up Potential: ${intel.wakeUpPotential}/100 · dormancy is never penalized`,
     `Cluster conclusion: ${h(intel.clusterConclusion)} · Tracking: ${h(intel.trackingPriority.replaceAll('_', ' '))}`,
     '',
-    '<b>Why we link it</b>',
-    ...signals,
+    '<b>Strongest evidence</b>',
+    ...signals.slice(0, 4),
+    '',
+    '<b>Weak / contextual evidence</b>',
+    ...(intel.evidenceSignals.filter((signal) => signal.strength < 0.65).length
+      ? intel.evidenceSignals.filter((signal) => signal.strength < 0.65).map((signal) => `• ${h(signal.label)} · ${Math.round(signal.strength * 100)}%`)
+      : ['None recorded.']),
     '',
     '<b>Why it matters</b>',
     ...intel.whyImportant.map((reason) => `• ${h(reason)}`),
@@ -173,7 +207,12 @@ function renderEvidence(presentation: InvestigationPresentation, selector: strin
     `Repeat runners: ${intel.metrics.repeatRunnerCount ?? 'unavailable'} · Dormancy: ${intel.metrics.maxCoveredDormantDays === null ? 'unavailable' : `${intel.metrics.maxCoveredDormantDays}d`}`,
     '',
     '<b>Contradicting / limiting evidence</b>',
-    ...(intel.contradictions.length ? intel.contradictions.map((reason) => `• ${h(reason)}`) : ['None recorded.'])
+    ...(intel.contradictions.length ? intel.contradictions.map((reason) => `• ${h(reason)}`) : ['None recorded.']),
+    '',
+    '<b>Infrastructure exclusions</b>',
+    'Service/router/CEX-only nodes are excluded from entity ownership and independence counts.',
+    '',
+    `<b>Conclusion</b> ${h(intel.clusterConclusion)} · ${h(intel.whyImportant[0] ?? 'Insufficient evidence for a stronger conclusion.')}`
   ].join('\n');
   return {
     text,

@@ -41,6 +41,7 @@ interface DnaEvidence {
 }
 
 interface WalletScoreContext {
+  sourceScore: number | null;
   relationships: RelationshipEvidence[];
   roleReasonCodes: string[];
   dna: DnaEvidence | null;
@@ -80,7 +81,7 @@ export async function enrichWalletInvestigation(prisma: PrismaClient, value: Wal
   const roots = value.members.filter((member) => member.role === 'root_main').map((member) => member.address);
   const tokenAddresses = unique(value.deployments.map((deployment) => deployment.tokenAddress));
 
-  const [relationships, roleRows, dnaRows, walletRows, dormancyRows, entityDormancyRows, repeatRows, dormantRunnerRows, tokenIntelRows, topPnlRows, tokenRows, universeRows, lifecycleRows, enrichmentRows] = await Promise.all([
+  const [relationships, roleRows, dnaRows, walletRows, dormancyRows, entityDormancyRows, repeatRows, dormantRunnerRows, tokenIntelRows, topPnlRows, tokenRows, universeRows, lifecycleRows, enrichmentRows, seedRows] = await Promise.all([
     prisma.walletFlowRelationship.findMany({
       where: { sourceWallet: { in: roots } },
       take: 10_000
@@ -110,7 +111,11 @@ export async function enrichWalletInvestigation(prisma: PrismaClient, value: Wal
     }) : Promise.resolve([]),
     tokenAddresses.length ? prisma.historicalTokenUniverse.findMany({ where: { chain: { in: chains }, tokenAddress: { in: tokenAddresses } }, take: 10_000 }) : Promise.resolve([]),
     tokenAddresses.length ? prisma.tokenLifecycle.findMany({ where: { mint: { in: tokenAddresses } }, take: 10_000 }) : Promise.resolve([]),
-    tokenAddresses.length ? prisma.tokenEnrichment.findMany({ where: { mint: { in: tokenAddresses } }, take: 10_000 }) : Promise.resolve([])
+    tokenAddresses.length ? prisma.tokenEnrichment.findMany({ where: { mint: { in: tokenAddresses } }, take: 10_000 }) : Promise.resolve([]),
+    prisma.coreWalletSeedRecord.findMany({
+      where: { chain: { in: chains }, address: { in: addresses }, sourceScore: { not: null }, decision: { startsWith: 'accepted' } },
+      select: { chain: true, address: true, sourceScore: true }, take: 20_000
+    })
   ]);
 
   const relationshipsByWallet = groupBy(relationships
@@ -133,6 +138,12 @@ export async function enrichWalletInvestigation(prisma: PrismaClient, value: Wal
   const topPnlByWallet = groupBy(topPnlRows.filter((row) => refKeys.has(refKey(row.chain, row.walletAddress))), (row) => refKey(row.chain, row.walletAddress));
   const deploymentByWallet = groupBy(value.deployments, (row) => refKey(row.chain, row.buyerAddress));
   const pathsByWallet = groupBy(value.paths.filter((path) => path.routeType !== 'token_deployment'), (path) => refKey(path.destinationChain, path.destinationAddress));
+  const sourceScoreByWallet = new Map<string, number>();
+  for (const row of seedRows) {
+    if (!row.chain || !row.address || row.sourceScore === null) continue;
+    const key = refKey(row.chain, row.address);
+    if (refKeys.has(key)) sourceScoreByWallet.set(key, Math.max(sourceScoreByWallet.get(key) ?? -Infinity, row.sourceScore));
+  }
   const repeatByWallet = new Map<string, typeof repeatRows[number]>();
   for (const row of repeatRows) for (const address of row.memberWallets) for (const chain of chains) {
     const key = refKey(chain, address);
@@ -152,6 +163,7 @@ export async function enrichWalletInvestigation(prisma: PrismaClient, value: Wal
     const repeat = repeatByWallet.get(key);
     const dormantRunner = dormantRunnerByWallet.get(key);
     const context: WalletScoreContext = {
+      sourceScore: sourceScoreByWallet.get(key) ?? null,
       relationships: relationshipsByWallet.get(key) ?? [],
       roleReasonCodes: unique((rolesByWallet.get(key) ?? []).flatMap((row) => row.reasonCodes)),
       dna: dnaByWallet.get(key) ?? null,
@@ -185,8 +197,12 @@ export function scoreMember(member: InvestigationMember, context: WalletScoreCon
   if (member.role === 'root_main') {
     const alpha = historicalAlpha(context);
     const wake = wakeUpScore(100, alpha.score, context, member, completedAt);
+    const status = intelligenceStatus(context, alpha.score, wake.score, wake.dormantDays);
     return {
-      evidenceScore: 100, historicalAlphaScore: alpha.score, wakeUpPotential: wake.score, tier: tierFor(100, alpha.score, wake.score, 0, true),
+      evidenceScore: 100, sourceScore: context.sourceScore,
+      rawHistoricalAlphaScore: alpha.rawScore, sampleAdjustedHistoricalAlphaScore: alpha.score,
+      alphaConfidence: alpha.confidence, alphaSampleSize: alpha.sampleSize, alphaCalibration: alpha.calibration,
+      historicalAlphaScore: alpha.score, wakeUpPotential: wake.score, status, tier: tierFor(100, alpha.score, wake.score, 0, true),
       trackingPriority: 'track_now', independentSignalCount: 0, clusterConclusion: 'supported',
       evidenceSignals: [{ code: 'operator_seed', label: 'Operator investigation seed', strength: 1, weight: 100, receiptCount: 1 }],
       whyImportant: unique(['Investigation root; tracked as a capital source, not assumed to be an execution wallet.', ...alpha.reasons, ...wake.reasons]).slice(0, 4),
@@ -201,6 +217,7 @@ export function scoreMember(member: InvestigationMember, context: WalletScoreCon
   const evidenceScore = Math.round(Math.max(0, Math.min(signals.length < 2 ? 49 : 100, rawEvidence - contradictionPenalty)));
   const alpha = historicalAlpha(context);
   const wake = wakeUpScore(evidenceScore, alpha.score, context, member, completedAt);
+  const status = intelligenceStatus(context, alpha.score, wake.score, wake.dormantDays);
   const tier = tierFor(evidenceScore, alpha.score, wake.score, signals.length, false);
   const clusterConclusion = signals.length < 2 ? 'unconfirmed' : evidenceScore >= 75 ? 'supported' : evidenceScore >= 60 ? 'probable' : evidenceScore >= 40 ? 'possible' : 'unconfirmed';
   const important = [
@@ -210,7 +227,10 @@ export function scoreMember(member: InvestigationMember, context: WalletScoreCon
     ...alpha.reasons
   ].filter(nonNull);
   return {
-    evidenceScore, historicalAlphaScore: alpha.score, wakeUpPotential: wake.score, tier,
+    evidenceScore, sourceScore: context.sourceScore,
+    rawHistoricalAlphaScore: alpha.rawScore, sampleAdjustedHistoricalAlphaScore: alpha.score,
+    alphaConfidence: alpha.confidence, alphaSampleSize: alpha.sampleSize, alphaCalibration: alpha.calibration,
+    historicalAlphaScore: alpha.score, wakeUpPotential: wake.score, status, tier,
     trackingPriority: tier === 'S' || tier === 'A' ? 'track_now' : tier === 'B' ? 'watch' : 'context_only',
     independentSignalCount: signals.length, clusterConclusion, evidenceSignals: signals,
     whyImportant: unique(important).slice(0, 5), contradictions, historicalCoverage: alpha.coverage,
@@ -294,9 +314,31 @@ function historicalAlpha(context: WalletScoreContext) {
   }
   const coverage = dna ? normalizeCoverage(dna.coverage) : context.tokenIntelligence.length || context.stats ? 'partial' : uniqueDeployments ? 'minimal' : 'unavailable';
   const confidence = dna?.confidence ?? maxNullable(context.tokenIntelligence.map((row) => row.evidenceConfidence)) ?? context.stats?.confidence ?? (uniqueDeployments ? 0.55 : 0);
-  const adjusted = Math.round(Math.max(0, Math.min(100, score * (0.7 + 0.3 * clamp01(confidence)))));
+  const rawScore = Math.round(Math.max(0, Math.min(100, score)));
+  const sampleSize = Math.max(0, completed);
+  const sampleConfidence = sampleSize ? clamp01((1 - Math.exp(-sampleSize / 18)) * (0.65 + 0.35 * clamp01(confidence))) : 0;
+  const adjusted = Math.round(rawScore * sampleConfidence + 35 * (1 - sampleConfidence));
   if (coverage === 'unavailable' || coverage === 'minimal') reasons.push('Historical outcome coverage is insufficient; unknown ROI/ATH is not treated as zero or as a win.');
-  return { score: adjusted, reasons: unique(reasons), coverage };
+  return {
+    rawScore,
+    score: adjusted,
+    confidence: Number(sampleConfidence.toFixed(4)),
+    sampleSize,
+    calibration: {
+      sampleSize,
+      sampleConfidence: Number(sampleConfidence.toFixed(4)),
+      completedPositions: completed,
+      hitRate: winRate,
+      medianReturn: avgReturn,
+      realizedPnlUsd: realizedPnl,
+      repeatRunnerCount: repeatRunners,
+      oneWinnerDependence: oneWinner,
+      medianEntryMcapUsd: medianEntry,
+      coverage
+    },
+    reasons: unique(reasons),
+    coverage
+  };
 }
 
 function wakeUpScore(evidence: number, alpha: number, context: WalletScoreContext, member: InvestigationMember, completedAt: string | null) {
@@ -313,7 +355,15 @@ function wakeUpScore(evidence: number, alpha: number, context: WalletScoreContex
     context.dormantRunner && context.dormantRunner.pattern !== 'one_off' && context.dormantRunner.pattern !== 'insufficient_evidence' ? `Repeated dormant-runner pattern: ${context.dormantRunner.pattern.replaceAll('_', ' ')}.` : null,
     uniqueTokens >= 2 ? `Repeated execution across ${uniqueTokens} post-funding tokens supports permanent monitoring.` : null
   ].filter(nonNull);
-  return { score, reasons };
+  return { score, reasons, dormantDays };
+}
+
+function intelligenceStatus(context: WalletScoreContext, alpha: number, wake: number, dormantDays: number) {
+  if (context.dormancyClasses.some((value) => /awakened|reactivated/i.test(value))) return 'awakened_wallet' as const;
+  if (dormantDays >= 30 && (alpha >= 50 || wake >= 55)) return 'dormant_high_value' as const;
+  if (dormantDays >= 30) return 'dormant_alpha' as const;
+  if (alpha >= 45) return 'active_alpha' as const;
+  return 'inactive_low_value' as const;
 }
 
 function tierFor(evidence: number, alpha: number, wake: number, signals: number, root: boolean): InvestigationMemberIntelligence['tier'] {
@@ -378,7 +428,9 @@ function metrics(context: WalletScoreContext): InvestigationMemberIntelligence['
 
 function infrastructureScore(): InvestigationMemberIntelligence {
   return {
-    evidenceScore: 0, historicalAlphaScore: 0, wakeUpPotential: 0, tier: 'C', trackingPriority: 'exclude', independentSignalCount: 0,
+    evidenceScore: 0, sourceScore: null, rawHistoricalAlphaScore: 0, sampleAdjustedHistoricalAlphaScore: 0,
+    alphaConfidence: 0, alphaSampleSize: 0, alphaCalibration: {}, historicalAlphaScore: 0,
+    wakeUpPotential: 0, status: 'inactive_low_value', tier: 'C', trackingPriority: 'exclude', independentSignalCount: 0,
     clusterConclusion: 'infrastructure', evidenceSignals: [], whyImportant: ['Infrastructure/service/CEX terminal; excluded from entity ownership and alpha ranking.'],
     contradictions: ['Infrastructure nodes never merge otherwise unrelated wallets.'], historicalCoverage: 'unavailable',
     metrics: { transferCount: 0, uniqueTokensAfterFunding: 0, completedPositions: null, winRate: null, repeatRunnerCount: null, realizedPnlUsd: null, medianEntryMcapUsd: null, maxCoveredDormantDays: null },

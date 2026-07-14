@@ -53,6 +53,12 @@ describe('adaptive intelligence safety boundaries', () => {
     ]);
     expect(peripheral.coreWalletCount).toBe(0);
     expect(peripheral.score).toBeLessThan(independent.score);
+
+    const opportunity = scoreAdaptiveActivation([
+      { ...base, profileId: 'p1', entityId: 'e1', scope: 'core', historicalAlphaScore: 100, evidenceScore: 100, identityConfidence: 1 },
+      { ...base, profileId: 'p2', entityId: 'e2', clusterKey: 'cluster-b', capitalRootKey: 'capital-b', scope: 'core', historicalAlphaScore: 100, evidenceScore: 100, identityConfidence: 1 }
+    ]);
+    expect(opportunity.lifecycleStage).toBe('OPPORTUNITY');
   });
 
   it('decays current relevance separately without erasing alpha or wake-up potential', () => {
@@ -72,6 +78,7 @@ describe('adaptive intelligence safety boundaries', () => {
     const oneWinner = calibrateHistoricalAlpha([{ returnPct: 2_000, rugPull: false }]);
     const consistent = calibrateHistoricalAlpha(Array.from({ length: 24 }, () => ({ returnPct: 85, drawdownPct: -20, entryPercentile: 0.15, capitalUsd: 25_000 })));
     expect(oneWinner.sampleConfidence).toBeLessThan(0.1);
+    expect(oneWinner.rawScore).toBeGreaterThan(oneWinner.score);
     expect(oneWinner.score).toBeLessThan(consistent.score);
     expect(consistent.intervalHigh - consistent.intervalLow).toBeLessThan(oneWinner.intervalHigh - oneWinner.intervalLow);
   });

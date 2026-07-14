@@ -15,6 +15,7 @@ export const ADAPTIVE_WEIGHTS = Object.freeze({
   coreParticipation: 8,
   freshness: 6
 });
+export type AdaptiveWeights = Record<keyof typeof ADAPTIVE_WEIGHTS, number>;
 
 export const ADAPTIVE_THRESHOLDS = Object.freeze({
   observation: 0,
@@ -124,6 +125,7 @@ export interface HistoricalOutcomeInput {
 }
 
 export interface CalibratedAlpha {
+  rawScore: number;
   score: number;
   sampleConfidence: number;
   intervalLow: number;
@@ -142,7 +144,7 @@ export function calibrateHistoricalAlpha(outcomes: HistoricalOutcomeInput[]): Ca
   const usable = outcomes.filter((row) => row.returnPct !== null && Number.isFinite(row.returnPct));
   const returns = usable.map((row) => clamp(row.returnPct!, -100, 2_000)).sort((a, b) => a - b);
   const n = returns.length;
-  if (!n) return { score: 35, sampleConfidence: 0, intervalLow: 10, intervalHigh: 70, sampleSize: 0, medianReturnPct: null, hitRate: null, rugRate: null, consistency: 0, components: { bayesianReturn: null, hitRate: null, entryQuality: null, drawdownQuality: null, capitalQuality: null } };
+  if (!n) return { rawScore: 35, score: 35, sampleConfidence: 0, intervalLow: 10, intervalHigh: 70, sampleSize: 0, medianReturnPct: null, hitRate: null, rugRate: null, consistency: 0, components: { bayesianReturn: null, hitRate: null, entryQuality: null, drawdownQuality: null, capitalQuality: null } };
   const median = percentile(returns, 0.5);
   const wins = usable.filter((row) => row.returnPct! >= 50).length;
   const rugs = usable.filter((row) => row.rugPull || row.returnPct! <= -90).length;
@@ -167,6 +169,7 @@ export function calibrateHistoricalAlpha(outcomes: HistoricalOutcomeInput[]): Ca
   const score = round(raw * sampleConfidence + 35 * (1 - sampleConfidence), 1);
   const uncertainty = 35 * (1 - sampleConfidence) + 8 / Math.sqrt(n);
   return {
+    rawScore: round(raw, 1),
     score,
     sampleConfidence,
     intervalLow: round(clamp(score - uncertainty, 0, 100), 1),
@@ -227,7 +230,7 @@ export interface ActivationParticipant {
 
 export interface ActivationScore {
   score: number;
-  lifecycleStage: 'OBSERVATION' | 'WATCH' | 'STRONG_WATCH' | 'HIGH_CONVICTION' | 'EXCEPTIONAL';
+  lifecycleStage: 'OBSERVATION' | 'WATCH' | 'STRONG_WATCH' | 'HIGH_CONVICTION' | 'OPPORTUNITY';
   independentEntityCount: number;
   independentCapitalRootCount: number;
   coreWalletCount: number;
@@ -237,7 +240,7 @@ export interface ActivationScore {
 
 /** Entity-level activation scoring. Multiple wallets belonging to one entity
  * contribute behavioral evidence but count as one independent confirmation. */
-export function scoreAdaptiveActivation(participants: ActivationParticipant[]): ActivationScore {
+export function scoreAdaptiveActivation(participants: ActivationParticipant[], weights: AdaptiveWeights = ADAPTIVE_WEIGHTS): ActivationScore {
   const eligible = participants.filter((row) => row.scope !== 'infrastructure');
   const independentEntities = new Set(eligible.map((row) => row.entityId ?? `cluster:${row.clusterKey}`));
   const walletsByEntity = new Map<string, number>();
@@ -277,7 +280,7 @@ export function scoreAdaptiveActivation(participants: ActivationParticipant[]): 
     freshness: 'time-decayed evidence freshness'
   };
   const decomposition = Object.fromEntries(Object.entries(raw).map(([key, value]) => {
-    const weight = ADAPTIVE_WEIGHTS[key as keyof typeof ADAPTIVE_WEIGHTS];
+    const weight = weights[key as keyof AdaptiveWeights];
     return [key, { raw: round(value, 4), weight, contribution: round(value * weight, 2), explanation: descriptions[key as keyof typeof raw] }];
   })) as ActivationScore['decomposition'];
   const score = round(Object.values(decomposition).reduce((sum, row) => sum + row.contribution, 0), 1);
@@ -293,7 +296,7 @@ export function scoreAdaptiveActivation(participants: ActivationParticipant[]): 
 }
 
 export function lifecycleStageForScore(score: number): ActivationScore['lifecycleStage'] {
-  if (score >= ADAPTIVE_THRESHOLDS.exceptional) return 'EXCEPTIONAL';
+  if (score >= ADAPTIVE_THRESHOLDS.exceptional) return 'OPPORTUNITY';
   if (score >= ADAPTIVE_THRESHOLDS.highConviction) return 'HIGH_CONVICTION';
   if (score >= ADAPTIVE_THRESHOLDS.strongWatch) return 'STRONG_WATCH';
   if (score >= ADAPTIVE_THRESHOLDS.watch) return 'WATCH';

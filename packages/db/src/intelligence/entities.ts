@@ -65,7 +65,7 @@ export async function syncIntelligenceEntities(
     const currentRelevance = weightedAverage(weighted.map((item) => ({ value: item.row.projected.currentRelevance, weight: item.weight })));
     const evidenceFreshness = weightedAverage(weighted.map((item) => ({ value: item.row.projected.evidenceFreshness, weight: item.weight })));
     const historicalAlphaScore = scoreAverage((profile) => profile.historicalAlphaScore);
-    const alphaSamples = nonInfrastructure.reduce((sum, row) => sum + (jsonNumber(row.profile.supportingEvidenceJson, 'historicalSampleSize') ?? row.profile.observationCount), 0);
+    const alphaSamples = nonInfrastructure.reduce((sum, row) => sum + row.profile.alphaSampleSize, 0);
     const historicalAlphaConfidence = clamp01(1 - Math.exp(-alphaSamples / 18));
     const wakeUpPotential = nonInfrastructure.length ? Math.max(...nonInfrastructure.map((row) => row.profile.wakeUpPotential)) : 0;
     const lastActivityAt = latestDate(...nonInfrastructure.map((row) => row.profile.lastActivityAt));
@@ -73,6 +73,20 @@ export async function syncIntelligenceEntities(
     const firstDiscoveredAt = earliestDate(...members.map((profile) => profile.firstDiscoveredAt)) ?? now;
     const lastEvidenceAt = latestDate(...members.map((profile) => profile.lastObservedAt)) ?? now;
     const priority = bestPriority(nonInfrastructure.map((row) => membershipPriority(row.projected.scope, row.projected.status, row.profile.historicalAlphaScore, row.profile.wakeUpPotential)));
+    const historicalTokenAddresses = unique(nonInfrastructure.flatMap((row) => jsonStrings(row.profile.supportingEvidenceJson, 'deploymentTokenAddresses'))).sort();
+    const strongestEvidence = projections
+      .filter((row) => row.projected.scope !== 'infrastructure')
+      .flatMap((row) => row.projected.evidenceTypes.map((type) => ({
+        profileId: row.profile.id, type, scope: row.projected.scope,
+        membershipStatus: row.projected.status, evidenceScore: row.profile.evidenceScore,
+        identityConfidence: row.projected.identityConfidence
+      })))
+      .sort((a, b) => b.identityConfidence - a.identityConfidence || b.evidenceScore - a.evidenceScore)
+      .slice(0, 20);
+    const counterEvidence = projections.flatMap((row) => row.contradictions.map((reason) => ({ profileId: row.profile.id, reason }))).slice(0, 50);
+    const infrastructureExclusions = projections.filter((row) => row.projected.scope === 'infrastructure').map((row) => ({
+      profileId: row.profile.id, address: row.profile.address, reasonCodes: row.projected.reasonCodes
+    }));
     const state = {
       identityConfidence: round(identityConfidence),
       currentRelevance: round(currentRelevance),
@@ -85,6 +99,9 @@ export async function syncIntelligenceEntities(
       clusterKeys: unique(members.map((profile) => profile.cluster.clusterKey)).sort(),
       coreWalletCount: core.length,
       peripheralWalletCount: peripheral.length,
+      historicalTokenAddresses,
+      strongestEvidenceJson: json({ evidence: strongestEvidence }),
+      counterEvidenceJson: json({ contradictions: counterEvidence, infrastructureExclusions }),
       lastEvidenceAt,
       lastCoreActivityAt,
       lastActivityAt,
@@ -107,6 +124,8 @@ export async function syncIntelligenceEntities(
         wakeUpPotential: state.wakeUpPotential, evidenceFreshness: state.evidenceFreshness,
         monitoringPriority: state.monitoringPriority, chains: state.chains, clusterKeys: state.clusterKeys,
         coreWalletCount: state.coreWalletCount, peripheralWalletCount: state.peripheralWalletCount,
+        tokenCount: state.historicalTokenAddresses.length, historicalTokenAddresses: state.historicalTokenAddresses,
+        strongestEvidenceJson: state.strongestEvidenceJson, counterEvidenceJson: state.counterEvidenceJson,
         firstDiscoveredAt, lastEvidenceAt: state.lastEvidenceAt, lastCoreActivityAt: state.lastCoreActivityAt,
         lastActivityAt: state.lastActivityAt, dormantSince: state.dormantSince,
         provenanceJson: json({ stateHash: state.stateHash, source: options.cause ?? 'profile_projection', alphaSamples, ruleVersion: ADAPTIVE_RULE_VERSION }),
@@ -119,6 +138,8 @@ export async function syncIntelligenceEntities(
         wakeUpPotential: state.wakeUpPotential, evidenceFreshness: state.evidenceFreshness,
         monitoringPriority: state.monitoringPriority, chains: state.chains, clusterKeys: state.clusterKeys,
         coreWalletCount: state.coreWalletCount, peripheralWalletCount: state.peripheralWalletCount,
+        tokenCount: state.historicalTokenAddresses.length, historicalTokenAddresses: state.historicalTokenAddresses,
+        strongestEvidenceJson: state.strongestEvidenceJson, counterEvidenceJson: state.counterEvidenceJson,
         lastEvidenceAt: state.lastEvidenceAt, lastCoreActivityAt: state.lastCoreActivityAt,
         lastActivityAt: state.lastActivityAt, dormantSince: state.dormantSince,
         provenanceJson: json({ stateHash: state.stateHash, source: options.cause ?? 'profile_projection', alphaSamples, ruleVersion: ADAPTIVE_RULE_VERSION }),
@@ -175,7 +196,10 @@ export async function syncIntelligenceEntities(
           wakeUpPotential: state.wakeUpPotential, evidenceFreshness: state.evidenceFreshness,
           coreWalletRefs: core.map((row) => `${row.profile.chain}:${row.profile.address}`).sort(),
           peripheralWalletRefs: peripheral.map((row) => `${row.profile.chain}:${row.profile.address}`).sort(),
-          evidenceJson: json({ projections: projections.map((row) => ({ profileId: row.profile.id, status: row.projected.status, scope: row.projected.scope, reasonCodes: row.projected.reasonCodes })) }),
+          evidenceJson: json({
+            projections: projections.map((row) => ({ profileId: row.profile.id, status: row.projected.status, scope: row.projected.scope, reasonCodes: row.projected.reasonCodes })),
+            strongestEvidence, counterEvidence, infrastructureExclusions, historicalTokenAddresses
+          }),
           provenanceJson: json({ stateHash: state.stateHash, source: options.cause ?? 'profile_projection', noIdentityClaim: true }),
           ruleVersion: ADAPTIVE_RULE_VERSION, observedAt: now
         }
@@ -404,7 +428,14 @@ async function loadRegistry(prisma: PrismaClient, profiles: ProfileWithCluster[]
 function canonicalEntityKey(profile: ProfileWithCluster) {
   return profile.entityKey ? `ie_${hash(`entity-key|${profile.entityKey}`).slice(0, 24)}` : `ie_${hash(`cluster-key|${profile.cluster.clusterKey}`).slice(0, 24)}`;
 }
-function entityType(roles: string[]) { if (roles.some((role) => /operator|root/.test(role))) return 'operator_seeded'; if (roles.some((role) => /deployer|lp/.test(role))) return 'deployer_operator'; return 'trading_entity'; }
+function entityType(roles: string[]) {
+  if (roles.some((role) => /insider/i.test(role))) return 'insider_group';
+  if (roles.some((role) => /operator|root/i.test(role))) return 'funding_structure';
+  if (roles.some((role) => /deployer|lp/i.test(role))) return 'deployer_group';
+  if (roles.some((role) => /funding|collector/i.test(role))) return 'funding_structure';
+  if (roles.some((role) => /execution|trader/i.test(role))) return 'trading_operation';
+  return 'anonymous_cluster';
+}
 function entityLabel(entityKey: string, profiles: ProfileWithCluster[]) { const named = profiles.find((profile) => profile.entityKey)?.entityKey; return named ? `Entity ${named}`.slice(0, 120) : `Entity ${entityKey.slice(-8)}`; }
 function entityReceipt(entity: IntelligenceEntity & { memberships: Array<{ id: string; profileId: string; status: string }> }) { return { id: entity.id, entityKey: entity.entityKey, status: entity.status, currentVersion: entity.currentVersion, memberships: entity.memberships }; }
 const PRIORITY_ORDER = ['fresh_receiver_hot', 'root_permanent', 'strong_link', 'probable_link', 'standard', 'weak_cold', 'cold_archive'];

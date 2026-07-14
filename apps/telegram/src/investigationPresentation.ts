@@ -44,6 +44,10 @@ export interface InvestigationPresentation {
   infrastructureExcluded: number;
   tierCounts: Record<'S' | 'A' | 'B' | 'C', number>;
   topWallets: PresentedIntelligenceWallet[];
+  topActiveWallets: PresentedIntelligenceWallet[];
+  topDormantWallets: PresentedIntelligenceWallet[];
+  coreClusterWallets: PresentedIntelligenceWallet[];
+  peripheralClusterWallets: PresentedIntelligenceWallet[];
   moreWallets: PresentedIntelligenceWallet[];
   walletCatalog: PresentedIntelligenceWallet[];
   strongestPaths: PresentedCapitalPath[];
@@ -73,7 +77,7 @@ const INFRA = /service|router|cex|infrastructure/i;
 
 export function buildInvestigationPresentation(value: WalletInvestigationResult): InvestigationPresentation {
   const wallets = value.members.map((member): PresentedIntelligenceWallet => {
-    const intelligence = member.intelligence ?? fallbackIntelligence(member);
+    const intelligence = normalizeIntelligence(member.intelligence ?? fallbackIntelligence(member));
     return { member, intelligence, importanceScore: walletImportance(intelligence) };
   });
   const candidates = wallets
@@ -85,7 +89,10 @@ export function buildInvestigationPresentation(value: WalletInvestigationResult)
     B: candidates.filter((row) => row.intelligence.tier === 'B').length,
     C: candidates.filter((row) => row.intelligence.tier === 'C').length
   };
-  const topWallets = candidates.filter((row) => row.intelligence.tier === 'S' || row.intelligence.tier === 'A').slice(0, 10);
+  const defaultTier = candidates.filter((row) => row.intelligence.tier === 'S' || row.intelligence.tier === 'A');
+  const topDormantWallets = defaultTier.filter((row) => /dormant|awakened/i.test(row.intelligence.status)).slice(0, 5);
+  const topActiveWallets = defaultTier.filter((row) => !/dormant|awakened/i.test(row.intelligence.status)).slice(0, Math.max(5, 10 - topDormantWallets.length));
+  const topWallets = uniqueWallets([...topActiveWallets, ...topDormantWallets]).slice(0, 10);
   const moreWallets = candidates.filter((row) => row.intelligence.tier === 'B' || row.intelligence.tier === 'C').slice(0, 20);
   const walletCatalog = [...topWallets, ...moreWallets];
   const walletByAddress = new Map(wallets.map((row) => [`${row.member.chain}:${row.member.address}`, row]));
@@ -118,6 +125,10 @@ export function buildInvestigationPresentation(value: WalletInvestigationResult)
     infrastructureExcluded: wallets.length - candidates.length - value.members.filter((member) => member.role === 'root_main').length,
     tierCounts,
     topWallets,
+    topActiveWallets,
+    topDormantWallets,
+    coreClusterWallets: candidates.filter((row) => isCore(row)).slice(0, 10),
+    peripheralClusterWallets: candidates.filter((row) => !isCore(row)).slice(0, 10),
     moreWallets,
     walletCatalog,
     strongestPaths,
@@ -201,7 +212,10 @@ function fallbackIntelligence(member: InvestigationMember): InvestigationMemberI
   const infrastructure = INFRA.test(member.role);
   const evidence = infrastructure ? 0 : Math.min(49, Math.round(member.relationshipConfidence * 49));
   return {
-    evidenceScore: evidence, historicalAlphaScore: 0, wakeUpPotential: 0, tier: 'C',
+    evidenceScore: evidence, sourceScore: null, rawHistoricalAlphaScore: 0,
+    sampleAdjustedHistoricalAlphaScore: 0, alphaConfidence: 0, alphaSampleSize: 0,
+    alphaCalibration: {}, historicalAlphaScore: 0, wakeUpPotential: 0,
+    status: 'inactive_low_value', tier: 'C',
     trackingPriority: infrastructure ? 'exclude' : 'context_only', independentSignalCount: member.role === 'root_main' ? 0 : 1,
     clusterConclusion: infrastructure ? 'infrastructure' : 'unconfirmed',
     evidenceSignals: infrastructure ? [] : [{ code: member.evidenceTier, label: member.evidenceTier.replaceAll('_', ' '), strength: member.relationshipConfidence, weight: 49, receiptCount: 1 }],
@@ -212,8 +226,36 @@ function fallbackIntelligence(member: InvestigationMember): InvestigationMemberI
   };
 }
 
+function normalizeIntelligence(value: InvestigationMemberIntelligence): InvestigationMemberIntelligence {
+  const legacy = value as InvestigationMemberIntelligence & Partial<InvestigationMemberIntelligence>;
+  const sampleSize = legacy.alphaSampleSize ?? legacy.metrics.completedPositions ?? 0;
+  const alphaConfidence = legacy.alphaConfidence ?? (sampleSize ? 1 - Math.exp(-sampleSize / 18) : 0);
+  const dormantDays = legacy.metrics.maxCoveredDormantDays ?? 0;
+  return {
+    ...value,
+    sourceScore: legacy.sourceScore ?? null,
+    rawHistoricalAlphaScore: legacy.rawHistoricalAlphaScore ?? value.historicalAlphaScore,
+    sampleAdjustedHistoricalAlphaScore: legacy.sampleAdjustedHistoricalAlphaScore ?? value.historicalAlphaScore,
+    alphaConfidence,
+    alphaSampleSize: sampleSize,
+    alphaCalibration: legacy.alphaCalibration ?? { sampleSize, sampleConfidence: alphaConfidence, compatibilityProjection: 'legacy_telegram_payload' },
+    status: legacy.status ?? (dormantDays >= 30 && (value.historicalAlphaScore >= 50 || value.wakeUpPotential >= 55)
+      ? 'dormant_high_value'
+      : dormantDays >= 30 ? 'dormant_alpha'
+        : value.historicalAlphaScore >= 45 ? 'active_alpha' : 'inactive_low_value')
+  };
+}
+
 function walletImportance(intelligence: InvestigationMemberIntelligence) {
   return Math.round(intelligence.evidenceScore * 0.4 + intelligence.historicalAlphaScore * 0.35 + intelligence.wakeUpPotential * 0.25 + (intelligence.tier === 'S' ? 15 : intelligence.tier === 'A' ? 8 : 0));
+}
+function isCore(wallet: PresentedIntelligenceWallet) {
+  return wallet.intelligence.independentSignalCount >= 2
+    && ['supported', 'probable'].includes(wallet.intelligence.clusterConclusion)
+    && /root|funding|execution|deployer|lp|profit_collector/i.test(wallet.member.role);
+}
+function uniqueWallets(rows: PresentedIntelligenceWallet[]) {
+  return [...new Map(rows.map((row) => [`${row.member.chain}:${row.member.address}`, row])).values()];
 }
 function walletOrder(a: PresentedIntelligenceWallet, b: PresentedIntelligenceWallet) {
   return TIER_ORDER[b.intelligence.tier] - TIER_ORDER[a.intelligence.tier]

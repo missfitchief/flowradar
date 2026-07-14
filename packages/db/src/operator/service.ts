@@ -640,8 +640,13 @@ export class OperatorService {
               entity: event.profile.entityMemberships[0]?.entity.label ?? event.profile.entityKey,
               entityId: event.profile.entityMemberships[0]?.entityId ?? null,
               coreWallet: event.profile.entityMemberships[0]?.scope === 'core', role: event.profile.role,
-              evidenceScore: event.profile.evidenceScore, historicalAlphaScore: event.profile.historicalAlphaScore,
+              sourceScore: event.profile.sourceScore, evidenceScore: event.profile.evidenceScore,
+              rawHistoricalAlphaScore: event.profile.rawHistoricalAlphaScore,
+              sampleAdjustedHistoricalAlphaScore: event.profile.sampleAdjustedAlphaScore,
+              alphaConfidence: event.profile.alphaConfidence, alphaSampleSize: event.profile.alphaSampleSize,
+              historicalAlphaScore: event.profile.historicalAlphaScore,
               wakeUpPotential: event.profile.wakeUpPotential, confidence: event.profile.confidence,
+              intelligenceStatus: event.profile.intelligenceStatus,
               preWakeDormancy: objectJson(event.evidenceJson)?.dormantDays ?? null,
               sourceEventId: event.sourceEventId, txHash: event.txHash, tokenAddress: event.tokenAddress,
               occurredAt: event.occurredAt.toISOString(), evidence: event.evidenceJson
@@ -718,7 +723,7 @@ export class OperatorService {
     const signalId = typeof payload?.intelligenceSignalId === 'string' ? payload.intelligenceSignalId : null;
     const signal = signalId ? await this.prisma.intelligenceSignal.findUnique({
       where: { id: signalId },
-      include: { qualityAssessment: true, outcomes: { orderBy: { targetAt: 'asc' } }, outcomeLabel: true }
+      include: { qualityAssessment: true, outcomes: { orderBy: { targetAt: 'asc' } }, outcomeLabel: true, buyCandidate: true }
     }) : null;
     const entities = signal?.entityIds.length ? await this.prisma.intelligenceEntity.findMany({
       where: { id: { in: signal.entityIds } },

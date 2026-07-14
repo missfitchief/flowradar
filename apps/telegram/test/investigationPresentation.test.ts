@@ -8,7 +8,10 @@ const TOKEN = '0x0000000000000000000000000000000000000999';
 
 function intel(tier: 'S' | 'A' | 'B' | 'C', evidence: number, alpha: number, wake: number): InvestigationMemberIntelligence {
   return {
-    evidenceScore: evidence, historicalAlphaScore: alpha, wakeUpPotential: wake, tier,
+    evidenceScore: evidence, sourceScore: 91, rawHistoricalAlphaScore: alpha + 8,
+    sampleAdjustedHistoricalAlphaScore: alpha, alphaConfidence: 0.72, alphaSampleSize: 5,
+    alphaCalibration: { sampleSize: 5, sampleConfidence: 0.72 }, historicalAlphaScore: alpha,
+    wakeUpPotential: wake, status: wake >= 70 ? 'dormant_high_value' : 'inactive_low_value', tier,
     trackingPriority: tier === 'S' || tier === 'A' ? 'track_now' : tier === 'B' ? 'watch' : 'context_only',
     independentSignalCount: 3, clusterConclusion: evidence >= 75 ? 'supported' : evidence >= 60 ? 'probable' : 'possible',
     evidenceSignals: [
@@ -62,6 +65,7 @@ describe('wallet intelligence presentation', () => {
     expect(presentation.analyzedWallets).toBe(32);
     expect(presentation.topWallets).toHaveLength(1);
     expect(presentation.topWallets[0]?.member.address).toBe(EXECUTION);
+    expect(presentation.topDormantWallets[0]?.member.address).toBe(EXECUTION);
     expect(presentation.moreWallets).toHaveLength(20);
     expect(presentation.topWallets.every((row) => row.intelligence.tier === 'S' || row.intelligence.tier === 'A')).toBe(true);
   });
