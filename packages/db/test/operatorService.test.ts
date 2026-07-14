@@ -92,7 +92,7 @@ describe('OperatorService', () => {
   it('stores transfers silently but alerts on Core and directly funded receiver token buys', async () => {
     const service = new OperatorService(prisma);
     const added = await service.addCoreWallet(PREFIX, PREFIX, CORE_ADDRESS);
-    const now = new Date();
+    const now = new Date(added.watch.updatedAt.getTime() + 10_000);
     await prisma.token.create({ data: { chain: 'BASE', address: CORE_TOKEN, symbol: 'CORE', name: 'Core Signal Token', decimals: 18, firstSeenAt: now, riskFlags: [] } });
     await prisma.walletFlowRelationship.create({ data: {
       sourceChain: 'BASE', sourceWallet: CORE_ADDRESS, relatedChain: 'BASE', relatedWallet: CORE_CONNECTED,

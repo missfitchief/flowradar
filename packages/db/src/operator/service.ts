@@ -984,7 +984,7 @@ export class OperatorService {
       const buys = refs.length ? await this.prisma.massTransactionEvent.findMany({
         where: {
           chain: { in: refs.map((ref) => ref.chain) }, kind: 'token_buy', status: { not: 'failed' },
-          assetAddress: { not: null }, observedAt: { gt: since },
+          assetAddress: { not: null }, observedAt: { gt: since }, ts: { gte: watch.updatedAt },
           OR: refs.flatMap((ref) => [{ chain: ref.chain, actorAddress: ref.address }, { chain: ref.chain, fromAddress: ref.address }])
         }, orderBy: [{ observedAt: 'asc' }, { eventId: 'asc' }], take: 10_000
       }) : [];
@@ -1011,7 +1011,7 @@ export class OperatorService {
       if (watch.alertTypes.includes('dormant_wallet_reactivated') && refs.length) {
         const dormant = await this.prisma.walletIntelligenceEvent.findMany({
           where: {
-            eventType: 'Dormant Wallet Awakened', occurredAt: { gte: since },
+            eventType: 'Dormant Wallet Awakened', occurredAt: { gte: maxDate(since, watch.updatedAt) },
             OR: refs.map((ref) => ({ chain: ref.chain, walletAddress: ref.address }))
           }, orderBy: { occurredAt: 'asc' }, take: 10_000
         });
@@ -1030,7 +1030,8 @@ export class OperatorService {
           if (!chainConnected.length) continue;
           const buys = await this.prisma.massTransactionEvent.findMany({
             where: {
-              chain, kind: 'token_buy', status: { not: 'failed' }, assetAddress: { not: null }, observedAt: { gt: since },
+              chain, kind: 'token_buy', status: { not: 'failed' }, assetAddress: { not: null },
+              observedAt: { gt: since }, ts: { gte: watch.updatedAt },
               OR: [{ actorAddress: { in: chainConnected.map((row) => row.address) } }, { fromAddress: { in: chainConnected.map((row) => row.address) } }]
             }, orderBy: [{ observedAt: 'asc' }, { eventId: 'asc' }], take: 10_000
           });
@@ -1074,6 +1075,9 @@ export class OperatorService {
       const anchor = [...chatWatches].sort((a, b) => a.id.localeCompare(b.id))[0];
       if (!anchor) continue;
       const coreRefs = uniqueRefs(chatWatches.flatMap((watch) => refsByWatch.get(watch.id) ?? []));
+      const activeSinceByRef = new Map(chatWatches.flatMap((watch) =>
+        (refsByWatch.get(watch.id) ?? []).map((ref) => [`${ref.chain}:${ref.address}`, watch.updatedAt] as const)
+      ));
       const buyGroups = new Map<string, Array<{ eventId: string; wallet: string; chain: ChainId; token: string; ts: Date }>>();
       for (const chain of ALL_CHAINS) {
         const addresses = coreRefs.filter((ref) => ref.chain === chain).map((ref) => ref.address);
@@ -1084,9 +1088,12 @@ export class OperatorService {
         });
         for (const event of buys) {
           if (!event.assetAddress) continue;
+          const wallet = event.actorAddress ?? event.fromAddress;
+          const activeSince = activeSinceByRef.get(`${chain}:${wallet}`);
+          if (!activeSince || event.ts < activeSince) continue;
           const key = `${chain}:${event.assetAddress}`;
           const bucket = buyGroups.get(key) ?? [];
-          bucket.push({ eventId: event.eventId, wallet: event.actorAddress ?? event.fromAddress, chain, token: event.assetAddress, ts: event.ts });
+          bucket.push({ eventId: event.eventId, wallet, chain, token: event.assetAddress, ts: event.ts });
           buyGroups.set(key, bucket);
         }
       }
@@ -1248,6 +1255,7 @@ function pageResult<T>(items: T[], page: number, pageSize: number, total: number
 function decimal(value: Prisma.Decimal | number | string | null | undefined) { if (value == null) return null; const number = Number(value); return Number.isFinite(number) ? number : null; }
 function maxOrNull(values: number[]) { const finite = values.filter(Number.isFinite); return finite.length ? Math.max(...finite) : null; }
 function latestIso(values: Date[]) { return values.length ? new Date(Math.max(...values.map((value) => value.getTime()))).toISOString() : null; }
+function maxDate(left: Date, right: Date) { return left.getTime() >= right.getTime() ? left : right; }
 function normalizeConfidence(value: number) { return Math.max(0, Math.min(1, value > 1 ? value / 100 : value)); }
 function json(value: unknown): Prisma.InputJsonValue { return value as Prisma.InputJsonValue; }
 function providerEntryTime(value: Prisma.JsonValue | null): string | null {
