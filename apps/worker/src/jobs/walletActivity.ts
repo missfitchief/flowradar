@@ -67,7 +67,7 @@ function maxWalletsPerCycle(): number {
     .some((chain) => Boolean(process.env[`ALCHEMY_${chain}_RPC_URL`]?.trim()));
   const raw = process.env.WALLET_ACTIVITY_MAX_WALLETS ?? (alchemyConfigured ? process.env.ALCHEMY_POLLING_MAX_WALLETS : undefined);
   const n = raw !== undefined ? Number(raw) : NaN;
-  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : alchemyConfigured ? 10 : DEFAULT_MAX_WALLETS_PER_CYCLE;
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : alchemyConfigured ? 1 : DEFAULT_MAX_WALLETS_PER_CYCLE;
 }
 
 /**
