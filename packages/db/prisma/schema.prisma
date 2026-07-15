@@ -613,6 +613,79 @@ model ProviderSyncState {
   @@map("provider_sync_states")
 }
 
+/// Append-only provider execution telemetry. This is operational evidence,
+/// never intelligence/scoring input.
+model ProviderHealthEvent {
+  id          String    @id @default(cuid())
+  provider    String
+  chain       ChainId?
+  capability  String
+  scope       String?
+  outcome     String
+  latencyMs   Int
+  rateLimited Boolean   @default(false)
+  timedOut    Boolean   @default(false)
+  retryCount  Int       @default(0)
+  error       String?
+  occurredAt  DateTime  @default(now())
+
+  @@index([provider, occurredAt])
+  @@index([outcome, occurredAt])
+  @@index([chain, capability, occurredAt])
+  @@map("provider_health_events")
+}
+
+/// Immutable cursor transition receipt. Cursor state remains in
+/// ProviderSyncState; this table proves advances, replays and rejected
+/// regressions across restarts.
+model ProviderCursorCheckpoint {
+  id             String   @id @default(cuid())
+  provider       String
+  chain          ChainId
+  scope          String
+  previousCursor String?
+  nextCursor     String?
+  decision       String
+  eventCount     Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  @@index([provider, chain, scope, createdAt])
+  @@index([decision, createdAt])
+  @@map("provider_cursor_checkpoints")
+}
+
+/// Last-known liveness for production processes and scheduled jobs. A stale
+/// heartbeat is an explicit degraded state, not inferred success.
+model RuntimeHeartbeat {
+  component     String   @id
+  status        String
+  pid           Int
+  startedAt     DateTime
+  heartbeatAt   DateTime
+  lastSuccessAt DateTime?
+  lastError     String?
+  metadataJson  Json
+
+  @@index([status, heartbeatAt])
+  @@map("runtime_heartbeats")
+}
+
+/// Persisted output of a full production referential/operational integrity
+/// pass. Detailed checks remain machine-readable in checksJson.
+model ProductionIntegrityRun {
+  id           String    @id @default(cuid())
+  startedAt    DateTime
+  completedAt  DateTime?
+  status       String
+  errorCount   Int       @default(0)
+  warningCount Int       @default(0)
+  checksJson   Json
+
+  @@index([startedAt])
+  @@index([status, startedAt])
+  @@map("production_integrity_runs")
+}
+
 /// TokenRiskSnapshot.status — the RESULT of the last risk fetch (freshness is
 /// DERIVED at read time from observedAt/expiresAt, not stored here).
 enum RiskSnapshotStatus {

@@ -66,7 +66,7 @@ describe('Telegram command handlers', () => {
     const service = { setPendingSession: vi.fn().mockResolvedValue({ id: 'pending1' }) } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 1, message: { message_id: 1, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/wallet' } });
     expect(service.setPendingSession).toHaveBeenCalledWith('123', '123', 'wallet', 10);
-    expect(api.sendMessage).toHaveBeenCalledWith('123', expect.stringContaining('Pošalji wallet adresu.'), expect.objectContaining({ inline_keyboard: expect.any(Array) }));
+    expect(api.sendMessage).toHaveBeenCalledWith('123', expect.stringContaining('Send a wallet address.'), expect.objectContaining({ inline_keyboard: expect.any(Array) }));
   });
 
   it('renders /list as a paginated Core wallet terminal without transaction spam', async () => {
@@ -232,7 +232,7 @@ describe('Telegram command handlers', () => {
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 20, message: { message_id: 20, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: 'not-an-address' } });
     expect(service.clearPendingSession).not.toHaveBeenCalled();
-    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Solana base58 adresu (32–44 znaka)');
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Solana base58 address (32–44 characters)');
   });
 
   it('turns an asynchronous wallet scan failure into a visible Telegram failure', async () => {
@@ -357,7 +357,7 @@ describe('Telegram command handlers', () => {
     const service = { clearPendingSession: vi.fn().mockResolvedValue(1) } as unknown as OperatorService;
     const handler = createUpdateHandler(service, api, new Set(['123']));
     await handler({ update_id: 6, message: { message_id: 6, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/cancel' } });
-    await handler({ update_id: 7, callback_query: { id: 'cb1', from: { id: 123 }, data: 'v1|cancel|pending1|pending', message: { message_id: 7, chat: { id: 123, type: 'private' }, text: 'Pošalji wallet adresu.' } } });
+    await handler({ update_id: 7, callback_query: { id: 'cb1', from: { id: 123 }, data: 'v1|cancel|pending1|pending', message: { message_id: 7, chat: { id: 123, type: 'private' }, text: 'Send a wallet address.' } } });
     expect(service.clearPendingSession).toHaveBeenCalledTimes(2);
     expect(api.editMessage).toHaveBeenCalledWith('123', 7, '✓ <b>Action cancelled.</b>', { inline_keyboard: [] });
   });
@@ -367,7 +367,7 @@ describe('Telegram command handlers', () => {
     const service = { getPendingSession: vi.fn().mockResolvedValue(null), classifyAddressInput: vi.fn().mockResolvedValue('ambiguous'), createSession: vi.fn().mockResolvedValue({ id: 'session1' }) } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 8, message: { message_id: 8, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: ADDRESS } });
     const keyboard = vi.mocked(api.sendMessage).mock.calls[0]?.[2];
-    expect(keyboard?.inline_keyboard[0]?.map((button) => button.text)).toEqual(['Analiziraj kao wallet', 'Analiziraj kao token']);
+    expect(keyboard?.inline_keyboard[0]?.map((button) => button.text)).toEqual(['Analyze as wallet', 'Analyze as token']);
   });
 
   it('acknowledges a direct valid Solana token before the real scan and keeps an empty result short', async () => {
@@ -378,8 +378,8 @@ describe('Telegram command handlers', () => {
       tokenSummary: vi.fn().mockResolvedValue({ topPnl: { items: [], page: 1, pageSize: 10, total: 0, hasNext: false } })
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 9, message: { message_id: 9, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
-    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Token primljen. Pokrećem analizu');
-    expect(vi.mocked(api.sendMessage).mock.calls[1]?.[1]).toContain('Nije pronađen nijedan top-PnL wallet za ovaj token.');
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Token received. Analysis started');
+    expect(vi.mocked(api.sendMessage).mock.calls[1]?.[1]).toContain('No top-PnL wallets were found for this token.');
     expect(service.tokenSummary).toHaveBeenCalledTimes(2);
     expect(service.scanTokenTopPnl).toHaveBeenCalledWith(ADDRESS);
   });
@@ -443,7 +443,7 @@ describe('Telegram command handlers', () => {
 
     expect(service.validateWorkflowTarget).toHaveBeenCalledWith('token', EVM_TOKEN);
     expect(service.scanTokenTopPnl).toHaveBeenCalledWith(EVM_TOKEN);
-    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Token primljen. Pokrećem analizu');
+    expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Token received. Analysis started');
   });
 
   it('rejects an invalid token without creating an analysis session', async () => {
@@ -452,7 +452,7 @@ describe('Telegram command handlers', () => {
 
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 91, message: { message_id: 91, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/token not-a-token' } });
 
-    expect(api.sendMessage).toHaveBeenCalledWith('123', expect.stringContaining('INVALID TOKEN CA'));
+    expect(api.sendMessage).toHaveBeenCalledWith('123', expect.stringContaining('INVALID TOKEN CONTRACT'));
   });
 
   it('supports /token without an argument followed by the token address', async () => {
@@ -472,7 +472,7 @@ describe('Telegram command handlers', () => {
     expect(service.setPendingSession).toHaveBeenCalledWith('123', '123', 'token', 10);
     expect(service.scanTokenTopPnl).toHaveBeenCalledWith(ADDRESS);
     expect(vi.mocked(api.sendMessage).mock.calls.map((call) => call[1])).toEqual(expect.arrayContaining([
-      expect.stringContaining('Pošalji token CA.'), expect.stringContaining('Token primljen. Pokrećem analizu')
+      expect.stringContaining('Send a token contract address.'), expect.stringContaining('Token received. Analysis started')
     ]));
   });
 
@@ -511,7 +511,7 @@ describe('Telegram command handlers', () => {
     await handler({ update_id: 96, callback_query: { id: 'token-back', from: { id: 123 }, data: 'v1|tokenback|retry-token-session|menu', message: { message_id: 96, chat: { id: 123, type: 'private' }, text: 'TOKEN ANALYSIS FAILED' } } });
 
     expect(service.scanTokenTopPnl).toHaveBeenCalledWith(ADDRESS);
-    expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('Nije pronađen nijedan top-PnL wallet'))).toBe(true);
+    expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('No top-PnL wallets were found'))).toBe(true);
     expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('FLOWRADAR INTELLIGENCE'))).toBe(true);
     expect(api.answerCallbackQuery).toHaveBeenCalledWith('token-retry', 'Analysis completed');
     expect(api.answerCallbackQuery).toHaveBeenCalledWith('token-back');

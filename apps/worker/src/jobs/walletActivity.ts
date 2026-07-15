@@ -30,7 +30,7 @@
 // Either way the cursor advance + the ingest layer's own dedupe keep re-polls
 // idempotent.
 
-import { createMassTrackerSession, ingestNormalizedTxs, type MassTrackerSession } from '@flowradar/db';
+import { advanceTimestampCursor, createMassTrackerSession, ingestNormalizedTxs, recordCursorFailure, recordProviderHealth, type MassTrackerSession } from '@flowradar/db';
 import { isRateLimitError } from '@flowradar/providers';
 import { normalizeMassTransaction, type Chain } from '@flowradar/core';
 import type { JobContext } from '../context';
@@ -80,13 +80,19 @@ export function selectPollWindow<T>(all: T[], budget: number, cycle: number): { 
   return { window: all.slice(windowIndex * budget, (windowIndex + 1) * budget), windows, windowIndex };
 }
 
-let pollCycleCounter = 0;
+const ROTATION_PROVIDER = 'wallet_activity_scheduler';
+const ROTATION_SCOPE = 'global_rotation';
 
 interface WalletPollResult {
   pagesFetched: number;
   txsIngested: number;
   backfillTruncated: boolean;
+  provider: string;
+  latencyMs: number;
 }
+
+type HealthOutcome = 'success' | 'error' | 'rate_limited' | 'timeout' | 'missing_key';
+interface HealthBucket { provider: string; chain: Chain; outcome: HealthOutcome; count: number; latencyMs: number; error?: unknown }
 
 export async function run(ctx: JobContext): Promise<void> {
   const { prisma, log } = ctx;
@@ -106,9 +112,13 @@ export async function run(ctx: JobContext): Promise<void> {
     select: { id: true, address: true, chain: true },
     orderBy: { id: 'asc' } // stable order — rotation windows are deterministic
   });
+  const rotationState = await prisma.providerSyncState.findUnique({
+    where: { provider_chain_scope: { provider: ROTATION_PROVIDER, chain: 'SOLANA', scope: ROTATION_SCOPE } }
+  });
+  const persistedCycle = Number(rotationState?.cursor ?? 0);
+  const cycle = Number.isSafeInteger(persistedCycle) && persistedCycle >= 0 ? persistedCycle : 0;
   const budget = maxWalletsPerCycle();
-  const { window: wallets, windows, windowIndex } = selectPollWindow(allWallets, budget, pollCycleCounter);
-  pollCycleCounter += 1;
+  const { window: wallets, windows, windowIndex } = selectPollWindow(allWallets, budget, cycle);
   if (windows > 1) {
     log.info(
       `walletActivity budget: polling ${wallets.length}/${allWallets.length} wallets (window ${windowIndex + 1}/${windows}, budget ${budget}) — full set covered every ${windows} cycles`
@@ -120,6 +130,13 @@ export async function run(ctx: JobContext): Promise<void> {
   let walletsWithErrors = 0;
   let walletsRateLimited = 0;
   let walletsBackfillTruncated = 0;
+  const healthBuckets = new Map<string, HealthBucket>();
+  const addHealth = (provider: string, chain: Chain, outcome: HealthOutcome, latencyMs: number, error?: unknown) => {
+    const key = `${provider}:${chain}:${outcome}`;
+    const current = healthBuckets.get(key) ?? { provider, chain, outcome, count: 0, latencyMs: 0 };
+    current.count += 1; current.latencyMs += latencyMs; if (error) current.error = error;
+    healthBuckets.set(key, current);
+  };
   const massTracker = await createMassTrackerSession(prisma, {
     enrollReceivers: true,
     metadata: { job: 'walletActivity', mode: process.env.MOCK_MODE === 'false' ? 'live' : 'mock' }
@@ -137,6 +154,7 @@ export async function run(ctx: JobContext): Promise<void> {
     for (const wallet of wallets) {
       try {
         const result = await pollAndIngestWallet(ctx, wallet.address, wallet.chain, massTracker);
+        addHealth(result.provider, wallet.chain, 'success', result.latencyMs);
         totalIngestedTxs += result.txsIngested;
         totalPagesFetched += result.pagesFetched;
         if (result.backfillTruncated) {
@@ -154,6 +172,11 @@ export async function run(ctx: JobContext): Promise<void> {
         const rateLimited = isRateLimitError(err);
         if (rateLimited) walletsRateLimited += 1;
         await recordSyncFailure(prisma, wallet.chain, wallet.address, err);
+        addHealth(
+          LIVE_FAILURE_PROVIDER_NAME, wallet.chain,
+          rateLimited ? 'rate_limited' : /timeout|timed out|abort/i.test(err instanceof Error ? err.message : String(err)) ? 'timeout' : /No live .*provider configured/i.test(err instanceof Error ? err.message : String(err)) ? 'missing_key' : 'error',
+          0, err
+        );
         log.error(`walletActivity: failed to poll wallet ${wallet.address}`, {
           chain: wallet.chain,
           kind: rateLimited ? 'rate_limited' : 'provider_error',
@@ -162,6 +185,18 @@ export async function run(ctx: JobContext): Promise<void> {
       }
     }
     const trackerMetrics = await massTracker.complete();
+    for (const health of healthBuckets.values()) {
+      await recordProviderHealth(prisma, {
+        provider: health.provider, chain: health.chain, capability: 'walletActivity',
+        scope: `${health.count} wallets`, outcome: health.outcome,
+        latencyMs: health.count ? health.latencyMs / health.count : 0, error: health.error
+      });
+    }
+    await prisma.providerSyncState.upsert({
+      where: { provider_chain_scope: { provider: ROTATION_PROVIDER, chain: 'SOLANA', scope: ROTATION_SCOPE } },
+      create: { provider: ROTATION_PROVIDER, chain: 'SOLANA', scope: ROTATION_SCOPE, cursor: String(cycle + 1), lastSyncAt: new Date() },
+      update: { cursor: String(cycle + 1), lastSyncAt: new Date(), lastError: null, failCount: 0 }
+    });
     log.info('walletActivity cycle complete', {
       walletsPolled: wallets.length, txsIngested: totalIngestedTxs,
       pagesFetched: totalPagesFetched, walletsWithErrors, walletsRateLimited,
@@ -177,6 +212,7 @@ export async function run(ctx: JobContext): Promise<void> {
 
 async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chain, massTracker: MassTrackerSession): Promise<WalletPollResult> {
   const { prisma, providers } = ctx;
+  const startedAt = Date.now();
 
   const activityProvider = providers(chain, 'walletActivity');
   const providerName = activityProvider.providerName ?? 'unknown';
@@ -249,43 +285,16 @@ async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chai
   // already processed.
   const nextCursor = latestTs ? new Date(latestTs.getTime() + 1).toISOString() : (syncState?.cursor ?? null);
 
-  await prisma.providerSyncState.upsert({
-    where: { provider_chain_scope: { provider: syncProvider, chain, scope: address } },
-    create: {
-      provider: syncProvider,
-      chain,
-      scope: address,
-      cursor: nextCursor,
-      lastSyncAt: new Date(),
-      lastError: null,
-      failCount: 0
-    },
-    update: {
-      cursor: nextCursor,
-      lastSyncAt: new Date(),
-      lastError: null,
-      failCount: 0
-    }
+  await advanceTimestampCursor(prisma, {
+    provider: syncProvider, chain, scope: address, nextCursor,
+    eventCount: txsIngested, syncedAt: new Date()
   });
 
-  return { pagesFetched, txsIngested, backfillTruncated };
+  return { pagesFetched, txsIngested, backfillTruncated, provider: providerName, latencyMs: Date.now() - startedAt };
 }
 
 async function recordSyncFailure(prisma: JobContext['prisma'], chain: Chain, address: string, err: unknown): Promise<void> {
   const message = err instanceof Error ? err.message : String(err);
   const failureProvider = process.env.MOCK_MODE === 'false' ? LIVE_FAILURE_PROVIDER_NAME : 'mock';
-  await prisma.providerSyncState.upsert({
-    where: { provider_chain_scope: { provider: failureProvider, chain, scope: address } },
-    create: {
-      provider: failureProvider,
-      chain,
-      scope: address,
-      lastError: message,
-      failCount: 1
-    },
-    update: {
-      lastError: message,
-      failCount: { increment: 1 }
-    }
-  });
+  await recordCursorFailure(prisma, { provider: failureProvider, chain, scope: address, error: message });
 }

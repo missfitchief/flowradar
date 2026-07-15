@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { OperatorService, prisma } from '@flowradar/db';
+import { OperatorService, prisma, recordRuntimeHeartbeat } from '@flowradar/db';
 import { createBirdeyeTokenTopTraders, createGmgnTokenTopTraders, createLiveWalletCapitalScanner, createWormholeWalletBridgeScanner, type TokenTopTradersProvider } from '@flowradar/providers';
 import { createTelegramApi } from './api';
 import { parseAllowedUserIds } from './auth';
@@ -15,6 +15,7 @@ export * from './handlers';
 export * from './poller';
 
 export async function main() {
+  const processStartedAt = new Date();
   if (process.env.MOCK_MODE !== 'false') throw new Error('Telegram operator bot requires MOCK_MODE=false');
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) throw new Error('TELEGRAM_BOT_TOKEN is required');
@@ -46,8 +47,25 @@ export async function main() {
   const controller = new AbortController();
   const shutdown = () => controller.abort();
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
-  try { await runLongPolling({ service: new OperatorService(prisma, { tokenTopTraderProviders, walletCapitalScanner, walletBridgeScanner }), api: createTelegramApi(token), allowedUserIds, signal: controller.signal }); }
-  finally { await prisma.$disconnect(); }
+  await recordRuntimeHeartbeat(prisma, {
+    component: 'telegram', status: 'starting', startedAt: processStartedAt,
+    metadata: { allowedUserCount: allowedUserIds.size }
+  });
+  try {
+    await runLongPolling({
+      service: new OperatorService(prisma, { tokenTopTraderProviders, walletCapitalScanner, walletBridgeScanner }),
+      api: createTelegramApi(token), allowedUserIds, signal: controller.signal,
+      onHealth: (status, error, metadata) => recordRuntimeHeartbeat(prisma, {
+        component: 'telegram', status, startedAt: processStartedAt,
+        success: status === 'healthy', error, metadata
+      }).then(() => undefined)
+    });
+  } finally {
+    await recordRuntimeHeartbeat(prisma, {
+      component: 'telegram', status: 'stopping', startedAt: processStartedAt, metadata: {}
+    }).catch(() => undefined);
+    await prisma.$disconnect();
+  }
 }
 
 function secretFingerprint(value: string | undefined) {

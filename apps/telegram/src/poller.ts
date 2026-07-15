@@ -5,7 +5,14 @@ import { TELEGRAM_COMMANDS, createUpdateHandler, resumeWalletInvestigationJobs }
 import { renderIntelligenceAlert } from './intelligenceAlertRenderer';
 import type { TelegramApi } from './types';
 
-export async function runLongPolling(options: { service: OperatorService; api: TelegramApi; allowedUserIds: ReadonlySet<string>; signal?: AbortSignal; log?: Pick<Console, 'info' | 'error'> }) {
+export async function runLongPolling(options: {
+  service: OperatorService;
+  api: TelegramApi;
+  allowedUserIds: ReadonlySet<string>;
+  signal?: AbortSignal;
+  log?: Pick<Console, 'info' | 'error'>;
+  onHealth?: (status: 'healthy' | 'degraded', error: unknown, metadata: Record<string, unknown>) => Promise<void>;
+}) {
   const log = options.log ?? console;
   const me = await options.api.getMe();
   const botKey = `${me.id}:${me.username ?? 'bot'}`;
@@ -21,6 +28,7 @@ export async function runLongPolling(options: { service: OperatorService; api: T
   while (!options.signal?.aborted) {
     try {
       const updates = await options.api.getUpdates(offset, options.signal);
+      await options.onHealth?.('healthy', null, { updateCount: updates.length, nextUpdateId: offset.toString() }).catch(() => undefined);
       for (const update of updates.sort((a, b) => a.update_id - b.update_id)) {
         try {
           await createUpdateHandler(options.service, options.api, options.allowedUserIds)(update);
@@ -41,6 +49,7 @@ export async function runLongPolling(options: { service: OperatorService; api: T
       retry += 1;
       const waitMs = Math.min(30_000, 500 * 2 ** Math.min(retry, 6));
       log.error(`[telegram] polling retry ${retry}: ${error instanceof Error ? error.message : String(error)}`);
+      await options.onHealth?.('degraded', error, { retry, nextUpdateId: offset.toString() }).catch(() => undefined);
       await delay(waitMs, options.signal);
     }
   }
@@ -56,6 +65,7 @@ export async function dispatchWatchAlerts(service: OperatorService, api: Telegra
     log.error(`[telegram] alert materialization failed; dispatching existing queue: ${error instanceof Error ? error.message : String(error)}`);
   }
   for (const alert of await service.pendingWatchAlerts(100)) {
+    const dispatchStartedAt = Date.now();
     try {
       if (!(await service.prepareWatchAlertForDispatch(alert.id))) {
         log.info(`[core-alert-pipeline] ${JSON.stringify({ stage: 'dispatch_suppressed', alertId: alert.id, alertType: alert.alertType })}`);
@@ -82,6 +92,7 @@ export async function dispatchWatchAlerts(service: OperatorService, api: Telegra
           await service.markWatchAlert(alert.id, undefined, {
             telegramMessageId: priorMessageId, telegramChatId: finite(delivery?.telegramChatId) ?? Number(alert.watch.chatId)
           });
+          await service.recordDeliveryHealth?.({ outcome: 'success', latencyMs: Date.now() - dispatchStartedAt, scope: alert.watch.chatId });
           log.info(`[core-alert-pipeline] ${JSON.stringify({ stage: 'updated', alertId: alert.id, alertType: alert.alertType, telegramMessageId: priorMessageId })}`);
           continue;
         }
@@ -92,9 +103,14 @@ export async function dispatchWatchAlerts(service: OperatorService, api: Telegra
       await service.markWatchAlert(alert.id, undefined, receipt ? {
         telegramMessageId: receipt.message_id, telegramChatId: receipt.chat.id
       } : undefined);
+      await service.recordDeliveryHealth?.({ outcome: 'success', latencyMs: Date.now() - dispatchStartedAt, scope: alert.watch.chatId });
       log.info(`[core-alert-pipeline] ${JSON.stringify({ stage: 'delivered', alertId: alert.id, alertType: alert.alertType, telegramMessageId: receipt?.message_id ?? null })}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      await service.recordDeliveryHealth?.({
+        outcome: /429|rate limit/i.test(message) ? 'rate_limited' : /timeout|timed out|abort/i.test(message) ? 'timeout' : 'error',
+        latencyMs: Date.now() - dispatchStartedAt, scope: alert.watch.chatId, error
+      }).catch(() => undefined);
       log.error(`[core-alert-pipeline] ${JSON.stringify({ stage: 'failed', alertId: alert.id, alertType: alert.alertType, error: message })}`);
       if (isTelegramRecipientUnavailable(error)) await service.stopTelegramDelivery(alert.watch.chatId, message);
       else await service.markWatchAlert(alert.id, message);

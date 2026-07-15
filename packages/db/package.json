@@ -23,11 +23,13 @@
     "@prisma/client": "^6.19.2",
     "dotenv": "^17.4.2",
     "embedded-postgres": "^16.14.0-beta.17",
-    "pg": "^8.22.0"
+    "pg": "^8.22.0",
+    "pg-copy-streams": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",
     "@types/pg": "^8.20.0",
+    "@types/pg-copy-streams": "^1.2.5",
     "prisma": "^6.19.2",
     "tsx": "^4.23.0"
   }

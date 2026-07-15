@@ -7,7 +7,7 @@
 // expansion job does the provider fetching). This is the honest integration —
 // NOT a no-op. Never mutates wallet eligibility.
 
-import { createMassTrackerSession, expandWalletCapitalGraph, runMonitoringScheduler, type MonitoringPollContext, type MonitoringPollFn } from '@flowradar/db';
+import { advanceTimestampCursor, createMassTrackerSession, expandWalletCapitalGraph, recordCursorFailure, recordProviderHealth, runMonitoringScheduler, type MonitoringPollContext, type MonitoringPollFn } from '@flowradar/db';
 import { createLiveWalletCapitalScanner } from '@flowradar/providers';
 import type { ChainId } from '@prisma/client';
 import { MIN_QUALIFYING_BUY_USD, type MassTransactionEvent } from '@flowradar/core';
@@ -112,6 +112,10 @@ export async function run(ctx: JobContext): Promise<void> {
         const scan = await liveScanner.scanAddress(item.walletChain, item.walletAddress, {
           root: item.tier === 'root_permanent', maxPages: CORE_MAX_PAGES, since
         });
+        await recordProviderHealth(prisma, {
+          provider: scan.provider, chain: item.walletChain, capability: 'core_monitoring', scope: item.walletAddress,
+          outcome: 'success', latencyMs: Date.now() - scanStartedAt.getTime()
+        });
         log?.info('core alert pipeline', {
           stage: 'provider_event_seen', chain: item.walletChain, wallet: item.walletAddress,
           provider: scan.provider, since: since.toISOString(), events: scan.events.length,
@@ -147,7 +151,7 @@ export async function run(ctx: JobContext): Promise<void> {
           events: classifiedEvents.length, kinds: JSON.stringify(kindCounts), eligibility: JSON.stringify(rejectionCounts)
         });
         if (!classifiedEvents.length) {
-          await persistCoreCursor(prisma, item.walletChain, item.walletAddress, scanStartedAt, null);
+          await persistCoreCursor(prisma, item.walletChain, item.walletAddress, scanStartedAt, null, 0);
           return { ok: true, events: 0 };
         }
         const tracker = await createMassTrackerSession(prisma, {
@@ -176,11 +180,16 @@ export async function run(ctx: JobContext): Promise<void> {
         // The provider cursor belongs to ingest, not graph enrichment. Advancing
         // it only after a potentially expensive graph pass replayed the same
         // provider window and could starve future Core polling for minutes.
-        await persistCoreCursor(prisma, item.walletChain, item.walletAddress, scanStartedAt, null);
+        await persistCoreCursor(prisma, item.walletChain, item.walletAddress, scanStartedAt, null, classifiedEvents.length);
         if (metrics.persistedEvents > 0) queueCoreGraphExpansion(prisma, item, log);
         return { ok: true, events: metrics.persistedEvents };
       } catch (error) {
-        await persistCoreCursor(prisma, item.walletChain, item.walletAddress, null, error).catch(() => undefined);
+        await persistCoreCursor(prisma, item.walletChain, item.walletAddress, null, error, 0).catch(() => undefined);
+        await recordProviderHealth(prisma, {
+          provider: CORE_SYNC_PROVIDER, chain: item.walletChain, capability: 'core_monitoring', scope: item.walletAddress,
+          outcome: /rate limit|429/i.test(error instanceof Error ? error.message : String(error)) ? 'rate_limited' : /timeout|timed out|abort/i.test(error instanceof Error ? error.message : String(error)) ? 'timeout' : /not configured|missing/i.test(error instanceof Error ? error.message : String(error)) ? 'missing_key' : 'error',
+          latencyMs: Date.now() - scanStartedAt.getTime(), error
+        }).catch(() => undefined);
         log?.error('core monitoring poll failed', {
           chain: item.walletChain, wallet: item.walletAddress,
           error: error instanceof Error ? error.message : String(error)
@@ -220,19 +229,16 @@ function queueCoreGraphExpansion(
 }
 
 async function persistCoreCursor(
-  prisma: JobContext['prisma'], chain: ChainId, address: string, scanStartedAt: Date | null, error: unknown
+  prisma: JobContext['prisma'], chain: ChainId, address: string, scanStartedAt: Date | null, error: unknown, eventCount = 0
 ) {
   const message = error instanceof Error ? error.message : error == null ? null : String(error);
-  const cursor = scanStartedAt ? scanStartedAt.toISOString() : undefined;
-  await prisma.providerSyncState.upsert({
-    where: { provider_chain_scope: { provider: CORE_SYNC_PROVIDER, chain, scope: address } },
-    create: {
-      provider: CORE_SYNC_PROVIDER, chain, scope: address, cursor: cursor ?? null,
-      lastSyncAt: scanStartedAt, lastError: message?.slice(0, 1_000) ?? null, failCount: message ? 1 : 0
-    },
-    update: message
-      ? { lastError: message.slice(0, 1_000), failCount: { increment: 1 } }
-      : { cursor, lastSyncAt: scanStartedAt, lastError: null, failCount: 0 }
+  if (message) {
+    await recordCursorFailure(prisma, { provider: CORE_SYNC_PROVIDER, chain, scope: address, error: message });
+    return;
+  }
+  await advanceTimestampCursor(prisma, {
+    provider: CORE_SYNC_PROVIDER, chain, scope: address,
+    nextCursor: scanStartedAt?.toISOString() ?? null, syncedAt: scanStartedAt ?? new Date(), eventCount
   });
 }
 

@@ -32,6 +32,7 @@ const ADVANCED_ITEMS: NavItem[] = [
   { label: 'Overlap', href: '/overlap' },
   { label: 'Wallets (raw)', href: '/wallets' },
   { label: 'Sources', href: '/sources' },
+  { label: 'Operations', href: '/operations' },
   { label: 'Social', href: '/social' },
   { label: 'Alerts', href: '/alerts' },
   { label: 'Backtest (raw)', href: '/backtest' },

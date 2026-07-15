@@ -72,3 +72,5 @@ export * from './intelligence';
 export * from './investigation/types';
 export * from './investigation/intelligence';
 export * from './investigation/walletInvestigation';
+export * from './operations/production';
+export * from './operations/backup';

@@ -17,6 +17,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@flowradar/db', () => ({
   ingestNormalizedTxs: vi.fn(async () => {}),
+  recordProviderHealth: vi.fn(async () => {}),
+  recordCursorFailure: vi.fn(async () => {}),
+  advanceTimestampCursor: vi.fn(async (prisma, input) => {
+    await prisma.providerSyncState.upsert({
+      where: { provider_chain_scope: { provider: input.provider, chain: input.chain, scope: input.scope } },
+      create: { cursor: input.nextCursor }, update: { cursor: input.nextCursor }
+    });
+    return { decision: 'advanced', cursor: input.nextCursor };
+  }),
   createMassTrackerSession: vi.fn(async () => ({
     runId: 'worker-test-run',
     ingest: vi.fn(async () => {}),
@@ -166,6 +175,7 @@ function makeCtx(wallets: FakeWallet[], provider: unknown) {
 beforeEach(() => {
   ingestMock.mockClear();
   delete process.env.WALLET_ACTIVITY_MAX_PAGES;
+  delete process.env.WALLET_ACTIVITY_MAX_WALLETS;
 });
 afterEach(() => {
   delete process.env.WALLET_ACTIVITY_MAX_PAGES;

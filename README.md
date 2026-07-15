@@ -1,5 +1,8 @@
 # FlowRadar
 
+Production backup, restore, health, cursor and recovery procedures are in
+[docs/PRODUCTION_OPERATIONS.md](docs/PRODUCTION_OPERATIONS.md).
+
 FlowRadar is a local-first **Solana + EVM wallet-intelligence system** (Ethereum, Base, Arbitrum and BSC). It surfaces early, "insider-like" token activity by tracking *profitable wallets* — capital rotation, wallet clusters, smart-wallet accumulation, fresh-wallet funding, bridge movement, and money flow — using only public on-chain and market data. It is **analytics only**: not financial advice, not a trading bot, and it never claims to identify or deanonymize real people. Every label it assigns is probabilistic (weak / possible / probable / strong), and nothing it discovers ever executes a transaction.
 
 Profitable-wallet discovery begins with a persisted historical-winner universe (all canonically covered Solana/EVM tokens known to have crossed $10M ATH plus explicit operator core tokens), then follows those entities' capital to surface later tokens. It does not scan the mempool, front-run, sign, swap or auto-promote discovered wallets; all automatic discoveries remain `observation_only`.

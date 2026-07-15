@@ -13,6 +13,7 @@ import { analyzeTokenWalletIntelligence } from '../intelligence/token';
 import { expandWalletCapitalGraph } from '../intelligence/walletFlows';
 import { enrollObservationWallet } from '../intelligence/monitoring';
 import { createMassTrackerSession } from '../tracker/massTracker';
+import { recordProviderHealth } from '../operations/production';
 import { toCsv, toJsonDocument } from './export';
 import type {
   AlertInboxFilter, AlertInboxItem, BridgeRow, CapitalFlowRow, CoreWalletActivityRow, CoreWalletCapitalRow,
@@ -37,6 +38,12 @@ export class OperatorService {
   private readonly investigations: WalletInvestigationService;
   constructor(private readonly prisma: PrismaClient, private readonly options: OperatorServiceOptions = {}) {
     this.investigations = new WalletInvestigationService(prisma, { walletScanner: options.walletCapitalScanner, bridgeScanner: options.walletBridgeScanner });
+  }
+
+  recordDeliveryHealth(input: { outcome: 'success' | 'error' | 'rate_limited' | 'timeout'; latencyMs: number; scope?: string; error?: unknown }) {
+    return recordProviderHealth(this.prisma, {
+      provider: 'telegram_api', capability: 'alert_dispatch', ...input
+    });
   }
 
   investigateWallet(addressInput: string, options: { refresh?: boolean; maxDepth?: number } = {}) {
@@ -90,9 +97,9 @@ export class OperatorService {
     const undeployed = outflows.filter((x) => x.receiverClassAtReceipt !== 'service').reduce((sum, x) => sum + (decimal(x.knownValueUsd) ?? 0), 0);
     const warnings: string[] = [];
     if (!walletRows.length && !recentEvents.length) warnings.push('Nema lokalno pokrivene aktivnosti za ovu adresu.');
-    if (!dnaRows.length) warnings.push('Wallet DNA nije izgrađen ili je coverage nedovoljan.');
-    if (dnaRows.some((x) => x.coverage !== 'full')) warnings.push('Profitabilnost je zasnovana na delimičnoj lokalnoj pokrivenosti.');
-    if (target.entity && target.entity.chains.length > 1) warnings.push('Cross-chain entity je probabilistička on-chain veza, ne tvrdnja o identitetu.');
+    if (!dnaRows.length) warnings.push('Wallet DNA is unavailable or coverage is insufficient.');
+    if (dnaRows.some((x) => x.coverage !== 'full')) warnings.push('Profitability is based on partial local coverage.');
+    if (target.entity && target.entity.chains.length > 1) warnings.push('Cross-chain entity links are probabilistic on-chain evidence, not identity claims.');
     const explorer = new Map(chains.map((x) => [x.id, x.explorerAddressUrl]));
     void explorer;
     const detectedChains = [...new Set([
@@ -121,9 +128,9 @@ export class OperatorService {
 
   private async scanWalletCapitalLegacy(addressInput: string) {
     const refs = uniqueRefs(inferredAddressRefs(addressInput));
-    if (!refs.length) throw new Error('Wallet adresa nije validna');
+    if (!refs.length) throw new Error('Invalid wallet address');
     const scanner = this.options.walletCapitalScanner;
-    if (!scanner) throw new Error('Real wallet capital scanner nije konfigurisan');
+    if (!scanner) throw new Error('Live wallet capital scanner is not configured');
     const now = new Date();
     for (const ref of refs) await enrollObservationWallet(this.prisma, { chain: ref.chain, address: ref.address, role: 'execution_wallet', reason: 'telegram_wallet_capital_source', now });
     const tracker = await createMassTrackerSession(this.prisma, { enrollReceivers: false, metadata: { workflow: 'telegram_wallet_capital', address: addressInput.trim(), maxHops: 4 } });
@@ -188,7 +195,7 @@ export class OperatorService {
 
   private async walletCapitalSummaryLegacy(addressInput: string): Promise<WalletCapitalSummary> {
     const refs = uniqueRefs(inferredAddressRefs(addressInput));
-    if (!refs.length) throw new Error('Wallet adresa nije validna');
+    if (!refs.length) throw new Error('Invalid wallet address');
     const relationships = await this.prisma.walletFlowRelationship.findMany({
       where: { OR: refs.map((ref) => ({ sourceChain: ref.chain, sourceWallet: ref.address })) },
       orderBy: [{ relationshipConfidence: 'desc' }, { firstTransferTs: 'asc' }, { relatedChain: 'asc' }, { relatedWallet: 'asc' }], take: 500
@@ -233,7 +240,7 @@ export class OperatorService {
 
   async scanTokenTopPnl(addressInput: string) {
     const inferred = inferredAddressRefs(addressInput);
-    if (!inferred.length) throw new Error('Token CA nije validan');
+    if (!inferred.length) throw new Error('Invalid token contract address');
     const normalized = inferred.map((ref) => ref.address);
     const [tokens, universe, candidates] = await Promise.all([
       this.prisma.token.findMany({ where: { address: { in: normalized } }, select: { chain: true, address: true } }),
@@ -337,10 +344,10 @@ export class OperatorService {
     const start = offset(page, pageSize);
     const pageCandidates = traderCandidates.slice(start, start + boundedPageSize(pageSize));
     const warnings: string[] = [];
-    if (!tokens.length) warnings.push('Canonical Token red ne postoji; prikazani su samo discovery/universe dokazi ako postoje.');
+    if (!tokens.length) warnings.push('No canonical token record exists; only available discovery evidence is shown.');
     if (!pageCandidates.length) warnings.push('Nema non-empty top-PnL/trader rezultata u lokalnoj bazi za ovu stranicu.');
-    if (traderCandidates.length !== candidates.length) warnings.push('Operator root walleti su izostavljeni iz trader rezultata.');
-    if (universe.some((x) => x.processingStatus === 'unavailable' || x.processingStatus === 'retryable')) warnings.push('Discovery coverage je unavailable/retryable; rezultat nije izmišljen.');
+    if (traderCandidates.length !== candidates.length) warnings.push('Operator root wallets are excluded from trader results.');
+    if (universe.some((x) => x.processingStatus === 'unavailable' || x.processingStatus === 'retryable')) warnings.push('Discovery coverage is incomplete or retryable; no result was inferred.');
     return {
       tokens: tokens.map((token) => ({ chain: token.chain, address: token.address, name: token.name, symbol: token.symbol, decimals: token.decimals, latestMcapUsd: decimal(token.marketSnapshots[0]?.marketCapUsd), latestMcapTs: token.marketSnapshots[0]?.ts.toISOString() ?? null })),
       metadata: metadata.map((x) => ({ chain: x.chain, name: x.name, symbol: x.symbol, source: x.source, availability: x.availability })),
@@ -411,7 +418,7 @@ export class OperatorService {
       SELECT * FROM ranked ORDER BY ${Prisma.raw(order)} LIMIT ${pageSize} OFFSET ${offset(page, pageSize)}
     `);
     const total = Number(rows[0]?.total_count ?? 0);
-    const warnings = ['Provider-claimed PnL je discovery evidence; lokalni realized PnL ima prednost.', 'Svi automatski pronađeni walleti ostaju observation_only.'];
+    const warnings = ['Provider-reported PnL is discovery evidence; locally verified realized PnL takes precedence.', 'Automatically discovered wallets remain observation-only.'];
     return pageResult(rows.map((row) => ({
       chain: row.chain, address: row.address, entityKey: row.entity_key, role: row.role ?? 'unknown_related_wallet', validation: row.validation,
       localRealizedPnlUsd: decimal(row.local_pnl), providerClaimedPnlUsd: decimal(row.provider_pnl), winRate: row.win_rate, evUsd: row.ev_usd,
@@ -422,7 +429,7 @@ export class OperatorService {
 
   async entity(targetInput: string) {
     const target = await this.resolveTarget(targetInput);
-    if (!target.entity) return { entityKey: null, addresses: [], coverageWarnings: ['Unified entity nije pronađen za zadati ključ/adresu.'] };
+    if (!target.entity) return { entityKey: null, addresses: [], coverageWarnings: ['No unified entity was found for this key or address.'] };
     const refs = target.entity.addresses.map((x) => ({ chain: x.chain, address: x.address }));
     const [dna, chains, capital, recent] = await Promise.all([
       this.prisma.walletDnaProfile.findMany({ where: { OR: refs.map((x) => ({ chain: x.chain, walletAddress: x.address })) }, take: 1_000 }),
@@ -443,7 +450,7 @@ export class OperatorService {
       historicalTokens: uniqueStrings(dna.flatMap((x) => extractDiscoveryMints(x.discoveryJson))).slice(0, 500),
       capital: { staging: capital.filter((x) => x.kind === 'staging').length, deployments: capital.filter((x) => x.kind === 'deployment').length, rotations: capital.filter((x) => x.kind === 'profit_rotation').length, stagedCapitalUsd: sumDecimal(capital.map((x) => x.knownValueUsd)) },
       lastActivities: recent.map((x) => ({ chain: x.chain, kind: x.kind, ts: x.ts.toISOString(), txHash: x.txHash })),
-      coverageWarnings: ['Entity veze su evidence-backed i probabilističke; ne označavaju stvarnu osobu.']
+      coverageWarnings: ['Entity links are evidence-backed and probabilistic; they do not identify a person.']
     };
   }
 
@@ -461,7 +468,7 @@ export class OperatorService {
       ...paths.map((x) => ({ id: x.id, source: x.sourceWallet, destination: x.destinationAddress, sourceChain: x.chain, destinationChain: x.chain, route: x.evidenceTier, protocol: x.bridgeProtocol, asset: null, amountToken: null, amountUsd: decimal(x.knownValueUsd), ts: x.lastTransferTs.toISOString(), evidenceTier: x.evidenceTier, txHash: firstPathTx(x.pathJson), explorerUrl: explorerUrl(explorer.get(x.chain), firstPathTx(x.pathJson)) }))
     ].sort((a, b) => b.ts.localeCompare(a.ts) || a.id.localeCompare(b.id));
     const start = offset(page, pageSize);
-    return pageResult(rows.slice(start, start + boundedPageSize(pageSize)), page, pageSize, rows.length, ['CEX putanje su samo possible_cex_mediated; CEX nikada ne pripisuje downstream receiver bez dodatnog dokaza.']);
+    return pageResult(rows.slice(start, start + boundedPageSize(pageSize)), page, pageSize, rows.length, ['CEX paths remain possible correlations; a CEX never establishes downstream ownership without independent evidence.']);
   }
 
   async bridges(targetInput: string, page = 1, pageSize = 10): Promise<OperatorPage<BridgeRow>> {
@@ -485,7 +492,7 @@ export class OperatorService {
       ]);
       rows.push({ correlationId: correlation.correlationId, protocol: correlation.protocol, status: correlation.status, evidenceTier: correlation.status === 'verified' ? 'exact' : 'inferred', confidence: normalizeConfidence(correlation.confidence), sourceChain: source.chain, destinationChain: destination.chain, sourceTx: source.txHash, destinationTx: destination.txHash, recipient: destination.toAddress, amountToken: destination.amountToken, amountUsd: decimal(destination.amountUsd), destinationActivity: later?.ts.toISOString() ?? null, tokenBuy: trace?.tokenBought ?? null });
     }
-    return pageResult(rows, page, pageSize, total, ['Samo verified official bridge parovi mogu preneti entity vezu preko chainova.']);
+    return pageResult(rows, page, pageSize, total, ['Only verified official bridge pairs can carry an entity link across chains.']);
   }
 
   async recent(page = 1, pageSize = 10) {
@@ -499,7 +506,7 @@ export class OperatorService {
 
   async addCoreWallet(userId: string, chatId: string, addressInput: string, label?: string) {
     const refs = uniqueRefs(inferredAddressRefs(addressInput));
-    if (!refs.length) throw new Error('Pošalji validnu Solana ili EVM wallet adresu.');
+    if (!refs.length) throw new Error('Send a valid Solana or EVM wallet address.');
     const now = new Date();
     const targetKey = refs[0].address;
     const roots: string[] = [];
@@ -549,12 +556,12 @@ export class OperatorService {
 
   async removeCoreWallet(userId: string, chatId: string, addressInput: string) {
     const refs = uniqueRefs(inferredAddressRefs(addressInput));
-    if (!refs.length) throw new Error('Pošalji validnu Solana ili EVM wallet adresu.');
+    if (!refs.length) throw new Error('Send a valid Solana or EVM wallet address.');
     const targetKey = refs[0].address;
     const removed = await this.prisma.operatorWatch.updateMany({
       where: { userId, chatId, targetType: 'core_wallet', targetKey, active: true }, data: { active: false }
     });
-    if (!removed.count) throw new Error('Wallet nije u tvojoj Core listi.');
+    if (!removed.count) throw new Error('This wallet is not in your Core list.');
     const remaining = await this.prisma.operatorWatch.count({ where: { targetType: 'core_wallet', targetKey, active: true } });
     if (!remaining) {
       for (const ref of refs) {
@@ -632,13 +639,13 @@ export class OperatorService {
     const watch = await this.prisma.operatorWatch.findUnique({
       where: { userId_chatId_targetType_targetKey: { userId, chatId, targetType: 'core_wallet', targetKey } }
     });
-    if (!watch?.active) throw new Error('Wallet nije u tvojoj Core listi.');
+    if (!watch?.active) throw new Error('This wallet is not in your Core list.');
     return this.coreWalletItem(targetKey);
   }
 
   async coreWalletActivity(addressInput: string, page = 1, pageSize = 8): Promise<OperatorPage<CoreWalletActivityRow>> {
     const refs = uniqueRefs(inferredAddressRefs(addressInput));
-    if (!refs.length) throw new Error('Core wallet adresa nije validna.');
+    if (!refs.length) throw new Error('Invalid Core wallet address.');
     const where = { OR: eventAddressWhere(refs) };
     const size = Math.max(1, Math.min(10, boundedPageSize(pageSize)));
     const [total, events] = await Promise.all([
@@ -664,7 +671,7 @@ export class OperatorService {
 
   async coreWalletCapital(addressInput: string, page = 1, pageSize = 5): Promise<OperatorPage<CoreWalletCapitalRow>> {
     const refs = uniqueRefs(inferredAddressRefs(addressInput));
-    if (!refs.length) throw new Error('Core wallet adresa nije validna.');
+    if (!refs.length) throw new Error('Invalid Core wallet address.');
     const where = { OR: refs.map((ref) => ({ sourceChain: ref.chain, sourceWallet: ref.address })) };
     const size = Math.max(1, Math.min(5, boundedPageSize(pageSize)));
     const [total, rows] = await Promise.all([
@@ -797,12 +804,12 @@ export class OperatorService {
 
   async queueDeeperTokenScan(input: string) {
     const refs = inferredAddressRefs(input);
-    if (!refs.length) throw new Error('Token CA nije validan');
+    if (!refs.length) throw new Error('Invalid token contract address');
     const result = await this.prisma.historicalTokenUniverse.updateMany({
       where: { OR: refs.map((ref) => ({ chain: ref.chain, tokenAddress: ref.address })) },
       data: { processingStatus: 'pending', nextRetryAt: null, lastError: null }
     });
-    if (!result.count) throw new Error('Token nije u historical discovery univerzumu');
+    if (!result.count) throw new Error('Token is not in the historical discovery universe');
     return result.count;
   }
 
