@@ -74,3 +74,5 @@ export * from './investigation/intelligence';
 export * from './investigation/walletInvestigation';
 export * from './operations/production';
 export * from './operations/backup';
+export * from './alchemy/webhook';
+export * from './alchemy/subscriptions';

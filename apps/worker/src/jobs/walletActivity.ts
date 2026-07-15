@@ -44,10 +44,11 @@ const DEFAULT_MAX_BACKFILL_PAGES = 5;
  * default). Bounds a deep-history wallet's first backfill so it can never stall
  * the sequential cycle or grow memory without limit.
  */
-function maxBackfillPages(): number {
-  const raw = process.env.WALLET_ACTIVITY_MAX_PAGES;
+function maxBackfillPages(providerName?: string): number {
+  const alchemy = providerName === 'Alchemy';
+  const raw = alchemy ? process.env.ALCHEMY_POLLING_MAX_PAGES ?? process.env.WALLET_ACTIVITY_MAX_PAGES : process.env.WALLET_ACTIVITY_MAX_PAGES;
   const n = raw !== undefined ? Number(raw) : NaN;
-  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_BACKFILL_PAGES;
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : alchemy ? 1 : DEFAULT_MAX_BACKFILL_PAGES;
 }
 
 /**
@@ -62,9 +63,11 @@ function maxBackfillPages(): number {
  */
 const DEFAULT_MAX_WALLETS_PER_CYCLE = 200;
 function maxWalletsPerCycle(): number {
-  const raw = process.env.WALLET_ACTIVITY_MAX_WALLETS;
+  const alchemyConfigured = ['SOLANA', 'ETHEREUM', 'BASE', 'ARBITRUM', 'BSC']
+    .some((chain) => Boolean(process.env[`ALCHEMY_${chain}_RPC_URL`]?.trim()));
+  const raw = process.env.WALLET_ACTIVITY_MAX_WALLETS ?? (alchemyConfigured ? process.env.ALCHEMY_POLLING_MAX_WALLETS : undefined);
   const n = raw !== undefined ? Number(raw) : NaN;
-  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_WALLETS_PER_CYCLE;
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : alchemyConfigured ? 10 : DEFAULT_MAX_WALLETS_PER_CYCLE;
 }
 
 /**
@@ -229,7 +232,7 @@ async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chai
   });
   const since = syncState?.cursor ? new Date(syncState.cursor) : undefined;
 
-  const maxPages = maxBackfillPages();
+  const maxPages = maxBackfillPages(providerName);
 
   let cursor: string | undefined;
   let pagesFetched = 0;
@@ -259,8 +262,14 @@ async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chai
       // memory. ingestNormalizedTxs is additive and dedupes, so per-page ingest
       // yields the identical DB state as one whole-history ingest.
       await ingestNormalizedTxs(prisma, chain, address, result.txs);
-      const observedAt = new Date();
-      await massTracker.ingest(result.txs.flatMap((tx) => normalizeMassTransaction(tx, { chain, provider: providerName, observedAt }, address)));
+      const historicalBackfill = !syncState?.cursor;
+      await massTracker.ingest(result.txs.flatMap((tx) => {
+        const observedAt = historicalBackfill ? tx.ts : new Date();
+        return normalizeMassTransaction(tx, { chain, provider: providerName, observedAt }, address).map((event) => ({
+          ...event,
+          metadata: { ...event.metadata, historicalBackfill, alchemyRpc: providerName === 'Alchemy' }
+        }));
+      }));
       txsIngested += result.txs.length;
       for (const tx of result.txs) {
         if (!latestTs || tx.ts.getTime() > latestTs.getTime()) latestTs = tx.ts;

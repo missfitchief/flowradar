@@ -38,7 +38,8 @@ export interface BackupManifest {
 const CRITICAL_TABLES = new Set([
   'wallets', 'wallet_intelligence_profiles', 'intelligence_entities', 'intelligence_entity_memberships',
   'monitoring_subscriptions', 'provider_sync_states', 'operator_watches', 'operator_watch_alerts',
-  'mass_transaction_events', 'intelligence_signals', 'alerts'
+  'mass_transaction_events', 'alchemy_webhook_receipts', 'alchemy_webhook_subscription_states',
+  'intelligence_signals', 'alerts'
 ]);
 
 function q(identifier: string) { return `"${identifier.replaceAll('"', '""')}"`; }

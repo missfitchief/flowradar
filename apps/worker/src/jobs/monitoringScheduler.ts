@@ -82,16 +82,18 @@ export async function run(ctx: JobContext): Promise<void> {
   let liveEvents = 0;
   let liveErrors = 0;
   if (liveScanner) {
-    const [coreWatches, lineageRoots] = await Promise.all([
+    const [coreWatches, lineageRoots, webhookStates] = await Promise.all([
       prisma.operatorWatch.findMany({ where: { targetType: 'core_wallet', active: true }, select: { targetKey: true } }),
       prisma.lineageRoot.findMany({
         where: { id: { in: due.map((item) => item.lineageRootId).filter((value): value is string => Boolean(value)) } },
         select: { id: true, wallet: { select: { address: true } } }
-      })
+      }),
+      prisma.alchemyWebhookSubscriptionState.findMany({ where: { status: 'synced' }, select: { chain: true } })
     ]);
+    const webhookChains = new Set(webhookStates.map((state) => state.chain));
     const coreTargets = new Set(coreWatches.map((watch) => watch.targetKey));
     const rootTarget = new Map(lineageRoots.map((root) => [root.id, root.wallet.address]));
-    const rawCoreDue = due.filter((item) => (
+    const rawCoreDue = due.filter((item) => !webhookChains.has(item.walletChain) && (
       coreTargets.has(item.walletAddress) || Boolean(item.lineageRootId && coreTargets.has(rootTarget.get(item.lineageRootId) ?? ''))
     ));
     // A wallet can have several tier subscriptions under the same Core root.

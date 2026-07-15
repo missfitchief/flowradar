@@ -1,4 +1,4 @@
-import { createDatabaseBackup, latestBackupDirectory, pruneOperationalTelemetry, readBackupManifest, recordRuntimeHeartbeat, resolveDatabaseUrl, runProductionIntegrity } from '@flowradar/db';
+import { createDatabaseBackup, latestBackupDirectory, pruneOperationalTelemetry, readBackupManifest, reconcileAlchemyCoreWebhooks, recordRuntimeHeartbeat, resolveDatabaseUrl, runProductionIntegrity } from '@flowradar/db';
 import type { JobContext } from '../context';
 
 const PROCESS_STARTED_AT = new Date();
@@ -15,6 +15,10 @@ export async function run(ctx: JobContext) {
   await recordRuntimeHeartbeat(prisma, {
     component: 'worker', status: 'healthy', startedAt: PROCESS_STARTED_AT, success: true,
     metadata: { mockMode: process.env.MOCK_MODE !== 'false', durableQueue: Boolean(process.env.REDIS_URL) }
+  });
+  const alchemyWebhooks = await reconcileAlchemyCoreWebhooks(prisma);
+  log.info('Alchemy Core webhook reconciliation complete', {
+    chains: alchemyWebhooks.map((item) => ({ chain: item.chain, status: item.status, desired: item.desiredAddressCount, added: item.added }))
   });
 
   const latestIntegrity = await prisma.productionIntegrityRun.findFirst({ orderBy: { startedAt: 'desc' }, select: { startedAt: true } });

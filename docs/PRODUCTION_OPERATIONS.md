@@ -110,3 +110,32 @@ Live mode never substitutes a mock provider. Missing credentials are recorded
 as `missing_key`; per-wallet failures do not terminate the monitoring cycle.
 FlowRadar continues other chains/providers where possible and preserves the
 last successful cursor for retry.
+# Alchemy live ingest
+
+Alchemy RPC is selected before the legacy provider for Solana, Ethereum, Base,
+Arbitrum and BSC whenever the corresponding `ALCHEMY_*_RPC_URL` is configured.
+The old provider adapters remain available as rollback paths when a chain URL
+is absent.
+
+Address Activity delivery uses one signed receiver per chain:
+
+- `https://<public-host>/api/webhooks/alchemy/solana`
+- `https://<public-host>/api/webhooks/alchemy/ethereum`
+- `https://<public-host>/api/webhooks/alchemy/base`
+- `https://<public-host>/api/webhooks/alchemy/arbitrum`
+- `https://<public-host>/api/webhooks/alchemy/bsc`
+
+Deployment order matters:
+
+1. Deploy `apps/web` at a stable public HTTPS origin.
+2. Create the chain-specific Address Activity webhooks in Alchemy.
+3. Put each webhook id and signing key plus the Notify Auth Token in the local
+   production environment. The Notify token is not the Node RPC API key.
+4. Restart web and worker. The worker reconciles active Core addresses, while
+   `/add` and `/remove` update the relevant subscription immediately.
+
+The receiver computes HMAC-SHA256 over the unmodified request body, rejects an
+invalid `X-Alchemy-Signature`, rejects chain/webhook mismatches, and stores only
+a body hash and operational receipt. Provider event IDs and canonical event IDs
+make retries idempotent. Backfill timestamps remain historical, so replayed
+history cannot be promoted to a live alert.

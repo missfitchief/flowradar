@@ -14,6 +14,7 @@ import { expandWalletCapitalGraph } from '../intelligence/walletFlows';
 import { enrollObservationWallet } from '../intelligence/monitoring';
 import { createMassTrackerSession } from '../tracker/massTracker';
 import { recordProviderHealth } from '../operations/production';
+import { syncAlchemyCoreWalletChange } from '../alchemy/subscriptions';
 import { toCsv, toJsonDocument } from './export';
 import type {
   AlertInboxFilter, AlertInboxItem, BridgeRow, CapitalFlowRow, CoreWalletActivityRow, CoreWalletCapitalRow,
@@ -545,7 +546,8 @@ export class OperatorService {
       create: { userId, chatId, targetType: 'core_wallet', targetKey, chain: refs.length === 1 ? refs[0].chain : null, alertTypes: CORE_ALERTS, active: true },
       update: { alertTypes: CORE_ALERTS, active: true }
     });
-    return { watch, roots, refs };
+    const alchemySubscriptionSync = await syncAlchemyCoreWalletChange(this.prisma, refs, 'add');
+    return { watch, roots, refs, alchemySubscriptionSync };
   }
 
   async queueCoreHistoricalSync(userId: string, chatId: string, target: string) {
@@ -577,6 +579,7 @@ export class OperatorService {
         if (!stillActive) await this.prisma.wallet.update({ where: { id: wallet.id }, data: { isWatched: false } });
       }
     }
+    await syncAlchemyCoreWalletChange(this.prisma, refs, 'remove');
     return removed.count;
   }
 

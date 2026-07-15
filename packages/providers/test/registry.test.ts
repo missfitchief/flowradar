@@ -47,7 +47,7 @@ describe('getProvider / getProviderStatuses (registry)', () => {
     const statuses = getProviderStatuses();
 
     const capabilities = ['walletActivity', 'marketData', 'tokenMetadata', 'risk', 'walletDiscovery'];
-    const chains = ['SOLANA', 'BSC'];
+    const chains = ['SOLANA', 'ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'];
 
     expect(statuses.length).toBe(capabilities.length * chains.length);
     for (const chain of chains) {
@@ -63,6 +63,38 @@ describe('getProvider / getProviderStatuses (registry)', () => {
     process.env.MOCK_MODE = 'true';
     const statuses = getProviderStatuses();
     expect(statuses.every((s) => s.mode === 'mock')).toBe(true);
+  });
+});
+
+describe('Alchemy live wallet activity priority', () => {
+  const chains = ['SOLANA', 'ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'] as const;
+  const originalUrls = Object.fromEntries(chains.map((chain) => {
+    const name = `ALCHEMY_${chain}_RPC_URL`;
+    return [name, process.env[name]];
+  }));
+
+  beforeEach(() => {
+    resetProviderCache();
+    process.env.MOCK_MODE = 'false';
+  });
+
+  afterEach(() => {
+    resetProviderCache();
+    if (ORIGINAL_MOCK_MODE === undefined) delete process.env.MOCK_MODE;
+    else process.env.MOCK_MODE = ORIGINAL_MOCK_MODE;
+    for (const [name, value] of Object.entries(originalUrls)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  it.each(chains)('uses Alchemy instead of MockProvider for %s when its RPC URL is configured', (chain) => {
+    process.env[`ALCHEMY_${chain}_RPC_URL`] = `https://${chain.toLowerCase()}.example.invalid/v2/test`;
+    const provider = getProvider(chain, 'walletActivity');
+    expect(provider.providerName).toBe('Alchemy');
+    const status = getProviderStatuses().find((row) => row.chain === chain && row.capability === 'walletActivity');
+    expect(status?.mode).toBe('live');
+    expect(status?.name).toBe('Alchemy');
   });
 });
 

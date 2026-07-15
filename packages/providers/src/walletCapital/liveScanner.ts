@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { normalizeMassTransaction, type Chain, type InfrastructureCategory, type MassTransactionEvent } from '@flowradar/core';
 import { createHeliusActivityProvider } from '../solana/helius';
 import { fetchWalletActivity } from '../gmgn/gmgnProvider';
+import { createAlchemyWalletActivityProvider, type AlchemyRpcEnv } from '../alchemy/rpc';
 
 const BLOCKSCOUT_HOSTS: Partial<Record<Chain, string>> = {
   ETHEREUM: 'https://eth.blockscout.com',
@@ -39,7 +40,7 @@ export interface WalletCapitalScanProvider {
   scanAddress(chain: Chain, address: string, options?: WalletCapitalScanOptions): Promise<WalletCapitalScanResult>;
 }
 
-export interface LiveWalletCapitalEnv {
+export interface LiveWalletCapitalEnv extends AlchemyRpcEnv {
   HELIUS_API_KEY?: string;
   HELIUS_RPS?: string;
 }
@@ -47,14 +48,47 @@ export interface LiveWalletCapitalEnv {
 /** Live-only capital scanner. No mock fallback is used by this operator path. */
 export function createLiveWalletCapitalScanner(env: LiveWalletCapitalEnv = process.env as LiveWalletCapitalEnv): WalletCapitalScanProvider {
   const helius = createHeliusActivityProvider(env);
+  const alchemy = new Map<Chain, ReturnType<typeof createAlchemyWalletActivityProvider>>();
   return {
     async scanAddress(chain, address, options = {}) {
+      if (!alchemy.has(chain)) alchemy.set(chain, createAlchemyWalletActivityProvider(chain, env));
+      const alchemyProvider = alchemy.get(chain);
+      if (alchemyProvider) return scanAlchemy(chain, address, options, alchemyProvider);
       if (chain === 'SOLANA') return scanSolana(address, options, helius);
       if (chain === 'BSC') return scanBsc(address, options);
       const host = BLOCKSCOUT_HOSTS[chain];
       if (!host) throw new Error(`No live wallet capital source for ${chain}`);
       return scanBlockscout(chain, address, host, options);
     }
+  };
+}
+
+async function scanAlchemy(
+  chain: Chain,
+  address: string,
+  options: WalletCapitalScanOptions,
+  provider: NonNullable<ReturnType<typeof createAlchemyWalletActivityProvider>>
+): Promise<WalletCapitalScanResult> {
+  const maxPages = clamp(options.maxPages ?? (options.root ? 10 : 4), 1, 20);
+  let cursor: string | undefined;
+  let pages = 0;
+  const events: MassTransactionEvent[] = [];
+  do {
+    const result = await provider.getWalletTransactions(chain, address, { cursor, limit: 100, since: options.since });
+    pages += 1;
+    for (const tx of result.txs) {
+      // This scanner is historical/backfill-oriented. Transaction time is the
+      // observation watermark so old history can never masquerade as a fresh
+      // opportunity after an investigation refresh.
+      events.push(...normalizeMassTransaction(tx, { chain, provider: 'Alchemy', observedAt: tx.ts }, address).map((event) => ({
+        ...event, metadata: { ...event.metadata, historicalBackfill: true, alchemyRpc: true }
+      })));
+    }
+    cursor = result.nextCursor;
+  } while (cursor && pages < maxPages);
+  return {
+    events: dedupeEvents(events), infrastructure: [], provider: 'Alchemy', pagesFetched: pages,
+    complete: !cursor, warnings: cursor ? ['Alchemy history bounded by page budget'] : []
   };
 }
 

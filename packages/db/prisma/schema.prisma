@@ -2755,6 +2755,55 @@ model MassTransactionEvent {
   @@map("mass_transaction_events")
 }
 
+/// Durable receipt for an Alchemy Notify delivery. The provider event id is
+/// globally idempotent; the body hash lets operators distinguish a harmless
+/// retry from a conflicting replay without retaining the raw payload.
+model AlchemyWebhookReceipt {
+  id                 String   @id @default(cuid())
+  webhookEventId     String   @unique
+  webhookId          String
+  chain              ChainId
+  payloadHash        String
+  providerCreatedAt  DateTime
+  receivedAt         DateTime
+  signatureVerified  Boolean  @default(true)
+  status             String
+  normalizedEvents   Int      @default(0)
+  persistedEvents    Int      @default(0)
+  duplicateEvents    Int      @default(0)
+  eligibilityStatus  String?
+  rejectionReason    String?
+  trackerRunId       String?
+  error              String?
+  metadataJson       Json
+  completedAt        DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([chain, receivedAt])
+  @@index([status, receivedAt])
+  @@map("alchemy_webhook_receipts")
+}
+
+/// Last reconciliation state for each chain-specific Address Activity
+/// webhook. Credentials and signing keys are deliberately never persisted.
+model AlchemyWebhookSubscriptionState {
+  chain               ChainId @id
+  webhookId           String?
+  network             String
+  status              String
+  desiredAddressCount Int     @default(0)
+  remoteAddressCount  Int?
+  lastSyncedAt        DateTime?
+  lastError           String?
+  metadataJson        Json
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([status, updatedAt])
+  @@map("alchemy_webhook_subscription_states")
+}
+
 /// Official or explicitly-probable source->destination bridge pairing.
 /// Only `verified` rows may carry an entity path across chains.
 model MassBridgeCorrelation {
