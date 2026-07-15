@@ -49,7 +49,7 @@ export async function ingestAlchemyWebhook(
     metadata: { workflow: 'alchemy_address_activity_webhook', chain: input.chain, receiptId: receipt.id }
   });
   try {
-    const tracked = await activeCoreAddresses(prisma, input.chain);
+    const tracked = await activeMonitoredAddresses(prisma, input.chain);
     const events = await normalizeAlchemyWebhook(input.chain, input.envelope, tracked, { observedAt: receivedAt });
     await tracker.ingest(events);
     const run = await tracker.complete();
@@ -63,7 +63,7 @@ export async function ingestAlchemyWebhook(
         rejectionReason: eligibility.reason, trackerRunId: run.runId, completedAt: new Date(),
         metadataJson: {
           provider: 'Alchemy', type: input.envelope.type, network: String(input.envelope.event.network ?? ''),
-          trackedCoreAddresses: tracked.size, relevantEvents: run.relevantEvents,
+          trackedMonitoringAddresses: tracked.size, relevantEvents: run.relevantEvents,
           receiverEnrollments: run.receiversEnrolled, alertEngine: 'production_v2'
         }
       }
@@ -78,12 +78,12 @@ export async function ingestAlchemyWebhook(
   }
 }
 
-async function activeCoreAddresses(prisma: PrismaClient, chain: ChainId) {
-  const roots = await prisma.lineageRoot.findMany({
-    where: { permanent: true, wallet: { chain }, subscriptions: { some: { active: true, priority: 'root_permanent' } } },
-    select: { wallet: { select: { address: true } } }
+async function activeMonitoredAddresses(prisma: PrismaClient, chain: ChainId) {
+  const wallets = await prisma.wallet.findMany({
+    where: { chain, monitoringSubscriptions: { some: { active: true } } },
+    select: { address: true }
   });
-  return new Set(roots.map((root) => chain === 'SOLANA' ? root.wallet.address : root.wallet.address.toLowerCase()));
+  return new Set(wallets.map((wallet) => chain === 'SOLANA' ? wallet.address : wallet.address.toLowerCase()));
 }
 
 async function updateWalletActivity(prisma: PrismaClient, chain: ChainId, events: Awaited<ReturnType<typeof normalizeAlchemyWebhook>>) {

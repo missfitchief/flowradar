@@ -131,8 +131,10 @@ Deployment order matters:
 2. Create the chain-specific Address Activity webhooks in Alchemy.
 3. Put each webhook id and signing key plus the Notify Auth Token in the local
    production environment. The Notify token is not the Node RPC API key.
-4. Restart web and worker. The worker reconciles active Core addresses, while
-   `/add` and `/remove` update the relevant subscription immediately.
+4. Restart web and worker. The worker reconciles every wallet with an active
+   monitoring subscription, while `/add` and `/remove` update the relevant
+   subscription immediately. Wallet status and Alert Engine eligibility remain
+   separate from transport enrollment.
 
 The receiver computes HMAC-SHA256 over the unmodified request body, rejects an
 invalid `X-Alchemy-Signature`, rejects chain/webhook mismatches, and stores only

@@ -100,7 +100,7 @@ interface HealthBucket { provider: string; chain: Chain; outcome: HealthOutcome;
 export async function run(ctx: JobContext): Promise<void> {
   const { prisma, log } = ctx;
 
-  const allWallets = await prisma.wallet.findMany({
+  const fetchedWallets = await prisma.wallet.findMany({
     where: {
       // Phase 0 taxonomy (feat/pre-public-accumulation): excluded wallets
       // are never polled; observation_only wallets are ALWAYS pollable (the
@@ -115,6 +115,12 @@ export async function run(ctx: JobContext): Promise<void> {
     select: { id: true, address: true, chain: true },
     orderBy: { id: 'asc' } // stable order — rotation windows are deterministic
   });
+  // Alchemy Notify is the primary live transport. Keep the complete pollable
+  // universe in this deterministic rotation as a recovery path: when any
+  // Alchemy RPC is configured, maxWalletsPerCycle()/maxBackfillPages() default
+  // to one wallet and one page. That gives us a bounded multi-hour repair
+  // sweep without running an aggressive polling pipeline beside webhooks.
+  const allWallets = fetchedWallets;
   const rotationState = await prisma.providerSyncState.findUnique({
     where: { provider_chain_scope: { provider: ROTATION_PROVIDER, chain: 'SOLANA', scope: ROTATION_SCOPE } }
   });

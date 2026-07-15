@@ -382,7 +382,7 @@ export function getProviderStatuses(): ProviderStatus[] {
       if (capability === 'walletActivity' && alchemyRpcUrl(chain)) {
         statuses.push({
           name: 'Alchemy', chain, capability, mode: 'live',
-          note: `Live Alchemy RPC adapter active via ${alchemyRpcEnvName(chain)}; Address Activity webhook remains the primary Core path when configured.`
+          note: `Live Alchemy RPC adapter active via ${alchemyRpcEnvName(chain)}; Address Activity webhook is primary for active monitoring subscriptions when configured.`
         });
         continue;
       }

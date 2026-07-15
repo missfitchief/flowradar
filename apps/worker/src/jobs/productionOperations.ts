@@ -17,8 +17,12 @@ export async function run(ctx: JobContext) {
     metadata: { mockMode: process.env.MOCK_MODE !== 'false', durableQueue: Boolean(process.env.REDIS_URL) }
   });
   const alchemyWebhooks = await reconcileAlchemyCoreWebhooks(prisma);
-  log.info('Alchemy Core webhook reconciliation complete', {
-    chains: alchemyWebhooks.map((item) => ({ chain: item.chain, status: item.status, desired: item.desiredAddressCount, added: item.added }))
+  log.info('Alchemy monitoring webhook reconciliation complete', {
+    chains: alchemyWebhooks.map((item) => ({
+      chain: item.chain, status: item.status, desired: item.desiredAddressCount,
+      remote: item.remoteAddressCount, added: item.added, removed: item.removed,
+      duplicates: item.duplicates, failures: item.failures
+    }))
   });
 
   const latestIntegrity = await prisma.productionIntegrityRun.findFirst({ orderBy: { startedAt: 'desc' }, select: { startedAt: true } });

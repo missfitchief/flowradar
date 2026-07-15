@@ -27,6 +27,8 @@ export interface AlchemySubscriptionSyncResult {
   status: 'synced' | 'pending_configuration' | 'failed';
   added: number;
   removed: number;
+  duplicates: number;
+  failures: number;
   desiredAddressCount: number;
   remoteAddressCount: number | null;
 }
@@ -47,70 +49,90 @@ export async function syncAlchemyCoreWalletChange(
   for (const chain of CHAINS) {
     const addresses = unique(refs.filter((ref) => ref.chain === chain).map((ref) => normalize(chain, ref.address)));
     if (!addresses.length) continue;
-    const desired = await coreAddresses(prisma, chain);
+    const desired = await monitoredAddresses(prisma, chain);
+    const desiredSet = new Set(desired);
     const webhookId = alchemyWebhookId(chain, env);
     const auth = env.ALCHEMY_NOTIFY_AUTH_TOKEN?.trim();
     if (!webhookId || !auth) {
       await saveState(prisma, chain, webhookId, 'pending_configuration', desired.length, null, null, {
         notifyAuthConfigured: Boolean(auth), webhookIdConfigured: Boolean(webhookId)
       });
-      results.push({ chain, status: 'pending_configuration', added: 0, removed: 0, desiredAddressCount: desired.length, remoteAddressCount: null });
+      results.push({ chain, status: 'pending_configuration', added: 0, removed: 0, duplicates: 0, failures: 0, desiredAddressCount: desired.length, remoteAddressCount: null });
       continue;
     }
     try {
-      await updateAddresses(webhookId, auth, action === 'add' ? addresses : [], action === 'remove' ? addresses : []);
-      await saveState(prisma, chain, webhookId, 'synced', desired.length, null, null, { lastAction: action, changedAddresses: addresses.length });
-      results.push({ chain, status: 'synced', added: action === 'add' ? addresses.length : 0, removed: action === 'remove' ? addresses.length : 0, desiredAddressCount: desired.length, remoteAddressCount: null });
+      const remote = await listAddresses(webhookId, auth, chain);
+      const remoteSet = new Set(remote.addresses);
+      const add = action === 'add' ? addresses.filter((address) => desiredSet.has(address) && !remoteSet.has(address)) : [];
+      // /remove only removes an address after the database says that no active
+      // monitoring subscription remains for it. History and profile rows are
+      // intentionally untouched.
+      const remove = action === 'remove' ? addresses.filter((address) => !desiredSet.has(address) && remoteSet.has(address)) : [];
+      if (add.length || remove.length) await updateAddresses(webhookId, auth, add, remove);
+      const duplicates = remote.duplicates + (action === 'add' ? addresses.length - add.length : 0);
+      const remoteCount = remoteSet.size + add.length - remove.length;
+      await saveState(prisma, chain, webhookId, 'synced', desired.length, remoteCount, null, { lastAction: action, added: add.length, removed: remove.length, duplicates });
+      results.push({ chain, status: 'synced', added: add.length, removed: remove.length, duplicates, failures: 0, desiredAddressCount: desired.length, remoteAddressCount: remoteCount });
     } catch (error) {
       const message = safeError(error);
       await saveState(prisma, chain, webhookId, 'failed', desired.length, null, message, { lastAction: action, changedAddresses: addresses.length });
-      results.push({ chain, status: 'failed', added: 0, removed: 0, desiredAddressCount: desired.length, remoteAddressCount: null });
+      results.push({ chain, status: 'failed', added: 0, removed: 0, duplicates: 0, failures: 1, desiredAddressCount: desired.length, remoteAddressCount: null });
     }
   }
   return results;
 }
 
-/** Reconciles all active Core roots without removing unknown remote addresses.
- * Explicit /remove is the only automatic destructive subscription operation. */
+/** Reconciles the dedicated FlowRadar webhook to the complete active
+ * monitoring universe. Wallet intelligence status is not changed here and is
+ * still enforced downstream by Alert Engine v2. */
 export async function reconcileAlchemyCoreWebhooks(
   prisma: PrismaClient,
   env: AlchemySubscriptionEnv = process.env
 ): Promise<AlchemySubscriptionSyncResult[]> {
   const output: AlchemySubscriptionSyncResult[] = [];
   for (const chain of CHAINS) {
-    const desired = await coreAddresses(prisma, chain);
+    const desired = await monitoredAddresses(prisma, chain);
     const webhookId = alchemyWebhookId(chain, env);
     const auth = env.ALCHEMY_NOTIFY_AUTH_TOKEN?.trim();
     if (!webhookId || !auth) {
       await saveState(prisma, chain, webhookId, 'pending_configuration', desired.length, null, null, {
         notifyAuthConfigured: Boolean(auth), webhookIdConfigured: Boolean(webhookId)
       });
-      output.push({ chain, status: 'pending_configuration', added: 0, removed: 0, desiredAddressCount: desired.length, remoteAddressCount: null });
+      output.push({ chain, status: 'pending_configuration', added: 0, removed: 0, duplicates: 0, failures: 0, desiredAddressCount: desired.length, remoteAddressCount: null });
       continue;
     }
     try {
-      const remote = await listAddresses(webhookId, auth);
-      const remoteSet = new Set(remote.map((address) => normalize(chain, address)));
+      const remote = await listAddresses(webhookId, auth, chain);
+      const remoteSet = new Set(remote.addresses);
       const missing = desired.filter((address) => !remoteSet.has(address));
-      for (const addresses of chunks(missing, 500)) await updateAddresses(webhookId, auth, addresses, []);
-      const remoteCount = remoteSet.size + missing.length;
-      await saveState(prisma, chain, webhookId, 'synced', desired.length, remoteCount, null, { addedDuringReconcile: missing.length });
-      output.push({ chain, status: 'synced', added: missing.length, removed: 0, desiredAddressCount: desired.length, remoteAddressCount: remoteCount });
+      const desiredSet = new Set(desired);
+      const stale = remote.addresses.filter((address) => !desiredSet.has(address));
+      const addBatches = chunks(missing, 500);
+      const removeBatches = chunks(stale, 500);
+      for (let index = 0; index < Math.max(addBatches.length, removeBatches.length); index++) {
+        await updateAddresses(webhookId, auth, addBatches[index] ?? [], removeBatches[index] ?? []);
+      }
+      await saveState(prisma, chain, webhookId, 'synced', desired.length, desired.length, null, {
+        addedDuringReconcile: missing.length, removedDuringReconcile: stale.length, duplicates: remote.duplicates
+      });
+      output.push({ chain, status: 'synced', added: missing.length, removed: stale.length, duplicates: remote.duplicates, failures: 0, desiredAddressCount: desired.length, remoteAddressCount: desired.length });
     } catch (error) {
       await saveState(prisma, chain, webhookId, 'failed', desired.length, null, safeError(error), { reconciliation: true });
-      output.push({ chain, status: 'failed', added: 0, removed: 0, desiredAddressCount: desired.length, remoteAddressCount: null });
+      output.push({ chain, status: 'failed', added: 0, removed: 0, duplicates: 0, failures: 1, desiredAddressCount: desired.length, remoteAddressCount: null });
     }
   }
   return output;
 }
 
-async function coreAddresses(prisma: PrismaClient, chain: ChainId) {
-  const roots = await prisma.lineageRoot.findMany({
-    where: { permanent: true, wallet: { chain }, subscriptions: { some: { active: true, priority: 'root_permanent' } } },
-    select: { wallet: { select: { address: true } } }
+export async function monitoredAlchemyAddresses(prisma: PrismaClient, chain: ChainId) {
+  const wallets = await prisma.wallet.findMany({
+    where: { chain, monitoringSubscriptions: { some: { active: true } } },
+    select: { address: true }
   });
-  return unique(roots.map((root) => normalize(chain, root.wallet.address))).sort();
+  return unique(wallets.map((wallet) => normalize(chain, wallet.address))).sort();
 }
+
+const monitoredAddresses = monitoredAlchemyAddresses;
 
 async function updateAddresses(webhookId: string, auth: string, add: string[], remove: string[]) {
   const response = await fetch(UPDATE_URL, {
@@ -122,7 +144,7 @@ async function updateAddresses(webhookId: string, auth: string, add: string[], r
   if (!response.ok) throw new Error(`Alchemy Notify address update failed with HTTP ${response.status}`);
 }
 
-async function listAddresses(webhookId: string, auth: string) {
+async function listAddresses(webhookId: string, auth: string, chain: ChainId) {
   const addresses: string[] = [];
   let after: string | undefined;
   for (let page = 0; page < 1_000; page++) {
@@ -139,7 +161,9 @@ async function listAddresses(webhookId: string, auth: string) {
     if (!next || next === after) break;
     after = next;
   }
-  return unique(addresses);
+  const normalized = addresses.map((address) => normalize(chain, address));
+  const uniqueAddresses = unique(normalized);
+  return { addresses: uniqueAddresses, duplicates: normalized.length - uniqueAddresses.length };
 }
 
 async function saveState(prisma: PrismaClient, chain: ChainId, webhookId: string | null, status: string, desired: number, remote: number | null, error: string | null, metadata: Prisma.InputJsonObject) {
