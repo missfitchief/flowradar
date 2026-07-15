@@ -93,7 +93,10 @@ async function getEvmTransactions(url: string, chain: Chain, addressInput: strin
   const limit = clamp(options.limit ?? 100, 1, 100);
   const cursor = decodeCursor(options.cursor);
   const common = {
-    fromBlock: '0x0', toBlock: 'latest', category: ['external', 'internal', 'erc20'],
+    // Alchemy Transfers only accepts `internal` on Ethereum (and Polygon,
+    // which FlowRadar does not monitor). Passing it on Arbitrum is a hard
+    // JSON-RPC -32602 error, so chain capability is explicit here.
+    fromBlock: '0x0', toBlock: 'latest', category: chain === 'ETHEREUM' ? ['external', 'internal', 'erc20'] : ['external', 'erc20'],
     withMetadata: true, excludeZeroValue: true, maxCount: `0x${limit.toString(16)}`, order: 'desc'
   };
   const [sent, received] = await Promise.all([
