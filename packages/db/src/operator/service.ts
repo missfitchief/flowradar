@@ -1,7 +1,9 @@
 import { Prisma, type AddressCategory, type ChainId, type MassTransactionEvent as PersistedMassTransactionEvent, type OperatorSession, type PrismaClient } from '@prisma/client';
 import {
-  CORE_ALERT_POLICY_VERSION, CORE_CONFLUENCE_WINDOW_MS, MIN_QUALIFYING_BUY_USD,
-  evaluateCoreBuyWindow, type CoreBuyAuditDecision, type CoreBuyCandidate, type MassTransactionEvent
+  CORE_ALERT_POLICY_VERSION, CORE_CONFLUENCE_WINDOW_MS, MAX_PUSH_EVENT_AGE_MS, MIN_PUSH_ALERT_SCORE,
+  MIN_PUSH_CONFIDENCE, MIN_QUALIFYING_BUY_USD, evaluateCoreBuyWindow, evaluateCorePushEligibility,
+  validateCorePushPayload, type CoreBuyAuditDecision, type CoreBuyCandidate, type CorePushDecision,
+  type MassTransactionEvent
 } from '@flowradar/core';
 import type { WalletBridgeScanProvider, WalletCapitalScanProvider } from '@flowradar/providers';
 import { normalizeAddress, runUnifiedProfitableWalletDiscovery, validAddress, type HistoricalTraderProvider } from '../discovery/unified';
@@ -13,7 +15,9 @@ import { enrollObservationWallet } from '../intelligence/monitoring';
 import { createMassTrackerSession } from '../tracker/massTracker';
 import { toCsv, toJsonDocument } from './export';
 import type {
-  BridgeRow, CapitalFlowRow, CoreWalletActivityRow, CoreWalletCapitalRow, CoreWalletListItem, OperatorPage, OperatorSessionState, OperatorWorkflow, ProfitableSort, ProfitableWalletRow, TokenTraderSort, WalletCapitalRelation, WalletCapitalSummary, WalletSummary
+  AlertInboxFilter, AlertInboxItem, BridgeRow, CapitalFlowRow, CoreWalletActivityRow, CoreWalletCapitalRow,
+  CoreWalletListItem, OperatorPage, OperatorSessionState, OperatorWorkflow, ProfitableSort, ProfitableWalletRow,
+  TokenTraderSort, WalletCapitalRelation, WalletCapitalSummary, WalletSummary
 } from './types';
 
 const ALL_CHAINS: ChainId[] = ['SOLANA', 'ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'];
@@ -978,10 +982,10 @@ export class OperatorService {
           watchId: { in: watches.map((watch) => watch.id) }, status: { in: ['pending', 'retryable', 'update_pending'] },
           OR: [
             { alertType: { in: ['core_wallet_token_buy', 'connected_core_receiver_buy', 'independent_entity_confluence'] } },
-            { alertType: 'core_multi_wallet_buy', eventKey: { startsWith: 'core-confluence:', not: { startsWith: 'core-confluence-v2:' } } }
+            { alertType: 'core_multi_wallet_buy', NOT: { eventKey: { startsWith: 'core-confluence-v3:' } } }
           ]
         },
-        data: { status: 'failed', lastError: 'superseded_by_core_confluence_v2' }
+        data: { status: 'rejected', lastError: 'superseded_by_core_confluence_v3' }
       });
     }
     const refsByWatch = new Map<string, ReturnType<typeof inferredAddressRefs>>();
@@ -1128,7 +1132,15 @@ export class OperatorService {
               where: { chain, tokenAddress, assessedAt: { lte: windowEnd } }, orderBy: { assessedAt: 'desc' }
             })
           ]);
-          const criticalRisk = hasCriticalTokenRisk(token?.riskFlags, quality?.reasonCodes ?? []);
+          const snapshot = token?.marketSnapshots[0];
+          const trustedSnapshot = snapshot?.source === 'seed_synthetic_continuation' ? null : snapshot;
+          const liquidityUsd = quality?.liquidityUsd != null && quality.coverage !== 'unavailable'
+            ? decimal(quality.liquidityUsd) : trustedSnapshot ? decimal(trustedSnapshot.liquidityUsd) : null;
+          const holderCount = quality?.holderCount != null && quality.coverage !== 'unavailable'
+            ? quality.holderCount : trustedSnapshot?.holderCount ?? null;
+          const liquidityAvailable = liquidityUsd !== null;
+          const holdersAvailable = holderCount !== null;
+          const criticalRisk = hasCriticalTokenRisk(token?.riskFlags, quality?.reasonCodes ?? []) || liquidityAvailable && liquidityUsd === 0;
           const candidates: CoreBuyCandidate[] = windowEvents.map((event) => {
             const wallet = event.actorAddress ?? event.fromAddress;
             const ref = monitoredByRef.get(`${chain}:${wallet}`)!;
@@ -1140,6 +1152,7 @@ export class OperatorService {
               amountUsd: decimal(event.amountUsd), amountToken: finiteNumber(event.amountToken),
               entityKey: membership?.entity.entityKey ?? profile?.entityKey ?? null,
               entityLabel: membership?.entity.label ?? null, clusterKey: profile?.cluster.clusterKey ?? null,
+              entityIdentityConfidence: membership?.identityConfidence ?? null,
               evidenceScore: profile?.evidenceScore ?? null,
               historicalAlphaScore: Math.max(profile?.historicalAlphaScore ?? 0, membership?.entity.historicalAlphaScore ?? 0) || null,
               qualityQualified: ref.role === 'core' || Boolean(ref.relation && (ref.relation.route === 'exact_bridge' || ref.relation.confidence >= 0.5) && (!profile || intelligenceQuality >= 50)),
@@ -1149,9 +1162,21 @@ export class OperatorService {
             };
           });
           const evaluation = evaluateCoreBuyWindow(candidates, { criticalRisk, qualityPassed: quality?.passed ?? null });
+          // `firstSeenAt` is FlowRadar discovery time, not necessarily token
+          // creation time. Treating it as launch time can make an old token
+          // discovered during backfill look fresh, so opportunity push uses
+          // only the explicit launch anchor and otherwise fails closed.
+          const birth = token?.tokenCreatedAt ?? null;
+          const tokenAgeSec = birth ? Math.max(0, Math.round((windowEnd.getTime() - birth.getTime()) / 1_000)) : null;
+          const evaluatedAt = new Date();
+          const pushDecision = evaluateCorePushEligibility(evaluation, {
+            evaluatedAt, tokenAgeSec, liquidityUsd, liquidityAvailable, holderCount, holdersAvailable,
+            marketCapUsd: quality?.marketCapUsd != null ? decimal(quality.marketCapUsd) : trustedSnapshot ? decimal(trustedSnapshot.marketCapUsd) : null,
+            tokenQualityPassed: quality?.passed ?? null, tokenQualityScore: quality?.score ?? null,
+            criticalTokenRisk: criticalRisk, infrastructureContamination: false
+          });
           const evaluationByEvent = new Map(evaluation.audits.map((audit) => [audit.eventId, audit]));
           const candidateByEvent = new Map(candidates.map((candidate) => [candidate.eventId, candidate]));
-          const snapshot = token?.marketSnapshots[0];
           for (const event of windowEvents) {
             const audit = evaluationByEvent.get(event.eventId);
             const candidate = candidateByEvent.get(event.eventId);
@@ -1159,11 +1184,12 @@ export class OperatorService {
               tokenAddress, windowStart: evaluation.windowStart, windowEnd: evaluation.windowEnd,
               qualifies: evaluation.qualifies, triggerType: evaluation.triggerType,
               entityKey: candidate?.entityKey ?? null, clusterKey: candidate?.clusterKey ?? null,
-              marketCapUsd: snapshot ? decimal(snapshot.marketCapUsd) : decimal(quality?.marketCapUsd)
+              marketCapUsd: quality?.marketCapUsd != null ? decimal(quality.marketCapUsd) : trustedSnapshot ? decimal(trustedSnapshot.marketCapUsd) : null,
+              evaluation, pushDecision, evaluatedAt, liquidityUsd, liquidityAvailable, holderCount, holdersAvailable,
+              tokenAgeSec, firstObservedAt: event.observedAt, persistedAt: event.createdAt
             });
           }
-          if (!evaluation.qualifies || !evaluation.tier || !evaluation.triggerType || !evaluation.windowStart || !evaluation.windowEnd) continue;
-          const birth = token?.tokenCreatedAt ?? token?.firstSeenAt ?? null;
+          if (!evaluation.windowStart || !evaluation.windowEnd) continue;
           const entryDelaySec = birth ? Math.max(0, Math.round((evaluation.windowStart.getTime() - birth.getTime()) / 1_000)) : null;
           const eventById = new Map(windowEvents.map((event) => [event.eventId, event]));
           const qualifiedEvents = evaluation.sourceEventIds.map((eventId) => eventById.get(eventId)).filter(nonNull);
@@ -1173,60 +1199,81 @@ export class OperatorService {
             source: participant.fundingSource, destination: participant.wallet,
             route: participant.relationshipRoute, confidence: participant.relationshipConfidence
           }] : []);
-          const lifecycleRevision = [evaluation.sourceEventIds.join(','), evaluation.tier, evaluation.rawWalletCount,
-            evaluation.independentEntityCount, evaluation.combinedBuyUsd.toFixed(4)].join('|');
+          const lifecycleRevision = [windowEvents.map((event) => event.eventId).sort().join(','), pushDecision.eligibilityResult,
+            evaluation.qualifyingWalletCount, evaluation.independentEntityCount, evaluation.combinedBuyUsd.toFixed(4),
+            pushDecision.alertScore.toFixed(2)].join('|');
           const payload = {
-            schemaVersion: 2, title: coreConfluenceTitle(evaluation.triggerType), triggerType: evaluation.triggerType,
-            signalTier: evaluation.tier, chain, token: token?.name ?? token?.symbol ?? tokenAddress,
-            symbol: token?.symbol ?? qualifiedEvents[0]?.assetSymbol ?? null, ca: tokenAddress, protocol: token?.dex ?? null,
+            schemaVersion: 3, title: evaluation.triggerType ? coreConfluenceTitle(evaluation.triggerType) : 'Core Buy Candidate',
+            triggerType: evaluation.triggerType, signalTier: pushDecision.signalTier, chain,
+            token: token?.name ?? token?.symbol ?? tokenAddress,
+            symbol: token?.symbol ?? qualifiedEvents[0]?.assetSymbol ?? windowEvents[0]?.assetSymbol ?? null,
+            ca: tokenAddress, protocol: token?.dex ?? null,
             participants: evaluation.participants.map((participant) => ({
               wallet: participant.wallet, role: participant.role, amountUsd: participant.cumulativeBuyUsd,
               amountToken: participant.cumulativeTokenAmount, entityKey: participant.entityKey,
-              entityLabel: participant.entityLabel, clusterKey: participant.clusterKey,
+              entityLabel: participant.entityLabel, entityIdentityConfidence: participant.entityIdentityConfidence,
+              clusterKey: participant.clusterKey,
               evidenceScore: participant.evidenceScore, historicalAlphaScore: participant.historicalAlphaScore,
               relationshipRoute: participant.relationshipRoute, relationshipConfidence: participant.relationshipConfidence,
               fundingSource: participant.fundingSource, dormantDays: participant.dormantDays,
               firstBuyAt: participant.firstBuyAt.toISOString(), lastBuyAt: participant.lastBuyAt.toISOString()
             })),
             wallets: evaluation.participants.map((participant) => participant.wallet), entityKeys, entityLabels,
-            rawWalletCount: evaluation.rawWalletCount, coreWalletCount: evaluation.coreWalletCount,
+            rawWalletCount: evaluation.rawWalletCount, qualifyingWalletCount: evaluation.qualifyingWalletCount,
+            coreWalletCount: evaluation.coreWalletCount,
             relatedWalletCount: evaluation.relatedWalletCount, entityCount: evaluation.entityCount,
             independentEntityCount: evaluation.independentEntityCount,
             sameEntityWalletCount: evaluation.sameEntityWalletCount,
             effectiveConfirmationCount: evaluation.effectiveConfirmationCount,
-            combinedBuyUsd: evaluation.combinedBuyUsd, combinedTokenAmount: evaluation.combinedTokenAmount,
+            entityConcentration: evaluation.entityConcentration, independenceConfidence: evaluation.independenceConfidence,
+            totalBuyUsd: evaluation.totalBuyUsd, combinedBuyUsd: evaluation.combinedBuyUsd,
+            combinedTokenAmount: evaluation.combinedTokenAmount,
             windowMs: evaluation.windowMs, windowStart: evaluation.windowStart.toISOString(), windowEnd: evaluation.windowEnd.toISOString(),
             confidence: evaluation.confidence, historicalAlphaScore: maxOrNull(evaluation.participants.map((participant) => participant.historicalAlphaScore).filter(nonNull)),
             dormantWakeUpCount: evaluation.dormantWakeUpCount,
             maxDormantDays: maxOrNull(evaluation.participants.map((participant) => participant.dormantDays).filter(nonNull)),
             fundingPathCount: evaluation.fundingPathCount, fundingPaths,
-            marketCapUsd: snapshot ? decimal(snapshot.marketCapUsd) : decimal(quality?.marketCapUsd),
-            liquidityUsd: snapshot ? decimal(snapshot.liquidityUsd) : decimal(quality?.liquidityUsd),
-            holderCount: snapshot?.holderCount ?? quality?.holderCount ?? null,
-            marketSnapshotAt: snapshot?.ts.toISOString() ?? quality?.assessedAt.toISOString() ?? null,
-            entryDelaySec, tokenAgeSec: birth ? Math.max(0, Math.round((evaluation.windowEnd.getTime() - birth.getTime()) / 1_000)) : null,
+            marketCapUsd: quality?.marketCapUsd != null ? decimal(quality.marketCapUsd) : trustedSnapshot ? decimal(trustedSnapshot.marketCapUsd) : null,
+            liquidityUsd, liquidityAvailable, holderCount, holdersAvailable,
+            marketSnapshotAt: quality?.assessedAt.toISOString() ?? trustedSnapshot?.ts.toISOString() ?? null,
+            entryDelaySec, tokenAgeSec, tokenLifecycle: pushDecision.tokenLifecycle,
             tokenQualityPassed: quality?.passed ?? null, tokenQualityScore: quality?.score ?? null,
             riskFlags: token?.riskFlags ?? [], criticalRisk,
-            sourceEventIds: evaluation.sourceEventIds, txHashes: uniqueStrings(qualifiedEvents.map((event) => event.txHash)),
-            whyThisMatters: coreConfluenceReason(evaluation), lifecycleRevision,
-            pipeline: { persisted: true, eligibility: 'eligible_cluster_confluence', rejectionReason: null },
-            policy: { version: CORE_ALERT_POLICY_VERSION, minimumQualifyingBuyUsd: MIN_QUALIFYING_BUY_USD, windowMs: CORE_CONFLUENCE_WINDOW_MS }
+            sourceEventIds: windowEvents.map((event) => event.eventId).sort(),
+            qualifyingEventIds: evaluation.sourceEventIds,
+            txHashes: uniqueStrings(qualifiedEvents.map((event) => event.txHash)),
+            whyThisMatters: pushDecision.pushEligible ? coreConfluenceReason(evaluation) : null,
+            alertScore: pushDecision.alertScore, alertScoreContributions: pushDecision.contributions,
+            pushEligible: pushDecision.pushEligible, eligibilityResult: pushDecision.eligibilityResult,
+            acceptedReason: pushDecision.acceptedReason, rejectionReason: pushDecision.rejectionReason,
+            eventTimestamp: evaluation.windowEnd.toISOString(), firstObservedAt: minDate(windowEvents.map((event) => event.observedAt)).toISOString(),
+            persistedAt: minDate(windowEvents.map((event) => event.createdAt)).toISOString(), evaluatedAt: evaluatedAt.toISOString(),
+            dispatchResult: pushDecision.pushEligible ? 'pending' : 'suppressed', lifecycleRevision,
+            pipeline: { persisted: true, eligibility: pushDecision.eligibilityResult, rejectionReason: pushDecision.rejectionReason },
+            policy: {
+              version: CORE_ALERT_POLICY_VERSION, minimumQualifyingBuyUsd: MIN_QUALIFYING_BUY_USD,
+              windowMs: CORE_CONFLUENCE_WINDOW_MS, maxPushEventAgeMs: MAX_PUSH_EVENT_AGE_MS,
+              minimumPushConfidence: MIN_PUSH_CONFIDENCE, minimumPushAlertScore: MIN_PUSH_ALERT_SCORE
+            }
           };
-          const eventKey = `core-confluence-v2:${windowEvents[0]!.eventId}`;
-          const existing = await this.prisma.operatorWatchAlert.findUnique({
-            where: { watchId_eventKey_alertType: { watchId: anchor.id, eventKey, alertType: 'core_multi_wallet_buy' } }
-          });
+          const eventKey = `core-confluence-v3:${windowEvents[0]!.eventId}`;
+          const alertType = pushDecision.pushEligible ? 'core_multi_wallet_buy' : 'core_buy_candidate';
+          const desiredStatus = pushDecision.pushEligible ? 'pending'
+            : pushDecision.eligibilityResult === 'INBOX_ONLY' ? 'inbox_only' : 'rejected';
+          const existing = await this.prisma.operatorWatchAlert.findFirst({ where: { watchId: anchor.id, eventKey } });
           if (!existing) {
-            await this.prisma.operatorWatchAlert.create({ data: { watchId: anchor.id, eventKey, alertType: 'core_multi_wallet_buy', payloadJson: json(payload) } });
-            created += 1;
+            await this.prisma.operatorWatchAlert.create({ data: { watchId: anchor.id, eventKey, alertType, status: desiredStatus, payloadJson: json(payload) } });
+            if (pushDecision.pushEligible) created += 1;
           } else if (objectJson(existing.payloadJson)?.lifecycleRevision !== lifecycleRevision) {
             const existingPayload = objectJson(existing.payloadJson) ?? {};
             const deliveryReceipt = objectJson(existingPayload.deliveryReceipt as Prisma.JsonValue);
+            if (existing.status === 'sent' && !pushDecision.pushEligible) continue;
             await this.prisma.operatorWatchAlert.update({
               where: { id: existing.id },
               data: {
+                alertType,
                 payloadJson: json({ ...payload, ...(deliveryReceipt ? { deliveryReceipt } : {}) }), lastError: null,
-                status: existing.status === 'sent' ? 'update_pending' : existing.status === 'failed' ? 'pending' : existing.status
+                status: pushDecision.pushEligible ? existing.status === 'sent' ? 'update_pending' : 'pending' : desiredStatus
               }
             });
           }
@@ -1236,7 +1283,72 @@ export class OperatorService {
     return created;
   }
 
-  async pendingWatchAlerts(limit = 100) { return this.prisma.operatorWatchAlert.findMany({ where: { status: { in: ['pending', 'retryable', 'update_pending'] } }, include: { watch: true }, orderBy: { createdAt: 'asc' }, take: Math.max(1, Math.min(limit, 1_000)) }); }
+  async pendingWatchAlerts(limit = 100) { return this.prisma.operatorWatchAlert.findMany({ where: { status: { in: ['pending', 'retryable', 'update_pending'] }, watch: { active: true } }, include: { watch: true }, orderBy: { createdAt: 'asc' }, take: Math.max(1, Math.min(limit, 1_000)) }); }
+
+  async prepareWatchAlertForDispatch(id: string, now = new Date()) {
+    const alert = await this.prisma.operatorWatchAlert.findUnique({ where: { id }, include: { watch: true } });
+    if (!alert || alert.watch.targetType !== 'core_wallet') return Boolean(alert);
+    const payload = objectJson(alert.payloadJson) ?? {};
+    let reason: ReturnType<typeof validateCorePushPayload> = null;
+    if (alert.alertType === 'dormant_wallet_reactivated') {
+      const occurredAt = typeof payload.occurredAt === 'string' ? new Date(payload.occurredAt) : null;
+      if (!occurredAt || Number.isNaN(occurredAt.getTime()) || now.getTime() - occurredAt.getTime() > MAX_PUSH_EVENT_AGE_MS) {
+        reason = 'stale_event_not_push_eligible';
+      }
+    } else if (alert.alertType === 'core_multi_wallet_buy') {
+      reason = validateCorePushPayload(payload, now);
+    } else {
+      reason = 'duplicate_signal_lifecycle';
+    }
+    if (!reason) return true;
+    const inboxOnly = reason === 'confidence_below_push_threshold' || reason === 'liquidity_unavailable_fail_closed' || reason === 'token_age_unavailable';
+    const nextPayload = {
+      ...payload, pushEligible: false, eligibilityResult: inboxOnly ? 'INBOX_ONLY' : 'REJECTED',
+      rejectionReason: reason, dispatchResult: 'suppressed', dispatchEvaluatedAt: now.toISOString()
+    };
+    await this.prisma.operatorWatchAlert.update({
+      where: { id }, data: { status: inboxOnly ? 'inbox_only' : 'rejected', lastError: reason, payloadJson: json(nextPayload) }
+    });
+    await updateCoreEventDispatchReceipts(this.prisma, nextPayload, { status: 'suppressed', reason, at: now });
+    return false;
+  }
+
+  async alertInbox(userId: string, chatId: string, filter: AlertInboxFilter = 'push', page = 1, pageSize = 5): Promise<OperatorPage<AlertInboxItem>> {
+    const where: Prisma.OperatorWatchAlertWhereInput = { watch: { userId, chatId } };
+    if (filter === 'push') where.status = { in: ['pending', 'retryable', 'update_pending', 'sent'] };
+    else if (filter === 'inbox') where.status = 'inbox_only';
+    else if (filter === 'rejected') where.status = { in: ['rejected', 'failed'] };
+    else if (filter === 'dormant') where.alertType = 'dormant_wallet_reactivated';
+    else if (filter === 'independent') where.payloadJson = { path: ['triggerType'], equals: 'multi_entity_confluence' };
+    else where.alertType = { in: ['core_multi_wallet_buy', 'core_buy_candidate'] };
+    const size = Math.max(1, Math.min(10, boundedPageSize(pageSize)));
+    const [total, rows] = await Promise.all([
+      this.prisma.operatorWatchAlert.count({ where }),
+      this.prisma.operatorWatchAlert.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip: offset(page, size), take: size })
+    ]);
+    const items = rows.map((row): AlertInboxItem => {
+      const payload = objectJson(row.payloadJson) ?? {};
+      const trigger = typeof payload.triggerType === 'string' ? payload.triggerType : null;
+      const category: AlertInboxItem['category'] = row.status === 'rejected' || row.status === 'failed' ? 'rejected'
+        : row.status === 'inbox_only' ? 'inbox'
+          : row.alertType === 'dormant_wallet_reactivated' ? 'dormant'
+            : trigger === 'multi_entity_confluence' ? 'independent'
+              : row.alertType === 'core_multi_wallet_buy' ? 'cluster' : 'push';
+      const timestamp = [payload.eventTimestamp, payload.occurredAt, payload.windowEnd]
+        .find((value): value is string => typeof value === 'string') ?? row.createdAt.toISOString();
+      return {
+        id: row.id, category, status: row.status,
+        token: stringJson(payload.symbol) ?? stringJson(payload.token) ?? stringJson(payload.ca),
+        chain: isChainId(payload.chain) ? payload.chain : null,
+        qualifyingWalletCount: finiteJsonNumber(payload.qualifyingWalletCount) ?? 0,
+        independentEntityCount: finiteJsonNumber(payload.independentEntityCount) ?? 0,
+        amountUsd: finiteJsonNumber(payload.combinedBuyUsd), signalTier: stringJson(payload.signalTier),
+        rejectionReason: stringJson(payload.rejectionReason) ?? stringJson(objectJson(payload.pipeline as Prisma.JsonValue)?.rejectionReason),
+        timestamp
+      };
+    });
+    return pageResult(items, page, size, total, []);
+  }
   async coreMonitoringAlert(alertId: string, userId: string, chatId: string) {
     return this.prisma.operatorWatchAlert.findFirst({
       where: { id: alertId, watch: { userId, chatId, targetType: 'core_wallet' } }, include: { watch: true }
@@ -1263,16 +1375,19 @@ export class OperatorService {
     const payload = objectJson(alert.payloadJson) ?? {};
     const prior = objectJson(payload.deliveryReceipt as Prisma.JsonValue) ?? {};
     const attempts = Number(prior.attempts);
+    const attemptedAt = new Date();
+    const nextPayload = {
+      ...payload,
+      deliveryReceipt: {
+        ...prior, attempts: Number.isFinite(attempts) ? attempts + 1 : 1,
+        dispatchAttemptedAt: attemptedAt.toISOString(), status: 'attempted'
+      }
+    };
     await this.prisma.operatorWatchAlert.update({
       where: { id },
-      data: { payloadJson: json({
-        ...payload,
-        deliveryReceipt: {
-          ...prior, attempts: Number.isFinite(attempts) ? attempts + 1 : 1,
-          dispatchAttemptedAt: new Date().toISOString(), status: 'attempted'
-        }
-      }) }
+      data: { payloadJson: json(nextPayload) }
     });
+    await updateCoreEventDispatchReceipts(this.prisma, nextPayload, { status: 'attempted', reason: null, at: attemptedAt });
   }
 
   async markWatchAlert(id: string, error?: string, receipt?: { telegramMessageId?: number; telegramChatId?: number }) {
@@ -1292,6 +1407,10 @@ export class OperatorService {
       data: error
         ? { status: 'retryable', lastError: error.slice(0, 1_000), payloadJson: json({ ...payload, deliveryReceipt }) }
         : { status: 'sent', sentAt: now, lastError: null, payloadJson: json({ ...payload, deliveryReceipt }) }
+    });
+    await updateCoreEventDispatchReceipts(this.prisma, payload, {
+      status: error ? 'failed' : 'delivered', reason: error ?? null, at: now,
+      telegramMessageId: error ? null : receipt?.telegramMessageId ?? null
     });
   }
   async stopTelegramDelivery(chatId: string, error: string) {
@@ -1360,6 +1479,7 @@ function decimal(value: Prisma.Decimal | number | string | null | undefined) { i
 function maxOrNull(values: number[]) { const finite = values.filter(Number.isFinite); return finite.length ? Math.max(...finite) : null; }
 function latestIso(values: Date[]) { return values.length ? new Date(Math.max(...values.map((value) => value.getTime()))).toISOString() : null; }
 function maxDate(left: Date, right: Date) { return left.getTime() >= right.getTime() ? left : right; }
+function minDate(values: Date[]) { return new Date(Math.min(...values.map((value) => value.getTime()))); }
 function normalizeConfidence(value: number) { return Math.max(0, Math.min(1, value > 1 ? value / 100 : value)); }
 function json(value: unknown): Prisma.InputJsonValue { return value as Prisma.InputJsonValue; }
 function providerEntryTime(value: Prisma.JsonValue | null): string | null {
@@ -1444,6 +1564,9 @@ async function persistCoreBuyAudit(
     tokenAddress: string; windowStart: Date | null; windowEnd: Date | null; qualifies: boolean;
     triggerType: ReturnType<typeof evaluateCoreBuyWindow>['triggerType']; entityKey: string | null;
     clusterKey: string | null; marketCapUsd: number | null;
+    evaluation: ReturnType<typeof evaluateCoreBuyWindow>; pushDecision: CorePushDecision; evaluatedAt: Date;
+    liquidityUsd: number | null; liquidityAvailable: boolean; holderCount: number | null; holdersAvailable: boolean;
+    tokenAgeSec: number | null; firstObservedAt: Date; persistedAt: Date;
   }
 ) {
   const metadata = objectJson(event.metadataJson) ?? {};
@@ -1451,9 +1574,28 @@ async function persistCoreBuyAudit(
     policyVersion: CORE_ALERT_POLICY_VERSION, minimumQualifyingBuyUsd: MIN_QUALIFYING_BUY_USD,
     confluenceWindowMs: CORE_CONFLUENCE_WINDOW_MS, wallet: audit.wallet, entityKey: context.entityKey,
     clusterKey: context.clusterKey, tokenAddress: context.tokenAddress, amountUsd: decimal(event.amountUsd),
-    marketCapUsd: context.marketCapUsd, timestamp: event.ts.toISOString(), transaction: event.txHash,
+    marketCapUsd: context.marketCapUsd, liquidityUsd: context.liquidityUsd,
+    liquidityAvailable: context.liquidityAvailable, holderCount: context.holderCount,
+    holdersAvailable: context.holdersAvailable, tokenAgeSec: context.tokenAgeSec,
+    chainEventTimestamp: event.ts.toISOString(), firstObservedAt: context.firstObservedAt.toISOString(),
+    persistedAt: context.persistedAt.toISOString(), eligibilityEvaluatedAt: context.evaluatedAt.toISOString(),
+    transaction: event.txHash,
     cumulativeWalletBuyUsd: audit.cumulativeWalletBuyUsd, eligibility: audit.eligibility,
-    rejectionReason: audit.rejectionReason, confluenceQualified: context.qualifies,
+    rawWalletCount: context.evaluation.rawWalletCount,
+    qualifyingWalletCount: context.evaluation.qualifyingWalletCount,
+    coreWalletCount: context.evaluation.coreWalletCount,
+    entityCount: context.evaluation.entityCount,
+    independentEntityCount: context.evaluation.independentEntityCount,
+    sameEntityWalletCount: context.evaluation.sameEntityWalletCount,
+    effectiveConfirmationCount: context.evaluation.effectiveConfirmationCount,
+    totalBuyUsd: context.evaluation.totalBuyUsd, qualifyingBuyUsd: context.evaluation.combinedBuyUsd,
+    confidence: context.evaluation.confidence, alertScore: context.pushDecision.alertScore,
+    alertScoreContributions: context.pushDecision.contributions,
+    eligibilityResult: audit.eligibility === 'rejected' ? 'REJECTED' : context.pushDecision.eligibilityResult,
+    acceptedReason: audit.eligibility === 'rejected' ? null : context.pushDecision.acceptedReason,
+    rejectionReason: audit.rejectionReason ?? context.pushDecision.rejectionReason,
+    dispatchResult: context.pushDecision.pushEligible && audit.eligibility !== 'rejected' ? 'pending' : 'suppressed',
+    telegramMessageId: null, confluenceQualified: context.qualifies,
     triggerType: context.triggerType, windowStart: context.windowStart?.toISOString() ?? null,
     windowEnd: context.windowEnd?.toISOString() ?? null
   };
@@ -1508,6 +1650,35 @@ function objectJson(value: Prisma.JsonValue): Record<string, unknown> | null {
 function finiteJsonNumber(value: unknown): number | null {
   const number = typeof value === 'number' || typeof value === 'string' ? Number(value) : Number.NaN;
   return Number.isFinite(number) ? number : null;
+}
+function stringJson(value: unknown) { return typeof value === 'string' && value.length ? value : null; }
+function isChainId(value: unknown): value is ChainId { return typeof value === 'string' && ALL_CHAINS.includes(value as ChainId); }
+async function updateCoreEventDispatchReceipts(
+  prisma: PrismaClient,
+  payload: Record<string, unknown>,
+  receipt: { status: string; reason: string | null; at: Date; telegramMessageId?: number | null }
+) {
+  const receiptEventIds = Array.isArray(payload.qualifyingEventIds) ? payload.qualifyingEventIds : payload.sourceEventIds;
+  const eventIds = Array.isArray(receiptEventIds)
+    ? receiptEventIds.filter((value): value is string => typeof value === 'string').slice(0, 100)
+    : [];
+  if (!eventIds.length) return;
+  const events = await prisma.massTransactionEvent.findMany({ where: { eventId: { in: eventIds } }, select: { eventId: true, metadataJson: true } });
+  for (const event of events) {
+    const metadata = objectJson(event.metadataJson) ?? {};
+    const audit = objectJson(metadata.coreAlertAudit as Prisma.JsonValue);
+    if (!audit) continue;
+    await prisma.massTransactionEvent.update({
+      where: { eventId: event.eventId },
+      data: { metadataJson: json({
+        ...metadata,
+        coreAlertAudit: {
+          ...audit, dispatchResult: receipt.status, dispatchReason: receipt.reason,
+          dispatchTimestamp: receipt.at.toISOString(), telegramMessageId: receipt.telegramMessageId ?? null
+        }
+      }) }
+    });
+  }
 }
 function transactionExplorer(chain: ChainId, txHash: string) {
   const bases: Record<ChainId, string> = {

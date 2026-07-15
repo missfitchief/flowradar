@@ -4,11 +4,11 @@ import { parseCoreAlertCallback, renderCoreMonitoringAlert } from '../src/coreAl
 const ALERT = {
   id: 'cluster-alert-1', alertType: 'core_multi_wallet_buy', payloadJson: {
     signalTier: 'STRONG_WATCH', chain: 'SOLANA', protocol: 'Raydium', token: 'Example Token', symbol: 'TOKEN',
-    ca: 'TokenContractAddress', rawWalletCount: 3, coreWalletCount: 2, relatedWalletCount: 1,
+    ca: 'TokenContractAddress', rawWalletCount: 3, qualifyingWalletCount: 3, coreWalletCount: 2, relatedWalletCount: 1,
     entityCount: 2, independentEntityCount: 2, sameEntityWalletCount: 2, effectiveConfirmationCount: 2,
     combinedBuyUsd: 2_940, combinedTokenAmount: 18.42, windowMs: 7 * 60_000,
-    marketCapUsd: 184_000, liquidityUsd: 71_400, holderCount: 428, entryDelaySec: 261,
-    historicalAlphaScore: 91, dormantWakeUpCount: 1, maxDormantDays: 214, confidence: 0.82,
+    marketCapUsd: 184_000, liquidityUsd: 71_400, liquidityAvailable: true, holderCount: 428, holdersAvailable: true, entryDelaySec: 261,
+    historicalAlphaScore: 91, dormantWakeUpCount: 1, maxDormantDays: 214, confidence: 0.82, alertScore: 88,
     whyThisMatters: '2 independent high-alpha entities entered within 7 minutes. One dormant Core wallet activated after 214 days.',
     entityLabels: ['Alpha Entity', 'Dormant Entity'],
     participants: [
@@ -25,7 +25,7 @@ describe('Core confluence Telegram alert', () => {
 
     expect(rendered.text).toContain('CLUSTER BUY');
     expect(rendered.text).toContain('Raydium');
-    expect(rendered.text).toContain('3</b> tracked wallets / <b>2</b> independent entities');
+    expect(rendered.text).toContain('3</b> qualified wallets · <b>2</b> independent entities');
     expect(rendered.text).toContain('Cluster bought <b>18.42 TOKEN ($2.94K)</b> at MC <b>$184K</b>');
     expect(rendered.text).toContain('Signal: <b>STRONG WATCH</b>');
     expect(rendered.text).toContain('<code>TokenContractAddress</code>');
@@ -60,5 +60,14 @@ describe('Core confluence Telegram alert', () => {
     });
     expect(rendered.text).toContain('DORMANT WALLET AWAKENED');
     expect(rendered.text).toContain('not a token buy opportunity');
+  });
+
+  it('never renders unavailable liquidity or holder coverage as zero', () => {
+    const rendered = renderCoreMonitoringAlert({
+      ...ALERT,
+      payloadJson: { ...ALERT.payloadJson, liquidityUsd: 0, liquidityAvailable: false, holderCount: 0, holdersAvailable: false }
+    });
+    expect(rendered.text).not.toContain('Liquidity: <b>$0');
+    expect(rendered.text).not.toContain('Holders: <b>0');
   });
 });

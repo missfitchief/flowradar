@@ -1,5 +1,6 @@
 import {
   OperatorService,
+  type AlertInboxFilter,
   type CoreWalletListItem,
   type InvestigationDeployment,
   type InvestigationMember,
@@ -19,6 +20,7 @@ import type { InlineKeyboard, TelegramApi, TelegramCallbackQuery, TelegramMessag
 const COMMANDS = [
   { command: 'list', description: 'Core wallet monitoring' }, { command: 'add', description: 'Add a Core wallet' },
   { command: 'remove', description: 'Remove a Core wallet' },
+  { command: 'alerts', description: 'Production alert inbox' },
   { command: 'wallet', description: 'Unified wallet investigation' }, { command: 'token', description: 'Token + top-PnL wallets' },
   { command: 'profitable', description: 'Automatic profitable wallets' }, { command: 'entity', description: 'Investigation cluster wallets' },
   { command: 'flow', description: 'Investigation capital paths' }, { command: 'bridges', description: 'Verified investigation bridges' },
@@ -70,6 +72,11 @@ async function handleMessage(service: OperatorService, api: TelegramApi, allowed
       if (command === 'list') {
         await service.clearPendingSession(userId, chatId);
         await sendCorePanel(service, api, userId, chatId);
+        return;
+      }
+      if (command === 'alerts') {
+        await service.clearPendingSession(userId, chatId);
+        await sendAlertInbox(service, api, userId, chatId);
         return;
       }
       if (command === 'add' || command === 'remove') {
@@ -193,6 +200,21 @@ async function handleCallback(service: OperatorService, api: TelegramApi, allowe
   if (!session) { await api.answerCallbackQuery(query.id, 'Session expired. Run the command again.'); return; }
   const state = session.stateJson as unknown as OperatorSessionState;
   try {
+    if (session.workflow === 'alerts') {
+      if (parsed.action === 'alertfilter') {
+        state.alertFilter = alertFilter(parsed.value);
+        state.page = 1;
+      } else if (parsed.action === 'page') {
+        state.page = Math.max(1, Number(parsed.value) || 1);
+      } else {
+        throw new Error('Alert inbox action je istekla.');
+      }
+      await service.updateSession(session.id, userId, chatId, state);
+      const rendered = await renderAlertInbox(service, userId, chatId, state, session.id);
+      await editIfChanged(api, query, rendered.text, rendered.keyboard);
+      await api.answerCallbackQuery(query.id);
+      return;
+    }
     if (session.workflow === 'core') {
       if (parsed.action === 'corewallet') {
         const item = await service.coreWalletAt(userId, chatId, Math.max(0, Number(parsed.value) || 0));
@@ -369,6 +391,48 @@ async function sendCorePanel(service: OperatorService, api: TelegramApi, userId:
   const session = await service.createSession(userId, chatId, 'core', state, 24 * 60);
   const rendered = await renderCorePanel(service, userId, chatId, state, session.id);
   await api.sendMessage(chatId, rendered.text, rendered.keyboard);
+}
+
+async function sendAlertInbox(service: OperatorService, api: TelegramApi, userId: string, chatId: string) {
+  const state: OperatorSessionState = { page: 1, pageSize: 5, alertFilter: 'push' };
+  const session = await service.createSession(userId, chatId, 'alerts', state, 24 * 60);
+  const rendered = await renderAlertInbox(service, userId, chatId, state, session.id);
+  await api.sendMessage(chatId, rendered.text, rendered.keyboard);
+}
+
+async function renderAlertInbox(
+  service: OperatorService,
+  userId: string,
+  chatId: string,
+  state: OperatorSessionState,
+  sessionId: string
+): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const filter = state.alertFilter ?? 'push';
+  const page = Math.max(1, state.page || 1);
+  const result = await service.alertInbox(userId, chatId, filter, page, 5);
+  const filters: Array<[string, AlertInboxFilter]> = [
+    ['Push', 'push'], ['Inbox only', 'inbox'], ['Rejected', 'rejected'],
+    ['Dormant', 'dormant'], ['Cluster', 'cluster'], ['Independent', 'independent']
+  ];
+  const filterRows = [filters.slice(0, 3), filters.slice(3)].map((row) => row.map(([label, value]) => ({
+    text: `${filter === value ? '• ' : ''}${label}`, callback_data: callback('alertfilter', sessionId, value)
+  })));
+  const navigation = [];
+  if (page > 1) navigation.push({ text: '‹ Previous', callback_data: callback('page', sessionId, String(page - 1)) });
+  if (result.hasNext) navigation.push({ text: 'Next ›', callback_data: callback('page', sessionId, String(page + 1)) });
+  return {
+    text: [
+      '🚨 <b>ALERT INBOX</b>',
+      `${h(alertFilterLabel(filter))}  ·  <b>${result.total}</b>  ·  Page <b>${page}</b>`, '',
+      ...(result.items.length ? result.items.map((item, index) => [
+        `${alertInboxIcon(item.category)} <b>${(page - 1) * result.pageSize + index + 1}. ${h(item.token ?? 'Unknown token')}</b>${item.chain ? ` · ${h(item.chain)}` : ''}`,
+        `${item.qualifyingWalletCount} wallets · ${item.independentEntityCount} independent entities${item.amountUsd == null ? '' : ` · ${plainMoney(item.amountUsd)}`}`,
+        item.rejectionReason ? `Reason: <code>${h(item.rejectionReason)}</code>` : `Signal: <b>${h(prettyLabel(item.signalTier ?? item.status))}</b>`,
+        `<i>${h(relativeAlertTime(item.timestamp))}</i>`
+      ].join('\n')) : ['No alert receipts in this category.'])
+    ].join('\n\n'),
+    keyboard: { inline_keyboard: [...filterRows, ...(navigation.length ? [navigation] : [])] }
+  };
 }
 
 async function addCoreAndQueue(service: OperatorService, api: TelegramApi, userId: string, chatId: string, address: string) {
@@ -1215,6 +1279,22 @@ function investigationView(value: string): NonNullable<OperatorSessionState['inv
 function coreView(value: string): NonNullable<OperatorSessionState['coreView']> {
   return value === 'activity' || value === 'capital' || value === 'entity' ? value : 'detail';
 }
+function alertFilter(value: string): AlertInboxFilter {
+  return value === 'inbox' || value === 'rejected' || value === 'dormant' || value === 'cluster' || value === 'independent' ? value : 'push';
+}
+function alertFilterLabel(value: AlertInboxFilter) {
+  return ({ push: 'Push alerts', inbox: 'Inbox only', rejected: 'Rejected', dormant: 'Dormant wake-ups', cluster: 'Cluster confluence', independent: 'Independent entity confluence' } as const)[value];
+}
+function alertInboxIcon(value: string) { return value === 'rejected' ? '⚪' : value === 'inbox' ? '🔵' : value === 'dormant' ? '⚡' : value === 'independent' ? '🟢' : '🟡'; }
+function relativeAlertTime(value: string) {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return value;
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1_000));
+  if (seconds < 60) return 'just now';
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h ago`;
+  return `${Math.floor(seconds / 86_400)}d ago`;
+}
 
 function rememberInvestigationScreen(state: OperatorSessionState) {
   state.investigationPreviousView = state.investigationView ?? 'summary';
@@ -1460,6 +1540,7 @@ function help() {
     '',
     '👁 <b>MONITOR</b>',
     '<code>/list</code>  Core wallet control panel',
+    '<code>/alerts</code>  Production alert inbox',
     '<code>/add</code>  Add Core wallet',
     '<code>/remove</code>  Stop Core monitoring',
     '<code>/watch &lt;wallet-or-entity&gt;</code>',

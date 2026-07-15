@@ -133,7 +133,7 @@ export interface BridgeRow {
   tokenBuy: string | null;
 }
 
-export type OperatorWorkflow = 'wallet' | 'token' | 'profitable' | 'entity' | 'flow' | 'bridges' | 'recent' | 'core' | 'core_add' | 'core_remove';
+export type OperatorWorkflow = 'wallet' | 'token' | 'profitable' | 'entity' | 'flow' | 'bridges' | 'recent' | 'core' | 'alerts' | 'core_add' | 'core_remove';
 
 export type CoreWalletView = 'list' | 'detail' | 'activity' | 'capital' | 'entity' | 'remove_confirm';
 
@@ -176,6 +176,22 @@ export interface CoreWalletCapitalRow {
   tokenBuys: string[];
 }
 
+export type AlertInboxFilter = 'push' | 'inbox' | 'rejected' | 'dormant' | 'cluster' | 'independent';
+
+export interface AlertInboxItem {
+  id: string;
+  category: 'push' | 'inbox' | 'rejected' | 'dormant' | 'cluster' | 'independent';
+  status: string;
+  token: string | null;
+  chain: ChainId | null;
+  qualifyingWalletCount: number;
+  independentEntityCount: number;
+  amountUsd: number | null;
+  signalTier: string | null;
+  rejectionReason: string | null;
+  timestamp: string;
+}
+
 export type OperatorInvestigationView = 'summary' | 'paths' | 'priority' | 'cluster' | 'alts' | 'deployments' | 'evidence'
   | 'bridges' | 'more' | 'advanced' | 'receivers' | 'history' | 'outcomes' | 'watch';
 
@@ -199,4 +215,5 @@ export interface OperatorSessionState {
   coreTarget?: string;
   corePreviousView?: CoreWalletView;
   silentCoreSync?: boolean;
+  alertFilter?: AlertInboxFilter;
 }

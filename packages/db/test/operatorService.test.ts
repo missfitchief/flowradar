@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { CORE_ALERT_POLICY_VERSION, MAX_PUSH_EVENT_AGE_MS } from '@flowradar/core';
 import { prisma } from '../src/client';
 import { OperatorService } from '../src/operator/service';
 
@@ -18,6 +19,7 @@ const TOKEN_METADATA_MISSING = `0x${'cb'.repeat(20)}`;
 const TOKEN_EVENT_ONLY = 'So11111111111111111111111111111111111111112';
 
 async function cleanup() {
+  await prisma.tokenQualityAssessment.deleteMany({ where: { assessmentKey: { startsWith: `${PREFIX}:` } } });
   await prisma.tokenMetadata.deleteMany({ where: { mint: { in: [TOKEN_METADATA_SOL, TOKEN_METADATA_EVM, TOKEN_METADATA_MISSING] } } });
   await prisma.operatorWatchAlert.deleteMany({ where: { watch: { targetKey: { in: [CORE_ADDRESS, CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } } } });
   await prisma.operatorWatch.deleteMany({ where: { targetKey: { in: [CORE_ADDRESS, CORE_CONNECTED, CORE_BRIDGE_CONNECTED] } } });
@@ -127,7 +129,16 @@ describe('OperatorService', () => {
     const service = new OperatorService(prisma);
     const added = await service.addCoreWallet(PREFIX, PREFIX, CORE_ADDRESS);
     const now = new Date(added.watch.updatedAt.getTime() + 10_000);
-    await prisma.token.create({ data: { chain: 'BASE', address: CORE_TOKEN, symbol: 'CORE', name: 'Core Signal Token', decimals: 18, firstSeenAt: now, riskFlags: [] } });
+    await prisma.token.create({ data: { chain: 'BASE', address: CORE_TOKEN, symbol: 'CORE', name: 'Core Signal Token', decimals: 18, firstSeenAt: now, tokenCreatedAt: now, riskFlags: [] } });
+    await prisma.tokenQualityAssessment.upsert({ where: { assessmentKey: `${PREFIX}:core:quality` }, update: {
+      passed: true, score: 90, coverage: 'full', liquidityUsd: 75_000, marketCapUsd: 180_000, holderCount: 420,
+      assessedAt: new Date(now.getTime() - 6_000)
+    }, create: {
+      assessmentKey: `${PREFIX}:core:quality`, chain: 'BASE', tokenAddress: CORE_TOKEN,
+      passed: true, score: 90, coverage: 'full', liquidityUsd: 75_000, marketCapUsd: 180_000, holderCount: 420,
+      riskPenalty: 0, holderDistribution: 'healthy', deployerQuality: 'verified', ownershipStatus: 'renounced',
+      lpStatus: 'locked', tradingBehavior: 'healthy', checksJson: {}, reasonCodes: [], assessedAt: new Date(now.getTime() - 6_000)
+    } });
     await prisma.walletFlowRelationship.create({ data: {
       sourceChain: 'BASE', sourceWallet: CORE_ADDRESS, relatedChain: 'BASE', relatedWallet: CORE_CONNECTED,
       role: 'execution_wallet', route: 'direct_transfer', hops: 1, transferCount: 1,
@@ -153,7 +164,7 @@ describe('OperatorService', () => {
     ] });
 
     expect(await service.materializeWatchAlerts(new Date(now.getTime() - 10_000))).toBe(1);
-    const alerts = await prisma.operatorWatchAlert.findMany({ where: { watchId: added.watch.id } });
+    const alerts = await prisma.operatorWatchAlert.findMany({ where: { watchId: added.watch.id, alertType: 'core_multi_wallet_buy' } });
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({ alertType: 'core_multi_wallet_buy', status: 'pending' });
     expect(alerts[0]?.payloadJson).toMatchObject({
@@ -167,14 +178,21 @@ describe('OperatorService', () => {
     expect((await prisma.massTransactionEvent.findUniqueOrThrow({ where: { eventId: `${PREFIX}:core:solo-buy` } })).metadataJson).toMatchObject({
       coreAlertAudit: { eligibility: 'eligible_for_future_confluence', rejectionReason: 'solo_core_buy_no_confluence', cumulativeWalletBuyUsd: 100 }
     });
+    expect(await prisma.operatorWatchAlert.count({ where: { watchId: added.watch.id, alertType: 'core_buy_candidate', status: 'rejected' } })).toBe(2);
     expect(await service.materializeWatchAlerts(new Date(now.getTime() - 10_000))).toBe(0);
 
     const delivered = alerts[0]!;
     await service.recordWatchAlertDispatchAttempt(delivered.id);
     await service.markWatchAlert(delivered.id, undefined, { telegramMessageId: 456, telegramChatId: 123 });
     expect((await prisma.operatorWatchAlert.findUniqueOrThrow({ where: { id: delivered.id } })).payloadJson).toMatchObject({
-      pipeline: { persisted: true, eligibility: 'eligible_cluster_confluence', rejectionReason: null },
+      pipeline: { persisted: true, eligibility: 'WATCH', rejectionReason: null },
       deliveryReceipt: { attempts: 1, status: 'delivered', telegramMessageId: 456, telegramChatId: 123 }
+    });
+    expect((await prisma.massTransactionEvent.findUniqueOrThrow({ where: { eventId: `${PREFIX}:core:root-buy` } })).metadataJson).toMatchObject({
+      coreAlertAudit: { dispatchResult: 'delivered', telegramMessageId: 456 }
+    });
+    expect((await prisma.massTransactionEvent.findUniqueOrThrow({ where: { eventId: `${PREFIX}:core:bridge-receiver-buy` } })).metadataJson).toMatchObject({
+      coreAlertAudit: { dispatchResult: 'suppressed', rejectionReason: 'below_minimum_buy_threshold' }
     });
 
     await prisma.massTransactionEvent.create({ data: {
@@ -192,7 +210,32 @@ describe('OperatorService', () => {
       rawWalletCount: 2, combinedBuyUsd: 475,
       deliveryReceipt: { telegramMessageId: 456, telegramChatId: 123, status: 'delivered' }
     });
-    expect(await prisma.operatorWatchAlert.count({ where: { watchId: added.watch.id } })).toBe(1);
+    expect(await prisma.operatorWatchAlert.count({ where: { watchId: added.watch.id } })).toBe(3);
+  });
+
+  it('revalidates a durable queue record and moves stale Core alerts into the rejected inbox', async () => {
+    const service = new OperatorService(prisma);
+    const { watch } = await service.addCoreWallet(PREFIX, PREFIX, CORE_ADDRESS);
+    const now = new Date();
+    const queued = await prisma.operatorWatchAlert.create({ data: {
+      watchId: watch.id, eventKey: `${PREFIX}:stale-v3`, alertType: 'core_multi_wallet_buy', status: 'pending',
+      payloadJson: {
+        schemaVersion: 3, pushEligible: true, triggerType: 'multi_entity_confluence', qualifyingWalletCount: 2, independentEntityCount: 2,
+        windowEnd: new Date(now.getTime() - MAX_PUSH_EVENT_AGE_MS - 1).toISOString(), tokenLifecycle: 'fresh_launch',
+        liquidityAvailable: true, liquidityUsd: 50_000, confidence: 0.82, alertScore: 84,
+        policy: { version: CORE_ALERT_POLICY_VERSION }, token: 'STALE', chain: 'BASE', combinedBuyUsd: 300
+      }
+    } });
+
+    expect(await service.prepareWatchAlertForDispatch(queued.id, now)).toBe(false);
+    expect(await prisma.operatorWatchAlert.findUniqueOrThrow({ where: { id: queued.id } })).toMatchObject({
+      status: 'rejected', lastError: 'stale_event_not_push_eligible',
+      payloadJson: expect.objectContaining({ dispatchResult: 'suppressed', rejectionReason: 'stale_event_not_push_eligible' })
+    });
+    const inbox = await service.alertInbox(PREFIX, PREFIX, 'rejected', 1, 5);
+    expect(inbox.items).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: queued.id, token: 'STALE', rejectionReason: 'stale_event_not_push_eligible'
+    })]));
   });
 
   it('returns automatic candidates through bounded profitable pagination', async () => {

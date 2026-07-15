@@ -22,9 +22,10 @@ export function parseCoreAlertCallback(value: string | undefined): { alertId: st
 
 function renderSummary(alertId: string, payload: Record<string, unknown>) {
   const tier = string(payload.signalTier) ?? 'WATCH';
+  const trigger = string(payload.triggerType);
   const symbol = string(payload.symbol) ?? string(payload.token) ?? 'TOKEN';
   const protocol = string(payload.protocol);
-  const rawWallets = number(payload.rawWalletCount) ?? array(payload.wallets).length;
+  const qualifyingWallets = number(payload.qualifyingWalletCount) ?? array(payload.wallets).length;
   const independent = number(payload.independentEntityCount) ?? 0;
   const sameEntity = number(payload.sameEntityWalletCount) ?? 0;
   const combinedUsd = number(payload.combinedBuyUsd);
@@ -33,37 +34,43 @@ function renderSummary(alertId: string, payload: Record<string, unknown>) {
   const entityLabel = entityLabels.length === 1 ? entityLabels[0]
     : independent >= 2 ? `${independent} independent entities` : 'Tracked Core cluster';
   const marketCap = number(payload.marketCapUsd);
-  const liquidity = number(payload.liquidityUsd);
-  const holders = number(payload.holderCount);
+  const liquidity = payload.liquidityAvailable === true ? number(payload.liquidityUsd) : null;
+  const holders = payload.holdersAvailable === true ? number(payload.holderCount) : null;
   const entryDelay = number(payload.entryDelaySec);
   const alpha = number(payload.historicalAlphaScore);
   const dormant = number(payload.dormantWakeUpCount) ?? 0;
   const maxDormantDays = number(payload.maxDormantDays);
   const confidence = number(payload.confidence);
+  const alertScore = number(payload.alertScore);
   const windowMs = number(payload.windowMs);
   const why = string(payload.whyThisMatters);
   const ca = string(payload.ca);
   const chain = string(payload.chain);
   const icon = tier === 'WATCH' ? '🟡' : '🟢';
+  const heading = trigger === 'multi_entity_confluence' ? 'MULTI-ENTITY ENTRY'
+    : trigger === 'funded_execution_buy' ? 'FUNDED EXECUTION BUY'
+      : trigger === 'core_wallet_confluence' ? 'CORE CONFLUENCE'
+        : 'CLUSTER BUY';
   const metrics = [
     entryDelay !== null ? `📊 Entry: <b>${duration(entryDelay)}</b> after launch` : null,
     liquidity !== null ? `💧 Liquidity: <b>${usd(liquidity)}</b>` : null,
     holders !== null ? `👥 Holders: <b>${Math.round(holders).toLocaleString('en-US')}</b>` : null,
     alpha !== null ? `📈 Historical Alpha: <b>${Math.round(alpha)}</b>` : null,
     dormant > 0 ? `⚡ Dormant wake-up: <b>${dormant}</b>${maxDormantDays !== null ? ` · ${Math.round(maxDormantDays)}d max` : ''}` : null,
-    confidence !== null ? `🎯 Confidence: <b>${Math.round(confidence * 100)}%</b>` : null
+    confidence !== null ? `🎯 Confidence: <b>${Math.round(confidence * 100)}%</b>` : null,
+    alertScore !== null ? `🚨 Alert Score: <b>${Math.round(alertScore)}</b>` : null
   ].filter(nonNull);
   const buyDescription = combinedToken !== null
     ? `${quantity(combinedToken)} ${h(symbol)}${combinedUsd !== null ? ` (${usd(combinedUsd)})` : ''}`
     : combinedUsd !== null ? usd(combinedUsd) : null;
   return {
     text: [
-      `${icon} <b>CLUSTER BUY</b>${protocol ? ` on ${h(protocol)}` : ''} · <b>${h(symbol)}</b>`,
+      `${icon} <b>${heading}</b>${protocol ? ` on ${h(protocol)}` : ''} · <b>${h(symbol)}</b>`,
       `🔷 ${h(entityLabel)}`, '',
-      `🔹 <b>${rawWallets}</b> tracked wallets / <b>${independent}</b> independent entities`,
+      `🔹 <b>${qualifyingWallets}</b> qualified wallets · <b>${independent}</b> independent entities`,
       ...(sameEntity > 1 && independent <= 1 ? [`🔹 ${sameEntity} wallets belong to the same entity and count as one independent confirmation.`] : []),
       ...(buyDescription ? [`🔹 Cluster bought <b>${buyDescription}</b>${marketCap !== null ? ` at MC <b>${usd(marketCap)}</b>` : ''}`] : []),
-      ...(windowMs !== null ? [`⏱ Window: <b>${duration(Math.max(1, Math.round(windowMs / 1_000)))}</b>`] : []),
+      ...(windowMs !== null ? [`⏱ Window: <b>${duration(Math.max(0, Math.round(windowMs / 1_000)))}</b>`] : []),
       '', ...metrics,
       ...(why ? ['', '🧠 <b>Why this matters</b>', h(why)] : []),
       '', `${tierIcon(tier)} Signal: <b>${h(tier.replaceAll('_', ' '))}</b>`,
@@ -124,6 +131,7 @@ function renderEntity(alertId: string, payload: Record<string, unknown>) {
   return detail([
     '🧠 <b>ENTITY CONFIRMATION</b>', '',
     `Raw wallets: <b>${number(payload.rawWalletCount) ?? 0}</b>`,
+    `Qualifying wallets: <b>${number(payload.qualifyingWalletCount) ?? 0}</b>`,
     `Core wallets: <b>${number(payload.coreWalletCount) ?? 0}</b>`,
     `Related wallets: <b>${number(payload.relatedWalletCount) ?? 0}</b>`,
     `Entities: <b>${number(payload.entityCount) ?? 0}</b>`,

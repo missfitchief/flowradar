@@ -87,6 +87,55 @@ describe('Telegram command handlers', () => {
     expect(text).not.toContain('Sent 0');
   });
 
+  it('renders the production /alerts inbox with compact receipts and filters', async () => {
+    const api = apiMock();
+    const service = {
+      clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'alerts-session' }),
+      alertInbox: vi.fn().mockResolvedValue({
+        page: 1, pageSize: 5, total: 1, hasNext: false,
+        items: [{
+          id: 'receipt-1', category: 'rejected', status: 'rejected', token: 'OLD', chain: 'SOLANA',
+          qualifyingWalletCount: 1, independentEntityCount: 0, amountUsd: 125, signalTier: null,
+          rejectionReason: 'solo_core_buy_no_confluence', timestamp: '2026-07-14T12:00:00.000Z'
+        }]
+      })
+    } as unknown as OperatorService;
+
+    await createUpdateHandler(service, api, new Set(['123']))({
+      update_id: 24, message: { message_id: 24, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: '/alerts' }
+    });
+
+    expect(service.alertInbox).toHaveBeenCalledWith('123', '123', 'push', 1, 5);
+    const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[0]!;
+    expect(text).toContain('ALERT INBOX');
+    expect(text).toContain('solo_core_buy_no_confluence');
+    expect(text).not.toContain('payloadJson');
+    expect(keyboard?.inline_keyboard.flat().map((button) => button.text)).toEqual([
+      '• Push', 'Inbox only', 'Rejected', 'Dormant', 'Cluster', 'Independent'
+    ]);
+  });
+
+  it('switches /alerts filters and resets pagination without dispatching a push', async () => {
+    const api = apiMock();
+    const service = {
+      clearPendingSession: vi.fn(),
+      getSession: vi.fn().mockResolvedValue({ id: 'alerts-session', workflow: 'alerts', stateJson: { page: 3, pageSize: 5, alertFilter: 'push' } }),
+      updateSession: vi.fn().mockResolvedValue(true),
+      alertInbox: vi.fn().mockResolvedValue({ page: 1, pageSize: 5, total: 0, hasNext: false, items: [] })
+    } as unknown as OperatorService;
+
+    await createUpdateHandler(service, api, new Set(['123']))({
+      update_id: 25, callback_query: {
+        id: 'alerts-filter', from: { id: 123 }, data: 'v1|alertfilter|alerts-session|rejected',
+        message: { message_id: 25, chat: { id: 123, type: 'private' }, text: 'old inbox' }
+      }
+    });
+
+    expect(service.updateSession).toHaveBeenCalledWith('alerts-session', '123', '123', expect.objectContaining({ alertFilter: 'rejected', page: 1 }));
+    expect(service.alertInbox).toHaveBeenCalledWith('123', '123', 'rejected', 1, 5);
+    expect(api.editMessage).toHaveBeenCalledWith('123', 25, expect.stringContaining('Rejected'), expect.any(Object));
+  });
+
   it('adds a Core wallet, starts persisted historical sync, and acknowledges immediately', async () => {
     const api = apiMock();
     const service = {

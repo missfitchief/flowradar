@@ -57,6 +57,10 @@ export async function dispatchWatchAlerts(service: OperatorService, api: Telegra
   }
   for (const alert of await service.pendingWatchAlerts(100)) {
     try {
+      if (!(await service.prepareWatchAlertForDispatch(alert.id))) {
+        log.info(`[core-alert-pipeline] ${JSON.stringify({ stage: 'dispatch_suppressed', alertId: alert.id, alertType: alert.alertType })}`);
+        continue;
+      }
       await service.recordWatchAlertDispatchAttempt(alert.id);
       log.info(`[core-alert-pipeline] ${JSON.stringify({ stage: 'dispatch_attempted', alertId: alert.id, alertType: alert.alertType })}`);
       const payload = alert.payloadJson as Record<string, unknown>;
