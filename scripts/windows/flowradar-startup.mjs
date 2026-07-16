@@ -19,12 +19,15 @@ function log(message) {
 }
 
 async function startRole(role, readiness, timeoutMs = 120_000) {
-  const healthy = async () => {
+  const supervisorFresh = () => {
     const state = readState(role);
     if (!state || !roleSupervisorAlive(role, state)) return false;
     const heartbeatAt = Date.parse(state.heartbeatAt ?? state.updatedAt ?? '');
-    if (!Number.isFinite(heartbeatAt) || Date.now() - heartbeatAt > 45_000) return false;
-    return Boolean(await readiness(state));
+    return Number.isFinite(heartbeatAt) && Date.now() - heartbeatAt <= 45_000;
+  };
+  const healthy = async () => {
+    if (!supervisorFresh()) return false;
+    return Boolean(await readiness(readState(role)));
   };
 
   if (await healthy()) {
@@ -33,16 +36,26 @@ async function startRole(role, readiness, timeoutMs = 120_000) {
     return state;
   }
 
-  const previous = readState(role);
-  if (roleSupervisorAlive(role, previous)) {
+  if (supervisorFresh()) {
     // Allow a transient child restart to recover before replacing the whole
-    // supervisor. This path is never taken for a healthy component.
+    // supervisor. External probes can fail temporarily even while the local
+    // supervisor and child are healthy, so a fresh heartbeat is never killed
+    // merely because a readiness probe timed out.
     const recovered = await waitFor(healthy, 15_000, 1_000);
     if (recovered) {
       const state = readState(role);
       log(`recovered role=${role} supervisorPid=${state.supervisorPid}; task restart skipped`);
       return state;
     }
+    const state = readState(role);
+    if (supervisorFresh()) {
+      log(`readiness degraded role=${role} supervisorPid=${state.supervisorPid}; fresh supervisor retained`);
+      throw new Error(`${role} readiness check failed while supervisor heartbeat remained fresh`);
+    }
+  }
+
+  const previous = readState(role);
+  if (roleSupervisorAlive(role, previous)) {
     log(`stale or unhealthy role=${role} supervisorPid=${previous.supervisorPid}; replacing supervisor`);
     stopProcessTree(Number(previous.supervisorPid));
     await waitFor(() => !processAlive(Number(previous.supervisorPid)), 10_000, 250);
