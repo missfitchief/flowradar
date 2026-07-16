@@ -379,8 +379,8 @@ describe('Telegram command handlers', () => {
     } as unknown as OperatorService;
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 9, message: { message_id: 9, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
     expect(vi.mocked(api.sendMessage).mock.calls[0]?.[1]).toContain('Token received. Analysis started');
-    expect(vi.mocked(api.sendMessage).mock.calls[1]?.[1]).toContain('No top-PnL wallets were found for this token.');
-    expect(service.tokenSummary).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.sendMessage).mock.calls[1]?.[1]).toContain('No validated trader wallets found.');
+    expect(service.tokenSummary).toHaveBeenCalledTimes(1);
     expect(service.scanTokenTopPnl).toHaveBeenCalledWith(ADDRESS);
   });
 
@@ -390,16 +390,17 @@ describe('Telegram command handlers', () => {
     const daysAgo = (days: number) => new Date(now - days * 86_400_000).toISOString();
     const hoursAgo = (hours: number) => new Date(now - hours * 3_600_000).toISOString();
     const rows = [
-      { walletAddress: 'WalletOneFullAddress', qualityScore: 94, roi: 6.4, realizedPnlUsd: 125_400, boughtUsd: 20_000, soldUsd: 10_000, remainingPositionUsd: 10_000, firstBuyTs: daysAgo(45), firstSellTs: null, lastActivityTs: daysAgo(45), repeatRunnerCount: 3, confidence: 0.91, entityKey: 'entity:one', role: 'trader' },
-      { walletAddress: 'WalletTwoFullAddress', qualityScore: 88, roi: 3.1, realizedPnlUsd: 88_200, boughtUsd: 12_000, soldUsd: null, remainingPositionUsd: null, firstBuyTs: hoursAgo(2), firstSellTs: null, lastActivityTs: hoursAgo(2), repeatRunnerCount: 0, confidence: 0.86, entityKey: 'entity:two', role: 'execution_wallet' },
-      { walletAddress: 'WalletThreeFullAddress', qualityScore: 85, roi: 2.2, realizedPnlUsd: 54_000, boughtUsd: 9_000, soldUsd: null, remainingPositionUsd: null, firstBuyTs: daysAgo(214), firstSellTs: null, lastActivityTs: daysAgo(214), repeatRunnerCount: 1, confidence: 0.8, entityKey: 'entity:three', role: 'trader' },
-      { walletAddress: 'WalletFourFullAddress', qualityScore: 72, roi: 1.1, realizedPnlUsd: 20_000, boughtUsd: null, soldUsd: null, remainingPositionUsd: null, firstBuyTs: null, firstSellTs: null, lastActivityTs: null, repeatRunnerCount: 0, confidence: 0.7, entityKey: 'entity:four', role: 'funder_wallet' },
-      { walletAddress: 'WalletFiveFullAddress', qualityScore: 61, roi: 0.8, realizedPnlUsd: 8_000, boughtUsd: 5_000, soldUsd: 8_000, remainingPositionUsd: 0, firstBuyTs: daysAgo(9), firstSellTs: daysAgo(4), lastActivityTs: daysAgo(4), repeatRunnerCount: 0, confidence: 0.6, entityKey: 'entity:five', role: 'trader' },
+      { walletAddress: 'WalletOneFullAddress', qualityScore: 94, medianRoi: 1.84, realizedPnlUsd: 125_400, status: 'Holding', lastActivityTs: daysAgo(45), alphaConfidence: 0.91, alphaSampleSize: 28, winRate: 0.72, relatedWalletCount: 2, finalRankingScore: 92, entityKey: 'entity:one' },
+      { walletAddress: 'WalletTwoFullAddress', qualityScore: 88, medianRoi: 0.96, realizedPnlUsd: 88_200, status: 'Active Trader', lastActivityTs: hoursAgo(2), alphaConfidence: 0.66, alphaSampleSize: 11, winRate: 0.64, relatedWalletCount: 0, finalRankingScore: 86, entityKey: 'entity:two' },
+      { walletAddress: 'WalletThreeFullAddress', qualityScore: 85, medianRoi: 0.82, realizedPnlUsd: 54_000, status: 'Dormant', lastActivityTs: daysAgo(214), alphaConfidence: 0.8, alphaSampleSize: 18, winRate: 0.61, relatedWalletCount: 0, finalRankingScore: 84, entityKey: 'entity:three' },
+      { walletAddress: 'WalletFourFullAddress', qualityScore: 72, medianRoi: 0.55, realizedPnlUsd: 20_000, status: 'Unknown', lastActivityTs: null, alphaConfidence: 0.5, alphaSampleSize: 4, winRate: 0.5, relatedWalletCount: 0, finalRankingScore: 70, entityKey: 'entity:four' },
+      { walletAddress: 'WalletFiveFullAddress', qualityScore: 61, medianRoi: 0.4, realizedPnlUsd: 8_000, status: 'Exited', lastActivityTs: daysAgo(4), alphaConfidence: 0.4, alphaSampleSize: 3, winRate: 0.5, relatedWalletCount: 0, finalRankingScore: 62, entityKey: 'entity:five' },
       { walletAddress: 'WalletSixHiddenAddress', qualityScore: 55, roi: 0.4, realizedPnlUsd: 2_000, boughtUsd: 4_000, soldUsd: null, remainingPositionUsd: null, firstBuyTs: daysAgo(3), firstSellTs: null, lastActivityTs: daysAgo(3), repeatRunnerCount: 0, confidence: 0.4, entityKey: null, role: 'trader' }
-    ].map((row) => ({ chain: 'SOLANA', validation: 'provider_only', dormancy: null, ...row }));
+    ].map((row) => ({ chain: 'SOLANA', validation: 'validated_trader', dormancy: null, ...row }));
     const summary = {
       tokens: [{ symbol: 'ALPHA', name: 'Alpha Token' }], metadata: [],
-      topPnl: { items: rows, page: 1, pageSize: 10, total: rows.length, hasNext: false }
+      candidateSelection: { candidatesAnalyzed: 50, infrastructureExcluded: 31, exchangeExcluded: 4, ownershipUnverified: 7, unreliablePnl: 2, validatedTraders: 12, probableTraders: 1, uniqueEntities: 7, cohort: { medianAlpha: 87, medianRoi: 1.84, active: 1, dormant: 1, holding: 1 } },
+      topPnl: { items: rows.slice(0, 5), page: 1, pageSize: 10, total: 5, hasNext: false }
     };
     const service = {
       validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(), createSession: vi.fn().mockResolvedValue({ id: 'compact-token-session' }),
@@ -409,25 +410,24 @@ describe('Telegram command handlers', () => {
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 97, message: { message_id: 97, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
 
     const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[1]!;
-    expect(text).toContain('🎯 <b>TOKEN SUMMARY</b>');
+    expect(text).toContain('🎯 <b>TOKEN INTELLIGENCE</b>');
     expect(text).toContain('<b>ALPHA</b>');
-    expect(text).toContain('Wallets analyzed  <b>6</b>');
-    expect(text).toContain('Average Alpha');
-    expect(text).toContain('Average ROI');
-    expect(text).toContain('Dormant insiders');
-    expect(text).toContain('Active buyers');
-    expect(text).toContain('Strong entities');
+    expect(text).toContain('<b>50</b> candidates analyzed');
+    expect(text).toContain('<b>31</b> infrastructure excluded');
+    expect(text).toContain('<b>12</b> validated traders');
+    expect(text).toContain('<b>7</b> unique entities');
+    expect(text).toContain('Median Alpha');
+    expect(text).toContain('Median ROI');
     expect(text).toContain('🟢 <b>Alpha 94</b>');
     expect(text).toContain('🟢 <b>Holding</b>');
-    expect(text).toContain('🟢 <b>Active</b>');
-    expect(text).toContain('🟡 <b>Dormant</b>');
+    expect(text).toContain('🟢 <b>Active Trader</b>');
     expect(text).toContain('⚪ <b>Unknown</b>');
     expect(text).toContain('🔴 <b>Exited</b>');
     expect(text).toContain('Dormant 214d');
-    expect(text).toContain('Repeated winner.');
-    expect(text).toContain('Execution wallet.');
+    expect(text).toContain('High-conviction trader.');
+    expect(text).not.toContain('WalletOneFullAddress');
     expect(text).not.toContain('WalletSixHiddenAddress');
-    expect(text).not.toMatch(/provider only|Position|Capital|Entry|UTC/i);
+    expect(text).not.toMatch(/provider only|Position \$0|Capital in|Entry UTC|UTC/i);
     expect(keyboard?.inline_keyboard).toHaveLength(5);
   });
 
@@ -511,7 +511,7 @@ describe('Telegram command handlers', () => {
     await handler({ update_id: 96, callback_query: { id: 'token-back', from: { id: 123 }, data: 'v1|tokenback|retry-token-session|menu', message: { message_id: 96, chat: { id: 123, type: 'private' }, text: 'TOKEN ANALYSIS FAILED' } } });
 
     expect(service.scanTokenTopPnl).toHaveBeenCalledWith(ADDRESS);
-    expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('No top-PnL wallets were found'))).toBe(true);
+    expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('No validated trader wallets found'))).toBe(true);
     expect(vi.mocked(api.editMessage).mock.calls.some((call) => call[2].includes('FLOWRADAR INTELLIGENCE'))).toBe(true);
     expect(api.answerCallbackQuery).toHaveBeenCalledWith('token-retry', 'Analysis completed');
     expect(api.answerCallbackQuery).toHaveBeenCalledWith('token-back');

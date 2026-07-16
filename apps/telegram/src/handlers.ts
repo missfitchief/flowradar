@@ -779,18 +779,13 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
   if (INVESTIGATION_WORKFLOWS.has(workflow)) return renderPersistedInvestigation(service, state, sessionId);
   if (workflow === 'token') {
     const tokenAddress = required(state);
-    await service.tokenSummary(tokenAddress, 1, 10, 'pnl');
     await service.scanTokenTopPnl(tokenAddress);
     const value = await service.tokenSummary(tokenAddress, 1, 10, 'pnl');
-    const rows = value.topPnl.items.slice(0, 10) as TokenPnlTelegramRow[];
-    if (!rows.length) return {
-      text: `🎯 <b>TOKEN INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\n<code>${h(tokenAddress)}</code>\n\n⚪ No top-PnL wallets were found for this token.`,
-      keyboard: EMPTY_KEYBOARD
-    };
+    const rows = value.topPnl.items.slice(0, 5) as TokenPnlTelegramRow[];
     const displayedRows = rows.slice(0, 5);
     return {
       text: renderTokenIntelligenceSummary(tokenAddress, value, rows, displayedRows),
-      keyboard: tokenPnlKeyboard(displayedRows)
+      keyboard: displayedRows.length ? tokenPnlKeyboard(displayedRows) : EMPTY_KEYBOARD
     };
   }
   if (workflow === 'profitable') {
@@ -1332,6 +1327,15 @@ interface TokenPnlTelegramRow {
   firstSellTs?: string | null;
   lastActivityTs?: string | null;
   qualityScore?: number | null;
+  rawAlpha?: number | null;
+  alphaConfidence?: number | null;
+  alphaSampleSize?: number | null;
+  medianRoi?: number | null;
+  winRate?: number | null;
+  status?: 'Holding' | 'Accumulating' | 'Exited' | 'Active Trader' | 'Dormant' | 'Unknown';
+  intelligenceReason?: string;
+  relatedWalletCount?: number;
+  finalRankingScore?: number;
   repeatRunnerCount?: number | null;
   confidence?: number | null;
   entityKey?: string | null;
@@ -1341,56 +1345,92 @@ interface TokenPnlTelegramRow {
 }
 function renderTokenIntelligenceSummary(
   tokenAddress: string,
-  value: { tokens?: Array<{ name?: string | null; symbol?: string | null }>; metadata?: Array<{ name?: string | null; symbol?: string | null }> },
+  value: {
+    tokens?: Array<{ name?: string | null; symbol?: string | null }>;
+    metadata?: Array<{ name?: string | null; symbol?: string | null }>;
+    candidateSelection?: {
+      candidatesAnalyzed: number; infrastructureExcluded: number; exchangeExcluded: number;
+      ownershipUnverified: number; unreliablePnl: number; validatedTraders: number;
+      probableTraders: number; uniqueEntities: number;
+      cohort: { medianAlpha: number | null; medianRoi: number | null; active: number; dormant: number; holding: number };
+    };
+  },
   analyzedRows: TokenPnlTelegramRow[],
   displayedRows: TokenPnlTelegramRow[]
 ) {
   const token = value.tokens?.[0] ?? value.metadata?.[0];
   const tokenLabel = token?.symbol || token?.name;
+  const selection = value.candidateSelection;
+  if (!displayedRows.length) return [
+    '🎯 <b>TOKEN INTELLIGENCE</b>',
+    `${tokenLabel ? `<b>${h(tokenLabel)}</b>  ·  ` : ''}<code>${h(short(tokenAddress, 6))}</code>`,
+    '',
+    '<b>No validated trader wallets found.</b>',
+    '',
+    `Candidates analyzed  <b>${selection?.candidatesAnalyzed ?? 0}</b>`,
+    `Infrastructure excluded  <b>${selection?.infrastructureExcluded ?? 0}</b>`,
+    `Ownership unverified  <b>${selection?.ownershipUnverified ?? 0}</b>`,
+    `Unreliable PnL  <b>${selection?.unreliablePnl ?? 0}</b>`,
+    `Unique entities  <b>${selection?.uniqueEntities ?? 0}</b>`
+  ].join('\n');
   const alphaValues = analyzedRows.map((row) => row.qualityScore).filter(isNumber);
-  const roiValues = analyzedRows.map((row) => row.roi).filter(isNumber);
+  const roiValues = analyzedRows.map((row) => row.medianRoi ?? row.roi).filter(isNumber);
   const statuses = analyzedRows.map((row) => tokenWalletStatus(row));
-  const strongEntities = new Set(analyzedRows
-    .filter((row) => row.entityKey && (row.qualityScore ?? 0) >= 70 && (row.confidence ?? 0) >= 0.5)
-    .map((row) => row.entityKey));
   return [
-    '🎯 <b>TOKEN SUMMARY</b>',
-    `${tokenLabel ? `<b>${h(tokenLabel)}</b>  ·  ` : ''}<code>${h(tokenAddress)}</code>`,
+    '🎯 <b>TOKEN INTELLIGENCE</b>',
+    `${tokenLabel ? `<b>${h(tokenLabel)}</b>  ·  ` : ''}<code>${h(short(tokenAddress, 6))}</code>`,
     '',
-    `Wallets analyzed  <b>${analyzedRows.length}</b>  ·  Average Alpha  <b>${averageScore(alphaValues)}</b>`,
-    `Average ROI  <b>${averageRoi(roiValues)}</b>  ·  Dormant insiders  <b>${statuses.filter((status) => status.kind === 'dormant').length}</b>`,
-    `Active buyers  <b>${statuses.filter((status) => status.kind === 'active' || status.kind === 'holding').length}</b>  ·  Strong entities  <b>${strongEntities.size}</b>`,
+    `<b>${selection?.candidatesAnalyzed ?? analyzedRows.length}</b> candidates analyzed`,
+    `<b>${selection?.infrastructureExcluded ?? 0}</b> infrastructure excluded  ·  <b>${selection?.validatedTraders ?? analyzedRows.length}</b> validated traders`,
+    `<b>${selection?.uniqueEntities ?? new Set(analyzedRows.map((row) => row.entityKey ?? row.walletAddress)).size}</b> unique entities`,
     '',
-    '<b>TOP WALLETS</b>',
+    '📊 <b>COHORT</b>',
+    `Median Alpha  <b>${formatScore(selection?.cohort.medianAlpha ?? median(alphaValues))}</b>  ·  Median ROI  <b>${roi(selection?.cohort.medianRoi ?? median(roiValues))}</b>`,
+    `Active  <b>${selection?.cohort.active ?? statuses.filter((status) => status.kind === 'active').length}</b>  ·  Dormant  <b>${selection?.cohort.dormant ?? statuses.filter((status) => status.kind === 'dormant').length}</b>  ·  Holding  <b>${selection?.cohort.holding ?? statuses.filter((status) => status.kind === 'holding').length}</b>`,
+    '',
+    '<b>TOP ALPHA WALLETS</b>',
     ...displayedRows.map(renderTokenPnlWallet)
   ].join('\n');
 }
 function renderTokenPnlWallet(row: TokenPnlTelegramRow, index: number) {
   const status = tokenWalletStatus(row);
+  const confidence = confidenceLabel(row.alphaConfidence ?? row.confidence);
+  const positions = row.alphaSampleSize ?? 0;
+  const related = (row.relatedWalletCount ?? 0) > 0 ? `  ·  ${row.relatedWalletCount} related` : '';
   return [
     '',
-    `<b>${index + 1}. Wallet</b>  <code>${h(row.walletAddress)}</code>`,
-    `${alphaLabel(row.qualityScore)}  ·  ROI <b>${roi(row.roi)}</b>  ·  PnL <b>${signedMoney(row.realizedPnlUsd)}</b>`,
-    `${status.icon} <b>${status.label}</b>  ·  Last seen <b>${h(relativeLastSeen(row.lastActivityTs ?? row.firstSellTs ?? row.firstBuyTs, status.kind))}</b>  ·  <i>${h(tokenIntelligenceSentence(row, status.kind))}</i>`
+    `<b>${index + 1}.</b> <code>${h(short(row.walletAddress, 6))}</code>  ·  ${status.icon} <b>${h(status.label)}</b>`,
+    `${alphaLabel(row.qualityScore)}  ·  ${h(confidence)} confidence  ·  ${positions} positions${related}`,
+    `💰 <b>${signedMoney(row.realizedPnlUsd)}</b>  ·  Median ROI <b>${roi(row.medianRoi ?? row.roi)}</b>  ·  WR <b>${percentage(row.winRate)}</b>  ·  <i>${h(tokenIntelligenceSentence(row, status.kind))}</i>`
   ].join('\n');
 }
 type TokenWalletStatusKind = 'holding' | 'active' | 'dormant' | 'unknown' | 'exited';
 function tokenWalletStatus(row: TokenPnlTelegramRow, now = Date.now()): { kind: TokenWalletStatusKind; icon: string; label: string } {
+  if (row.status) {
+    if (row.status === 'Holding') return { kind: 'holding', icon: '🟢', label: row.status };
+    if (row.status === 'Accumulating') return { kind: 'active', icon: '🟢', label: row.status };
+    if (row.status === 'Exited') return { kind: 'exited', icon: '🔴', label: row.status };
+    if (row.status === 'Active Trader') return { kind: 'active', icon: '🟢', label: row.status };
+    if (row.status === 'Dormant') return { kind: 'dormant', icon: '🟡', label: relativeLastSeen(row.lastActivityTs, 'dormant', now) };
+    return { kind: 'unknown', icon: '⚪', label: 'Unknown' };
+  }
   const lastSeen = timestamp(row.lastActivityTs ?? row.firstSellTs ?? row.firstBuyTs);
   const ageDays = lastSeen == null ? null : Math.max(0, (now - lastSeen) / 86_400_000);
   const exited = row.remainingPositionUsd != null && row.remainingPositionUsd <= 0
     || row.firstSellTs != null && row.boughtUsd != null && row.soldUsd != null && row.soldUsd >= row.boughtUsd;
   if (exited) return { kind: 'exited', icon: '🔴', label: 'Exited' };
-  if (ageDays != null && ageDays >= 90) return { kind: 'dormant', icon: '🟡', label: 'Dormant' };
-  if (ageDays != null && ageDays <= 30) return { kind: 'active', icon: '🟢', label: 'Active' };
+  if (ageDays != null && ageDays >= 14) return { kind: 'dormant', icon: '🟡', label: `Dormant ${Math.floor(ageDays)}d` };
+  if (ageDays != null && ageDays < 7) return { kind: 'active', icon: '🟢', label: 'Active Trader' };
   if (row.remainingPositionUsd != null && row.remainingPositionUsd > 0 || row.boughtUsd != null && row.firstSellTs == null) {
     return { kind: 'holding', icon: '🟢', label: 'Holding' };
   }
   return { kind: 'unknown', icon: '⚪', label: 'Unknown' };
 }
 function tokenIntelligenceSentence(row: TokenPnlTelegramRow, status: TokenWalletStatusKind) {
+  if (row.intelligenceReason) return row.intelligenceReason;
   const role = (row.role ?? '').toLowerCase();
-  if (status === 'dormant' || row.dormancy && Object.values(row.dormancy).some((value) => value === true)) return 'Dormant insider.';
+  if (status === 'dormant' || row.dormancy && Object.values(row.dormancy).some((value) => value === true)) return 'Dormant high-alpha wallet.';
+  if ((row.finalRankingScore ?? 0) >= 80) return 'High-conviction trader.';
   if (role.includes('funder') || role.includes('funding') || role.includes('treasury') || role.includes('root')) return 'Core funder.';
   if (role.includes('execution') || role.includes('side')) return 'Execution wallet.';
   if ((row.repeatRunnerCount ?? 0) >= 2) return 'Repeated winner.';
@@ -1403,8 +1443,10 @@ function alphaLabel(value: number | null | undefined) {
   const icon = value >= 80 ? '🟢' : value >= 60 ? '🟡' : '⚪';
   return `${icon} <b>Alpha ${Math.round(value)}</b>`;
 }
-function averageScore(values: number[]) { return values.length ? String(Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)) : 'N/A'; }
-function averageRoi(values: number[]) { return values.length ? roi(values.reduce((sum, value) => sum + value, 0) / values.length) : 'N/A'; }
+function median(values: number[]) { if (!values.length) return null; const sorted = [...values].sort((a, b) => a - b); const middle = Math.floor(sorted.length / 2); return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2; }
+function formatScore(value: number | null | undefined) { return value == null ? 'N/A' : String(Math.round(value)); }
+function percentage(value: number | null | undefined) { return value == null ? 'N/A' : `${Math.round(value * 100)}%`; }
+function confidenceLabel(value: number | null | undefined) { if (value == null) return 'Low'; const normalized = value > 1 ? value / 100 : value; return normalized >= 0.7 ? 'High' : normalized >= 0.4 ? 'Medium' : 'Low'; }
 function isNumber(value: number | null | undefined): value is number { return typeof value === 'number' && Number.isFinite(value); }
 function timestamp(value: string | null | undefined) { if (!value) return null; const result = new Date(value).getTime(); return Number.isFinite(result) ? result : null; }
 function relativeLastSeen(value: string | null | undefined, status: TokenWalletStatusKind, now = Date.now()) {

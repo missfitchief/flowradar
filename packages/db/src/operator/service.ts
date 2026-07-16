@@ -16,6 +16,7 @@ import { createMassTrackerSession } from '../tracker/massTracker';
 import { recordProviderHealth } from '../operations/production';
 import { syncAlchemyCoreWalletChange } from '../alchemy/subscriptions';
 import { toCsv, toJsonDocument } from './export';
+import { RAW_TOKEN_CANDIDATE_LIMIT, rankingReceiptFromJson, refreshTokenCandidateRanking, reportFromReceipts } from './tokenCandidateRanking';
 import type {
   AlertInboxFilter, AlertInboxItem, BridgeRow, CapitalFlowRow, CoreWalletActivityRow, CoreWalletCapitalRow,
   CoreWalletListItem, OperatorPage, OperatorSessionState, OperatorWorkflow, ProfitableSort, ProfitableWalletRow,
@@ -255,10 +256,6 @@ export class OperatorService {
     }
     refs = uniqueRefs(refs);
     const now = new Date();
-    const persistedCounts = await Promise.all(refs.map((ref) => this.prisma.tokenTopPnlCandidate.count({
-      where: { chain: ref.chain, mint: ref.address, validation: { not: 'invalid' } }
-    })));
-    const persistedCandidateCount = persistedCounts.reduce((sum, count) => sum + count, 0);
     const universeBy = new Map(universe.map((row) => [`${row.chain}:${row.tokenAddress}`, row]));
     for (const ref of refs) {
       const existing = universeBy.get(`${ref.chain}:${ref.address}`);
@@ -266,7 +263,10 @@ export class OperatorService {
         sources: [...new Set([...(existing?.sources ?? []), 'telegram_token_scan'])].sort(),
         historicalWinnerStatus: existing?.historicalWinnerStatus ?? 'candidate',
         coverage: existing?.coverage ?? 'unavailable',
-        processingStatus: persistedCandidateCount > 0 ? existing?.processingStatus ?? 'processed' : 'pending',
+        // Exact operator scans deliberately refresh the candidate window. A
+        // previously processed row must not turn the provider top-50 into a
+        // permanent cache entry.
+        processingStatus: 'pending',
         evidenceJson: json({ priorEvidence: existing?.evidenceJson ?? null, telegramTokenScan: { requestedAt: now.toISOString() } }),
         lastError: null,
         nextRetryAt: null
@@ -277,9 +277,6 @@ export class OperatorService {
         update: data
       });
     }
-    if (persistedCandidateCount > 0) {
-      return { chains: refs.map((ref) => ref.chain), candidateCount: persistedCandidateCount };
-    }
     const providers = Object.fromEntries(refs.flatMap((ref) => {
       const provider = this.options.tokenTopTraderProviders?.[ref.chain];
       return provider ? [[ref.chain, provider]] : [];
@@ -288,8 +285,8 @@ export class OperatorService {
       chains: refs.map((ref) => ref.chain),
       tokenAddresses: [...new Set(refs.map((ref) => ref.address))],
       limit: refs.length,
-      perTokenLocalCap: 10,
-      perTokenProviderCap: 10,
+      perTokenLocalCap: RAW_TOKEN_CANDIDATE_LIMIT,
+      perTokenProviderCap: RAW_TOKEN_CANDIDATE_LIMIT,
       maxTradesPerToken: 100_000,
       requestBudget: Object.keys(providers).length,
       retryUnavailable: true,
@@ -299,12 +296,14 @@ export class OperatorService {
       now
     });
     let candidateCount = 0;
+    const rankings = [];
     for (const ref of refs) {
       const count = await this.prisma.tokenTopPnlCandidate.count({ where: { chain: ref.chain, mint: ref.address, validation: { not: 'invalid' } } });
       candidateCount += count;
-      if (count > 0) await analyzeTokenWalletIntelligence(this.prisma, { chain: ref.chain, tokenAddress: ref.address, topLimit: 10, now });
+      if (count > 0) await analyzeTokenWalletIntelligence(this.prisma, { chain: ref.chain, tokenAddress: ref.address, topLimit: RAW_TOKEN_CANDIDATE_LIMIT, now });
+      rankings.push({ chain: ref.chain, ...(await refreshTokenCandidateRanking(this.prisma, { chain: ref.chain, tokenAddress: ref.address, now })) });
     }
-    return { chains: refs.map((ref) => ref.chain), candidateCount };
+    return { chains: refs.map((ref) => ref.chain), candidateCount, rankings };
   }
 
   async tokenSummary(addressInput: string, page = 1, pageSize = 10, sort: TokenTraderSort = 'pnl') {
@@ -315,57 +314,43 @@ export class OperatorService {
       this.prisma.token.findMany({ where: { address: { in: normalized } }, take: 10, include: { marketSnapshots: { orderBy: { ts: 'desc' }, take: 1 } } }),
       this.prisma.tokenMetadata.findMany({ where: { OR: metadataRefs }, take: 10 }),
       this.prisma.historicalTokenUniverse.findMany({ where: { tokenAddress: { in: normalized } }, take: 10 }),
-      this.prisma.tokenTopPnlCandidate.findMany({ where: { mint: { in: normalized } }, orderBy: [{ chain: 'asc' }, { walletAddress: 'asc' }, { localRealizedProxyUsd: 'desc' }, { claimedRealizedPnlUsd: 'desc' }, { confidence: 'desc' }], take: 5_000, distinct: ['chain', 'walletAddress'] })
+      this.prisma.tokenTopPnlCandidate.findMany({ where: { mint: { in: normalized } }, orderBy: [{ updatedAt: 'desc' }, { providerRank: 'asc' }, { walletAddress: 'asc' }], take: 5_000 })
     ]);
-    const walletRefs = candidates.map((x) => ({ chain: x.chain, address: x.walletAddress }));
-    const [entityAddresses, rootRows, dnaRows, dormancyRows, intelligenceRows] = walletRefs.length ? await Promise.all([
-      this.prisma.unifiedEntityAddress.findMany({ where: { OR: walletRefs.map((x) => ({ chain: x.chain, address: x.address })) }, include: { entity: { select: { entityKey: true } } }, take: 100 }),
-      this.prisma.lineageRoot.findMany({ where: { wallet: { OR: walletRefs.map((x) => ({ chain: x.chain, address: x.address })) } }, select: { wallet: { select: { chain: true, address: true } } }, take: 5_000 }),
-      this.prisma.walletDnaProfile.findMany({ where: { OR: walletRefs.map((x) => ({ chain: x.chain, walletAddress: x.address })) }, take: 5_000 }),
-      this.prisma.addressDormancyObservation.groupBy({ by: ['chain', 'walletAddress'], where: { OR: walletRefs.map((x) => ({ chain: x.chain, walletAddress: x.address })), overallClass: { in: ['covered_dormant', 'apparently_dormant_incomplete_history'] } }, _count: { _all: true } }),
-      this.prisma.tokenWalletIntelligence.findMany({ where: { tokenAddress: { in: normalized }, OR: walletRefs.map((x) => ({ chain: x.chain, walletAddress: x.address })) }, orderBy: { computedAt: 'desc' }, take: 5_000 })
-    ]) : [[], [], [], [], []];
-    const entityBy = new Map(entityAddresses.map((x) => [`${x.chain}:${x.address}`, { entityKey: x.entity.entityKey, role: x.role }]));
-    const roots = new Set(rootRows.map((x) => `${x.wallet.chain}:${x.wallet.address}`));
-    const dnaBy = new Map(dnaRows.map((x) => [`${x.chain}:${x.walletAddress}`, x]));
-    const dormancyBy = new Map(dormancyRows.map((x) => [`${x.chain}:${x.walletAddress}`, x._count._all]));
-    const intelligenceBy = new Map<string, typeof intelligenceRows[number]>();
-    for (const row of intelligenceRows) if (!intelligenceBy.has(`${row.chain}:${row.walletAddress}`)) intelligenceBy.set(`${row.chain}:${row.walletAddress}`, row);
-    const traderCandidates = candidates
-      .filter((x) => !roots.has(`${x.chain}:${x.walletAddress}`) && entityBy.get(`${x.chain}:${x.walletAddress}`)?.role !== 'root_main')
-      .map((x) => {
-        const key = `${x.chain}:${x.walletAddress}`;
-        const localPnl = decimal(x.localRealizedProxyUsd);
-        const bought = decimal(x.localBoughtUsd);
-        const roi = localPnl != null && bought != null && bought > 0 ? localPnl / bought : x.claimedRoi;
-        const dna = dnaBy.get(key);
-        return { candidate: x, pnl: localPnl ?? decimal(x.claimedRealizedPnlUsd) ?? decimal(x.claimedTotalPnlUsd), roi, entryMcap: decimal(dna?.medianEntryMcapUsd), repeatRunners: dna?.repeatRunnerCount ?? null, dormancy: dormancyBy.get(key) ?? 0, entity: entityBy.get(key) };
-      })
-      .sort(tokenTraderComparator(sort));
+    const receiptByWallet = new Map<string, ReturnType<typeof rankingReceiptFromJson>>();
+    for (const candidate of candidates) {
+      const receipt = rankingReceiptFromJson(candidate.receiptsJson);
+      if (!receipt) continue;
+      const key = `${candidate.chain}:${candidate.walletAddress}`;
+      if (!receiptByWallet.has(key)) receiptByWallet.set(key, receipt);
+    }
+    const receipts = [...receiptByWallet.values()].filter(nonNull);
+    const selection = reportFromReceipts(receipts);
+    const traderCandidates = selection.topWallets.map((row) => ({
+      chain: row.chain, walletAddress: row.walletAddress, providerRank: row.providerRank,
+      source: 'validated_local_intelligence', validation: row.walletClassification,
+      realizedPnlUsd: row.realizedPnlUsd, boughtUsd: row.capitalInUsd, soldUsd: row.capitalOutUsd,
+      remainingPositionUsd: null, claimedRealizedPnlUsd: null, roi: row.validatedRoi,
+      medianRoi: row.medianRoi, entryMcapUsd: null, repeatRunnerCount: null, dormancyReactivations: 0,
+      firstBuyTs: row.firstEntryTs, firstSellTs: null, lastActivityTs: row.lastRelevantActivityTs,
+      qualityScore: row.sampleAdjustedAlpha, rawAlpha: row.rawAlpha, alphaConfidence: row.alphaConfidence,
+      alphaSampleSize: row.sampleSize, winRate: row.winRate, status: row.status,
+      intelligenceReason: row.intelligenceReason,
+      relatedWalletCount: row.relatedWalletCount, finalRankingScore: row.finalRankingScore,
+      dormancy: null, confidence: row.classificationConfidence, coverage: row.pnlConfidence,
+      entityKey: row.entityKey, role: row.walletClassification
+    }));
     const start = offset(page, pageSize);
     const pageCandidates = traderCandidates.slice(start, start + boundedPageSize(pageSize));
     const warnings: string[] = [];
     if (!tokens.length) warnings.push('No canonical token record exists; only available discovery evidence is shown.');
-    if (!pageCandidates.length) warnings.push('Nema non-empty top-PnL/trader rezultata u lokalnoj bazi za ovu stranicu.');
-    if (traderCandidates.length !== candidates.length) warnings.push('Operator root wallets are excluded from trader results.');
+    if (!pageCandidates.length) warnings.push('No validated trader wallets found.');
     if (universe.some((x) => x.processingStatus === 'unavailable' || x.processingStatus === 'retryable')) warnings.push('Discovery coverage is incomplete or retryable; no result was inferred.');
     return {
       tokens: tokens.map((token) => ({ chain: token.chain, address: token.address, name: token.name, symbol: token.symbol, decimals: token.decimals, latestMcapUsd: decimal(token.marketSnapshots[0]?.marketCapUsd), latestMcapTs: token.marketSnapshots[0]?.ts.toISOString() ?? null })),
       metadata: metadata.map((x) => ({ chain: x.chain, name: x.name, symbol: x.symbol, source: x.source, availability: x.availability })),
       universe: universe.map((x) => ({ chain: x.chain, sources: x.sources, historicalWinnerStatus: x.historicalWinnerStatus, athMcapUsd: decimal(x.athMcapUsd), coverage: x.coverage, processingStatus: x.processingStatus })),
-      topPnl: pageResult(pageCandidates.map(({ candidate: x, roi, entryMcap, repeatRunners, dormancy, entity }) => ({
-        chain: x.chain, walletAddress: x.walletAddress, providerRank: x.providerRank, source: x.source, validation: x.validation,
-        realizedPnlUsd: decimal(x.localRealizedProxyUsd) ?? decimal(x.claimedRealizedPnlUsd) ?? decimal(x.claimedTotalPnlUsd),
-        boughtUsd: decimal(x.localBoughtUsd) ?? decimal(x.claimedBoughtUsd), soldUsd: decimal(x.localSoldUsd) ?? decimal(x.claimedSoldUsd),
-        remainingPositionUsd: decimal(x.claimedRemainingUsd), claimedRealizedPnlUsd: decimal(x.claimedRealizedPnlUsd), roi,
-        entryMcapUsd: entryMcap, repeatRunnerCount: repeatRunners, dormancyReactivations: dormancy,
-        firstBuyTs: x.localFirstBuyTs?.toISOString() ?? providerEntryTime(x.providerJson), firstSellTs: x.localFirstSellTs?.toISOString() ?? null,
-        lastActivityTs: x.localLastSellTs?.toISOString() ?? x.localFirstSellTs?.toISOString() ?? x.localFirstBuyTs?.toISOString() ?? providerEntryTime(x.providerJson),
-        qualityScore: intelligenceBy.get(`${x.chain}:${x.walletAddress}`)?.qualityScore ?? null,
-        dormancy: (() => { const row = intelligenceBy.get(`${x.chain}:${x.walletAddress}`); return row ? { days7: row.dormant7d, days14: row.dormant14d, days30: row.dormant30d, days90: row.dormant90d } : null; })(),
-        confidence: normalizeConfidence(x.confidence), coverage: x.coverage,
-        entityKey: entity?.entityKey ?? null, role: entity?.role ?? 'unknown_related_wallet'
-      })), page, pageSize, traderCandidates.length, warnings),
+      topPnl: pageResult(pageCandidates, page, pageSize, traderCandidates.length, warnings),
+      candidateSelection: selection,
       coverageWarnings: warnings
     };
   }
@@ -1462,17 +1447,6 @@ function profitableOrder(sort: ProfitableSort) {
   return map[sort];
 }
 
-function tokenTraderComparator(sort: TokenTraderSort) {
-  return (a: { pnl: number | null; roi: number | null; entryMcap: number | null; repeatRunners: number | null; dormancy: number; candidate: { confidence: number; walletAddress: string } }, b: typeof a) => {
-    const metric = (row: typeof a): number | null => sort === 'pnl' ? row.pnl : sort === 'roi' ? row.roi : sort === 'entry_mcap' ? row.entryMcap : sort === 'repeat_runners' ? row.repeatRunners : sort === 'dormancy' ? row.dormancy : row.candidate.confidence;
-    const av = metric(a); const bv = metric(b);
-    if (av == null && bv != null) return 1;
-    if (av != null && bv == null) return -1;
-    if (av !== bv) return sort === 'entry_mcap' ? (av ?? 0) - (bv ?? 0) : (bv ?? 0) - (av ?? 0);
-    return b.candidate.confidence - a.candidate.confidence || a.candidate.walletAddress.localeCompare(b.candidate.walletAddress);
-  };
-}
-
 function inferredAddressRefs(input: string) {
   const value = input.trim();
   const chains = /^0x[0-9a-fA-F]{40}$/.test(value) ? EVM_CHAINS : /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value) ? ['SOLANA' as ChainId] : [];
@@ -1492,20 +1466,6 @@ function maxDate(left: Date, right: Date) { return left.getTime() >= right.getTi
 function minDate(values: Date[]) { return new Date(Math.min(...values.map((value) => value.getTime()))); }
 function normalizeConfidence(value: number) { return Math.max(0, Math.min(1, value > 1 ? value / 100 : value)); }
 function json(value: unknown): Prisma.InputJsonValue { return value as Prisma.InputJsonValue; }
-function providerEntryTime(value: Prisma.JsonValue | null): string | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const raw = (value as Record<string, unknown>).start_holding_at ?? (value as Record<string, unknown>).first_buy_at;
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    const date = new Date(raw < 10_000_000_000 ? raw * 1_000 : raw);
-    return Number.isNaN(date.getTime()) ? null : date.toISOString();
-  }
-  if (typeof raw === 'string' && raw.length > 0) {
-    const numeric = Number(raw);
-    const date = Number.isFinite(numeric) ? new Date(numeric < 10_000_000_000 ? numeric * 1_000 : numeric) : new Date(raw);
-    return Number.isNaN(date.getTime()) ? null : date.toISOString();
-  }
-  return null;
-}
 function extractPositions(value: Prisma.JsonValue): unknown[] { const profile = value as { local?: { tokenPositions?: unknown[] } }; return Array.isArray(profile?.local?.tokenPositions) ? profile.local.tokenPositions : []; }
 function extractDiscoveryMints(value: Prisma.JsonValue | null): string[] { if (!value || typeof value !== 'object') return []; const object = value as Record<string, unknown>; const direct = object.mints; if (Array.isArray(direct)) return direct.filter((x): x is string => typeof x === 'string'); return Object.values(object).flatMap((x) => Array.isArray(x) ? x.filter((v): v is string => typeof v === 'string') : []); }
 function dormancyFlags(value: Prisma.JsonValue | undefined) { const text = JSON.stringify(value ?? {}).toLowerCase(); const has = (days: number) => text.includes(`"days":${days}`) || text.includes(`"windowdays":${days}`) ? text.includes('covered_dormant') || text.includes('dormant') : null; return { days7: has(7), days14: has(14), days30: has(30), days90: has(90) }; }
