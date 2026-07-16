@@ -1330,28 +1330,47 @@ export function renderTokenHolderIntelligence(report: TokenHolderIntelligenceRep
     '🎯 <b>TOKEN INTELLIGENCE</b>',
     `<b>${h(report.tokenSymbol)}</b> · <code>${h(short(report.tokenAddress, 6))}</code>`,
     '',
-    `${report.holdersScanned} holders scanned · ${report.smartProfiles} smart profiles`,
+    `${report.holdersScanned} holders scanned`,
+    `${report.smartHolders} smart holders · ${report.largeUnratedHolders} unrated large holders`,
     `${report.infrastructureExcluded} infrastructure excluded · ${report.uniqueEntities} unique entities`
   ];
   if (!report.profiles.length) return [
-    ...heading, '', '<b>No high-value holder profiles found.</b>',
+    ...heading, '', '<b>No individual holder wallets found.</b>',
     `${report.ownersResolved} owner wallets resolved · ${report.csvMatches} CSV matches · ${report.flowradarMatches} FlowRadar matches`,
-    '<i>No holder passed the CSV/Core intelligence or live historical-trader threshold.</i>'
+    '<i>Only infrastructure or unresolved token accounts were present.</i>'
   ].join('\n');
   const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+  const smart = report.profiles.filter((profile) => profile.category === 'smart_holder');
+  const unrated = report.profiles.filter((profile) => profile.category === 'large_unrated_holder');
   return [
     ...heading,
-    ...report.profiles.flatMap((profile, index) => [
-      '',
-      `${medals[index] ?? '•'} <b>HOLDER #${profile.holderRank}</b>`,
-      `<code>${h(short(profile.walletAddress, 4))}</code>`,
-      `🏷 ${profile.tags.map(h).join(' · ')}`,
-      `🏆 Wins: ${profile.wins.length ? profile.wins.map((win) => `${h(win.symbol)} ${formatMultiple(win.multiple)}`).join(' · ') : 'No verified history'}`,
-      `💼 Holds: ${profile.holdings.map(formatHolderPosition).join(' · ')}`,
-      `⏱ Avg hold: ${formatHoldDuration(profile.medianHoldMs)}`,
-      `🛡 Reliability: ${profile.reliability == null ? 'Not rated' : `${Math.round(profile.reliability)}/100`}`
-    ])
+    ...(smart.length ? ['', '🧠 <b>SMART HOLDERS</b>', ...smart.flatMap((profile, index) => renderSmartHolder(profile, medals[index] ?? '•'))] : []),
+    ...(unrated.length ? ['', '🐋 <b>LARGE UNRATED HOLDERS</b>', ...unrated.flatMap((profile) => renderUnratedHolder(profile))] : [])
   ].join('\n');
+}
+
+function renderSmartHolder(profile: TokenHolderIntelligenceReport['profiles'][number], marker: string) {
+  return [
+    '',
+    `${marker} <b>HOLDER #${profile.holderRank}</b>`,
+    `<code>${h(short(profile.walletAddress, 4))}</code>`,
+    `🏷 ${profile.tags.map(h).join(' · ')}`,
+    `🏆 Wins: ${profile.wins.length ? profile.wins.map((win) => `${h(win.symbol)} ${formatMultiple(win.multiple)}`).join(' · ') : 'No verified history'}`,
+    `💼 Holds: ${profile.holdings.map(formatHolderPosition).join(' · ')}`,
+    `⏱ Avg hold: ${formatHoldDuration(profile.medianHoldMs)}`,
+    `🛡 Reliability: ${profile.reliability == null ? 'Not rated' : `${Math.round(profile.reliability)}/100`}`
+  ];
+}
+
+function renderUnratedHolder(profile: TokenHolderIntelligenceReport['profiles'][number]) {
+  return [
+    '',
+    `<b>HOLDER #${profile.holderRank}</b>`,
+    `<code>${h(short(profile.walletAddress, 4))}</code>`,
+    '🏷 Large Holder',
+    `💼 Holds: ${profile.holdings.map(formatHolderPosition).join(' · ')}`,
+    '🛡 Reliability: Not rated'
+  ];
 }
 
 function tokenHolderKeyboard(report: TokenHolderIntelligenceReport): InlineKeyboard {

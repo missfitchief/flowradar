@@ -7,8 +7,9 @@ import { ADAPTIVE_RULE_VERSION } from './adaptive';
 import { syncIntelligenceEntities } from './entities';
 import { enrollObservationWallet } from './monitoring';
 
-export const PRIORITY_CORE_SEED_POLICY_VERSION = 1;
+export const PRIORITY_CORE_SEED_POLICY_VERSION = 2;
 export const DEFAULT_PRIORITY_CORE_SEED_THRESHOLD = 85;
+export const AUTHORITATIVE_CORE_AUTHORITY = 'operator_authoritative_core_csv';
 
 const SOURCE_SIGNAL = 'external_priority_seed_discovery';
 const SEED_ROLE = 'priority_core_seed_candidate';
@@ -28,6 +29,10 @@ export interface PriorityCoreSeedRow {
   label?: unknown;
   addedAt?: unknown;
   lastActiveAt?: unknown;
+  category?: unknown;
+  type?: unknown;
+  reliabilityScore?: unknown;
+  classifications?: unknown;
   raw?: Record<string, unknown>;
 }
 
@@ -52,6 +57,10 @@ export interface PriorityCoreSeedPreviewEntry {
   sourceLabel: string | null;
   sourceAddedAt: Date | null;
   sourceLastActiveAt: Date | null;
+  sourceCategory: string | null;
+  sourceType: string | null;
+  sourceReliabilityScore: number | null;
+  sourceClassifications: string[];
 }
 
 export interface PriorityCoreSeedPreview {
@@ -84,6 +93,7 @@ export interface PriorityCoreSeedImportReport {
   singletonClustersCreated: number;
   monitoringEnrolled: number;
   entitiesProjected: number;
+  authority: string | null;
   guardrails: {
     sourceScoreOwnershipEvidence: false;
     sourceScoreSignalEligibility: false;
@@ -102,7 +112,8 @@ export interface PriorityCoreSeedImportReport {
  */
 export function previewPriorityCoreWalletSeeds(
   rows: PriorityCoreSeedRow[],
-  threshold = DEFAULT_PRIORITY_CORE_SEED_THRESHOLD
+  threshold = DEFAULT_PRIORITY_CORE_SEED_THRESHOLD,
+  authority: string | null = null
 ): PriorityCoreSeedPreview {
   if (!Number.isFinite(threshold)) throw new Error('Priority core seed threshold must be finite');
   if (!rows.length) throw new Error('Priority core seed import requires at least one source row');
@@ -111,7 +122,7 @@ export function previewPriorityCoreWalletSeeds(
   if (!sourceFiles.length || !sourceHashes.length || rows.some((row) => !cleanText(row.sourceFile) || !/^[a-f0-9]{64}$/i.test(cleanText(row.sourceHash) ?? ''))) {
     throw new Error('Every priority core seed row requires a filename and SHA-256 source hash');
   }
-  const importKey = hash(JSON.stringify({ policyVersion: PRIORITY_CORE_SEED_POLICY_VERSION, threshold, sourceHashes }));
+  const importKey = hash(JSON.stringify({ policyVersion: PRIORITY_CORE_SEED_POLICY_VERSION, threshold, authority, sourceHashes }));
   const entries = rows.map((row) => previewRow(row, importKey, threshold));
   const accepted = entries.filter((entry) => entry.decision === 'accepted_primary');
   const grouped = groupBy(accepted, (entry) => refKey(entry.chain!, entry.address!));
@@ -152,9 +163,10 @@ export function previewPriorityCoreWalletSeeds(
 export async function importPriorityCoreWalletSeeds(
   prisma: PrismaClient,
   rows: PriorityCoreSeedRow[],
-  options: { threshold?: number; now?: Date } = {}
+  options: { threshold?: number; now?: Date; authority?: string | null } = {}
 ): Promise<PriorityCoreSeedImportReport> {
-  const preview = previewPriorityCoreWalletSeeds(rows, options.threshold ?? DEFAULT_PRIORITY_CORE_SEED_THRESHOLD);
+  const authority = cleanText(options.authority);
+  const preview = previewPriorityCoreWalletSeeds(rows, options.threshold ?? DEFAULT_PRIORITY_CORE_SEED_THRESHOLD, authority);
   const now = options.now ?? new Date();
 
   return withGlobalJobLock(`priority-core-wallet-seed:${preview.importKey.slice(0, 12)}`, async () => {
@@ -183,7 +195,7 @@ export async function importPriorityCoreWalletSeeds(
         uniqueWallets: preview.uniqueWallets,
         rejectedRows: preview.rejectedRows,
         duplicateRows: preview.duplicateRows,
-        guardrailJson: json(guardrailPolicy()),
+        guardrailJson: json(guardrailPolicy(authority)),
         errorsJson: json({ rejectedByDecision: decisionCounts(preview.entries) }),
         startedAt: now
       },
@@ -207,7 +219,15 @@ export async function importPriorityCoreWalletSeeds(
           sourceLabel: entry.sourceLabel,
           sourceAddedAt: entry.sourceAddedAt,
           sourceLastActiveAt: entry.sourceLastActiveAt,
-          rawJson: json(safeJson(entry.row.raw ?? sourceFields(entry.row))),
+          rawJson: json(safeJson({
+            ...(entry.row.raw ?? sourceFields(entry.row)),
+            _flowradarSourceMetadata: {
+              category: entry.sourceCategory,
+              type: entry.sourceType,
+              reliabilityScore: entry.sourceReliabilityScore,
+              classifications: entry.sourceClassifications
+            }
+          })),
           decision: entry.decision,
           reasonCodes: entry.reasonCodes
         })),
@@ -234,11 +254,15 @@ export async function importPriorityCoreWalletSeeds(
           where: { address_chain: { address, chain } },
           select: { id: true, status: true, _count: { select: { stats: true } } }
         });
-        const reason = `priority_core_seed score>=${preview.threshold}; discovery prior only; ownership, alpha and signal eligibility unverified`;
+        const discoverySource = authority ? 'authoritative_core_wallet_csv' : 'priority_core_wallet_seed';
+        const role = authority ? 'authoritative_core_list_candidate' : SEED_ROLE;
+        const reason = authority
+          ? `authoritative Core-list membership; source score is a ranking prior only; ownership, PnL and signal eligibility unverified`
+          : `priority_core_seed score>=${preview.threshold}; discovery prior only; ownership, alpha and signal eligibility unverified`;
         const enrollment = await enrollObservationWallet(prisma, {
           chain,
           address,
-          role: SEED_ROLE,
+          role,
           reason,
           firstSeenAt: addedAt ?? sourceLastActiveAt ?? now,
           lastActiveAt: sourceLastActiveAt ?? addedAt ?? now,
@@ -287,7 +311,7 @@ export async function importPriorityCoreWalletSeeds(
               address,
               clusterId,
               entityKey: null,
-              role: SEED_ROLE,
+              role,
               evidenceScore: 0,
               sourceScore,
               rawHistoricalAlphaScore: 35,
@@ -300,8 +324,8 @@ export async function importPriorityCoreWalletSeeds(
               intelligenceStatus: 'inactive_low_value',
               confidence: 0,
               tier: 'C',
-              discoverySource: 'priority_core_wallet_seed',
-              lastDiscoverySource: 'priority_core_wallet_seed',
+              discoverySource,
+              lastDiscoverySource: discoverySource,
               firstDiscoveredAt: addedAt ?? now,
               lastObservedAt: now,
               lastActivityAt: sourceLastActiveAt,
@@ -340,7 +364,7 @@ export async function importPriorityCoreWalletSeeds(
             profile = await prisma.walletIntelligenceProfile.update({
               where: { id: profile.id },
               data: {
-                lastDiscoverySource: 'priority_core_wallet_seed',
+                lastDiscoverySource: discoverySource,
                 sourceScore: Math.max(profile.sourceScore ?? 0, sourceScore),
                 observationCount: { increment: 1 }
               }
@@ -354,7 +378,7 @@ export async function importPriorityCoreWalletSeeds(
             data: {
               observationKey,
               profileId: profile.id,
-              discoverySource: 'priority_core_wallet_seed',
+              discoverySource,
               entityKey: profile.entityKey,
               role: profile.role,
               evidenceScore: profile.evidenceScore,
@@ -438,7 +462,7 @@ export async function importPriorityCoreWalletSeeds(
           singletonClustersCreated,
           monitoringEnrolled,
           entitiesProjected: entityReport.entitiesCreated + entityReport.entitiesUpdated,
-          guardrailJson: json({ ...guardrailPolicy(), observed: guardrails }),
+          guardrailJson: json({ ...guardrailPolicy(authority), observed: guardrails }),
           completedAt: now
         }
       });
@@ -474,7 +498,11 @@ function previewRow(row: PriorityCoreSeedRow, importKey: string, threshold: numb
     sourceStatus: cleanText(row.status)?.toLowerCase() ?? null,
     sourceLabel: cleanText(row.label),
     sourceAddedAt: parseDate(row.addedAt),
-    sourceLastActiveAt: parseDate(row.lastActiveAt)
+    sourceLastActiveAt: parseDate(row.lastActiveAt),
+    sourceCategory: cleanText(row.category),
+    sourceType: cleanText(row.type),
+    sourceReliabilityScore: optionalFiniteNumber(row.reliabilityScore),
+    sourceClassifications: sourceClassifications(row.classifications)
   };
   if (sourceScore === null) return { ...base, decision: 'rejected_invalid_score', reasonCodes: ['missing_or_non_finite_score'] };
   if (sourceScore < threshold) return { ...base, decision: 'rejected_below_threshold', reasonCodes: ['source_score_below_threshold'] };
@@ -519,8 +547,10 @@ function seedSupport(preview: PriorityCoreSeedPreview, group: PriorityCoreSeedPr
   };
 }
 
-function guardrailPolicy() {
+function guardrailPolicy(authority: string | null = null) {
   return {
+    sourceAuthority: authority,
+    authoritativeCoreMembership: Boolean(authority),
     sourceScoreUsedOnlyFor: ['candidate_threshold', 'monitoring_queue_priority', 'audit_provenance'],
     sourceScoreNeverUsedFor: ['ownership', 'entity_merge', 'cluster_merge', 'signal_eligibility', 'historical_alpha_score', 'buy_candidate'],
     newWalletStatus: 'observation_only',
@@ -568,6 +598,7 @@ function reportFromReceipt(row: {
   singletonClustersCreated: number; monitoringEnrolled: number; entitiesProjected: number; guardrailJson: Prisma.JsonValue;
 }, idempotentReplay: boolean): PriorityCoreSeedImportReport {
   const observed = recordOf(recordOf(row.guardrailJson).observed);
+  const policy = recordOf(row.guardrailJson);
   return {
     importId: row.id,
     importKey: row.importKey,
@@ -583,6 +614,7 @@ function reportFromReceipt(row: {
     singletonClustersCreated: row.singletonClustersCreated,
     monitoringEnrolled: row.monitoringEnrolled,
     entitiesProjected: row.entitiesProjected,
+    authority: cleanText(policy.sourceAuthority),
     guardrails: {
       sourceScoreOwnershipEvidence: false,
       sourceScoreSignalEligibility: false,
@@ -602,7 +634,11 @@ function decisionCounts(entries: PriorityCoreSeedPreviewEntry[]) {
 }
 
 function sourceFields(row: PriorityCoreSeedRow) {
-  return { address: row.address, chain: row.chain, score: row.score, tier: row.tier, status: row.status, label: row.label, addedAt: row.addedAt, lastActiveAt: row.lastActiveAt };
+  return {
+    address: row.address, chain: row.chain, score: row.score, tier: row.tier, status: row.status, label: row.label,
+    addedAt: row.addedAt, lastActiveAt: row.lastActiveAt, category: row.category, type: row.type,
+    reliabilityScore: row.reliabilityScore, classifications: row.classifications
+  };
 }
 function sourceOrder(a: PriorityCoreSeedPreviewEntry, b: PriorityCoreSeedPreviewEntry) {
   return a.row.sourceHash.localeCompare(b.row.sourceHash) || (a.row.sourceSheet ?? '').localeCompare(b.row.sourceSheet ?? '') || a.row.sourceRow - b.row.sourceRow;
@@ -613,6 +649,16 @@ function unique<T>(values: T[]) { return [...new Set(values)]; }
 function nonNull<T>(value: T | null): value is T { return value !== null; }
 function cleanText(value: unknown) { if (value === null || value === undefined) return null; const text = String(value).trim(); return text || null; }
 function finiteNumber(value: unknown) { const number = typeof value === 'number' ? value : Number(cleanText(value)); return Number.isFinite(number) ? number : null; }
+function optionalFiniteNumber(value: unknown) { return cleanText(value) === null ? null : finiteNumber(value); }
+function sourceClassifications(value: unknown) {
+  const values = Array.isArray(value) ? value : cleanText(value)?.split(/[|,;]/) ?? [];
+  const normalized: string[] = [];
+  for (const item of values) {
+    const text = cleanText(item)?.toLowerCase();
+    if (text) normalized.push(text);
+  }
+  return unique(normalized);
+}
 function parseDate(value: unknown) { const text = cleanText(value); if (!text) return null; const date = new Date(text); return Number.isFinite(date.getTime()) ? date : null; }
 function latestDate(...values: Array<Date | null>) { return values.filter(nonNull).sort((a, b) => b.getTime() - a.getTime())[0] ?? null; }
 function earliestDate(...values: Array<Date | null>) { return values.filter(nonNull).sort((a, b) => a.getTime() - b.getTime())[0] ?? null; }

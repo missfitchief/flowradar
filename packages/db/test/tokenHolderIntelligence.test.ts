@@ -3,7 +3,8 @@ import {
   dedupeResolvedHolders,
   holderQualificationReasons,
   normalizeTokenHolderRow,
-  selectIndependentHolderProfiles
+  selectIndependentHolderProfiles,
+  selectSmartAndUnratedHolderProfiles
 } from '../src/operator/tokenHolderIntelligence';
 
 const OWNER = 'GV6UUmNxz2RpKxmNAPadYKb7uQpszwqQAu3qLJxVdC52';
@@ -38,10 +39,12 @@ describe('token holder intelligence', () => {
     expect(rows[0]?.tokenAccounts).toEqual([ACCOUNT_ONE, ACCOUNT_TWO]);
   });
 
-  it('does not reject a high-reliability CSV holder just because trade ownership is incomplete', () => {
-    expect(holderQualificationReasons({ csvScore: 92, completedPositions: 0, liveTraderEvidence: false }))
-      .toEqual(['csv_high_reliability']);
-    expect(holderQualificationReasons({ csvScore: 70, completedPositions: 0, liveTraderEvidence: false }))
+  it('treats current Core CSV membership as a source prior, never as Reliability', () => {
+    expect(holderQualificationReasons({ currentCoreCsv: true, sourceScore: 92, completedPositions: 0, liveTraderEvidence: false }))
+      .toEqual(['authoritative_core_csv', 'authoritative_core_source_score_85']);
+    expect(holderQualificationReasons({ currentCoreCsv: false, sourceScore: 92, completedPositions: 0, liveTraderEvidence: false }))
+      .toEqual([]);
+    expect(holderQualificationReasons({ currentCoreCsv: false, completedPositions: 0, liveTraderEvidence: true }))
       .toEqual([]);
   });
 
@@ -52,5 +55,14 @@ describe('token holder intelligence', () => {
       { wallet: 'c', entityKey: 'entity:two' }
     ], 5);
     expect(selected.map((row) => row.wallet)).toEqual(['a', 'c']);
+  });
+
+  it('shows smart holders first and uses unrated holders only to fill remaining slots', () => {
+    const selected = selectSmartAndUnratedHolderProfiles(
+      [{ wallet: 'smart-a', entityKey: 'entity:a' }, { wallet: 'smart-b', entityKey: 'entity:b' }],
+      [{ wallet: 'whale-a', entityKey: 'entity:a' }, { wallet: 'whale-c', entityKey: 'entity:c' }, { wallet: 'whale-d', entityKey: 'entity:d' }],
+      3
+    );
+    expect(selected.map((row) => row.wallet)).toEqual(['smart-a', 'smart-b', 'whale-c']);
   });
 });

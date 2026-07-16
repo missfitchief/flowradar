@@ -13,6 +13,9 @@ const HOLDER_LIMIT = 50;
 const PHASE_TWO_LIMIT = 12;
 const PHASE_TWO_CONCURRENCY = 4;
 const ENRICHMENT_CACHE_MS = 30 * 60_000;
+export const WHALE_HOLDING_THRESHOLD_PERCENT = 1;
+const RECENT_TRADER_WINDOW_MS = 30 * 86_400_000;
+const AUTHORITATIVE_CORE_AUTHORITY = 'operator_authoritative_core_csv';
 const SYSTEM_PROGRAM = '11111111111111111111111111111111';
 const BURN_ADDRESSES = new Set([SYSTEM_PROGRAM, '1nc1nerator11111111111111111111111111111111']);
 const INFRA_PATTERN = /(?:raydium|orca|meteora|jupiter|pump[_ -]?amm|liquidity|\blp\b|vault|router|aggregator|exchange|custod|treasury|distribut|bridge|burn)/i;
@@ -36,6 +39,7 @@ export interface TokenHolderPosition {
 }
 
 export interface TokenHolderProfile {
+  category: 'smart_holder' | 'large_unrated_holder';
   holderRank: number;
   walletAddress: string;
   entityKey: string;
@@ -48,6 +52,8 @@ export interface TokenHolderProfile {
   historicalAlpha: number | null;
   rankingScore: number;
   passReasons: string[];
+  sourceLabel: string | null;
+  sourceScore: number | null;
 }
 
 export interface TokenHolderIntelligenceReport {
@@ -59,9 +65,13 @@ export interface TokenHolderIntelligenceReport {
   uniqueOwnerWallets: number;
   infrastructureExcluded: number;
   csvMatches: number;
+  reliability85Wallets: number;
   flowradarMatches: number;
+  validatedHistoryWallets: number;
   liveEnriched: number;
   smartProfiles: number;
+  smartHolders: number;
+  largeUnratedHolders: number;
   uniqueEntities: number;
   profiles: TokenHolderProfile[];
   processingTimeMs: number;
@@ -124,8 +134,7 @@ interface LocalHistory {
 }
 
 interface RankedHolder extends ResolvedHolder {
-  seed: SeedMatch | null;
-  csvSeed: SeedMatch | null;
+  authoritativeCore: SeedMatch | null;
   profile: ProfileMatch | null;
   wallet: WalletMatch | null;
   entityKey: string;
@@ -137,6 +146,8 @@ interface RankedHolder extends ResolvedHolder {
   tags: string[];
   passReasons: string[];
   rankingScore: number;
+  rankingPriority: number;
+  category: 'smart_holder' | 'large_unrated_holder';
 }
 
 interface SeedMatch {
@@ -146,6 +157,11 @@ interface SeedMatch {
   sourceStatus: string | null;
   sourceLabel: string | null;
   sourceLastActiveAt: Date | null;
+  sourceReliabilityScore: number | null;
+  sourceCategory: string | null;
+  sourceType: string | null;
+  sourceClassifications: string[];
+  activeCore: boolean;
 }
 
 interface ProfileMatch {
@@ -161,6 +177,11 @@ interface ProfileMatch {
   intelligenceStatus: string;
   monitoringPriority: string;
   evidenceSignals: string[];
+  independentSignals: number;
+  alphaConfidence: number;
+  alphaSampleSize: number;
+  discoverySource: string;
+  lastDiscoverySource: string;
   lastActivityAt: Date | null;
 }
 
@@ -203,18 +224,33 @@ export async function runTokenHolderIntelligence(
   });
   const deduped = dedupeResolvedHolders(resolved);
   const addresses = deduped.map((row) => row.ownerAddress);
+  const authoritativeImport = await prisma.coreWalletSeedImport.findFirst({
+    where: {
+      status: 'completed',
+      guardrailJson: { path: ['sourceAuthority'], equals: AUTHORITATIVE_CORE_AUTHORITY }
+    },
+    orderBy: [{ completedAt: 'desc' }, { createdAt: 'desc' }],
+    select: { id: true }
+  });
 
   const [seedRows, profileRows, walletRows, entityRows, registryRows, existingRows, canonicalToken, metadata] = await Promise.all([
     prisma.coreWalletSeedRecord.findMany({
-      where: { chain: 'SOLANA', address: { in: addresses } },
-      select: { address: true, sourceFile: true, sourceScore: true, sourceTier: true, sourceStatus: true, sourceLabel: true, sourceLastActiveAt: true }
+      where: {
+        importId: authoritativeImport?.id ?? '__no_authoritative_core_import__',
+        chain: 'SOLANA', address: { in: addresses }, decision: { startsWith: 'accepted' }
+      },
+      select: {
+        address: true, sourceFile: true, sourceScore: true, sourceTier: true, sourceStatus: true,
+        sourceLabel: true, sourceLastActiveAt: true, rawJson: true
+      }
     }),
     prisma.walletIntelligenceProfile.findMany({
       where: { chain: 'SOLANA', address: { in: addresses } },
       select: {
         address: true, clusterId: true, entityKey: true, role: true, evidenceScore: true, sourceScore: true,
         historicalAlphaScore: true, wakeUpPotential: true, confidence: true, tier: true, intelligenceStatus: true,
-        monitoringPriority: true, evidenceSignals: true, lastActivityAt: true
+        monitoringPriority: true, evidenceSignals: true, independentSignals: true, alphaConfidence: true,
+        alphaSampleSize: true, discoverySource: true, lastDiscoverySource: true, lastActivityAt: true
       }
     }),
     prisma.wallet.findMany({
@@ -244,25 +280,26 @@ export async function runTokenHolderIntelligence(
 
   const baseCandidates: RankedHolder[] = deduped.map((holder) => {
     const seedRowsForWallet = seedsByAddress.get(holder.ownerAddress) ?? [];
-    const seed = bestSeed(seedRowsForWallet);
-    const csvSeed = bestSeed(seedRowsForWallet.filter((row) => row.sourceFile.toLowerCase().endsWith('.csv')));
+    const authoritativeCore = bestSeed(seedRowsForWallet.map(seedMatch));
     const profileRow = profilesByAddress.get(holder.ownerAddress);
     const walletRow = walletsByAddress.get(holder.ownerAddress);
     const profile = profileRow ? profileMatch(profileRow) : null;
     const wallet = walletRow ? walletMatch(walletRow) : null;
-    const flowradarMatch = Boolean(profile || wallet && (wallet.hasLineageRoot || wallet.status !== 'observation_only' || wallet.classifications.some((label) => ['smart_money', 'sniper', 'whale'].includes(label))));
+    const flowradarMatch = substantiveFlowradarProfile(profile, wallet);
     const flowradarStrong = strongFlowradarProfile(profile, wallet);
-    const reliability = reliabilityScore(seed, profile);
+    const reliability = reliabilityScore(authoritativeCore, profile);
     const entityKey = entitiesByAddress.get(holder.ownerAddress) ?? profile?.entityKey ?? (profile?.clusterId ? `cluster:${profile.clusterId}` : `wallet:${holder.ownerAddress}`);
     return {
-      ...holder, seed, csvSeed, profile, wallet, entityKey, flowradarMatch, flowradarStrong, reliability,
-      live: null, local: emptyLocalHistory(), tags: [], passReasons: [], rankingScore: preliminaryScore(holder, reliability, profile, wallet)
+      ...holder, authoritativeCore, profile, wallet, entityKey, flowradarMatch, flowradarStrong, reliability,
+      live: null, local: emptyLocalHistory(), tags: [], passReasons: [],
+      rankingScore: preliminaryScore(holder, authoritativeCore, reliability, profile, wallet),
+      rankingPriority: preliminaryPriority(authoritativeCore, flowradarStrong, wallet), category: 'large_unrated_holder'
     };
   });
 
   const phaseTwoCandidates = baseCandidates
     .filter((row) => !row.infrastructureReason && phaseTwoValue(row))
-    .sort((a, b) => b.rankingScore - a.rankingScore || a.holderRank - b.holderRank)
+    .sort((a, b) => b.rankingPriority - a.rankingPriority || b.rankingScore - a.rankingScore || a.holderRank - b.holderRank)
     .slice(0, Math.max(1, Math.min(input.phaseTwoLimit ?? PHASE_TWO_LIMIT, PHASE_TWO_LIMIT)));
   const cacheTtlMs = input.cacheTtlMs ?? ENRICHMENT_CACHE_MS;
   const enriched = await mapConcurrent(phaseTwoCandidates, PHASE_TWO_CONCURRENCY, async (candidate) => {
@@ -283,20 +320,27 @@ export async function runTokenHolderIntelligence(
     candidate.live = liveByAddress.get(candidate.ownerAddress) ?? null;
     candidate.local = candidate.wallet ? localHistoryByAddress.get(candidate.wallet.id) ?? emptyLocalHistory() : emptyLocalHistory();
     candidate.passReasons = passReasons(candidate);
+    candidate.category = candidate.passReasons.length ? 'smart_holder' : 'large_unrated_holder';
     candidate.tags = holderTags(candidate, now);
+    candidate.rankingPriority = finalPriority(candidate);
     candidate.rankingScore = finalScore(candidate);
   }
 
   const accepted = baseCandidates
     .filter((row) => !row.infrastructureReason && row.passReasons.length > 0)
-    .sort((a, b) => b.rankingScore - a.rankingScore || a.holderRank - b.holderRank || a.ownerAddress.localeCompare(b.ownerAddress));
-  const selected = selectIndependentHolderProfiles(accepted, 5);
-  const acceptedEntityCounts = countBy(accepted, (row) => row.entityKey);
+    .sort(holderSort);
+  const unrated = baseCandidates
+    .filter((row) => !row.infrastructureReason && row.passReasons.length === 0)
+    .sort((a, b) => a.holderRank - b.holderRank || (b.supplyPercentage ?? -1) - (a.supplyPercentage ?? -1) || a.ownerAddress.localeCompare(b.ownerAddress));
+  const selected = selectSmartAndUnratedHolderProfiles(accepted, unrated, 5);
+  const nonInfrastructure = [...accepted, ...unrated];
+  const entityCounts = countBy(nonInfrastructure, (row) => row.entityKey);
   const profiles: TokenHolderProfile[] = selected.map((row) => ({
+    category: row.category,
     holderRank: row.holderRank,
     walletAddress: row.ownerAddress,
     entityKey: row.entityKey,
-    relatedWalletCount: Math.max(0, (acceptedEntityCounts.get(row.entityKey) ?? 1) - 1),
+    relatedWalletCount: Math.max(0, (entityCounts.get(row.entityKey) ?? 1) - 1),
     tags: row.tags.slice(0, 3),
     wins: row.local.wins.slice(0, 3),
     holdings: profileHoldings(row, tokenAddress, tokenSymbol),
@@ -304,7 +348,9 @@ export async function runTokenHolderIntelligence(
     reliability: row.reliability,
     historicalAlpha: meaningfulScore(row.profile?.historicalAlphaScore),
     rankingScore: row.rankingScore,
-    passReasons: row.passReasons
+    passReasons: row.category === 'smart_holder' ? row.passReasons : ['large_unrated_holder'],
+    sourceLabel: row.authoritativeCore?.sourceLabel ?? null,
+    sourceScore: row.authoritativeCore?.sourceScore ?? null
   }));
 
   await persistHolderReceipts(prisma, tokenAddress, baseCandidates, accepted, now);
@@ -315,11 +361,15 @@ export async function runTokenHolderIntelligence(
     ownersResolved: resolved.filter((row) => row.ownerAddress && row.ownerResolution !== 'unresolved').length,
     uniqueOwnerWallets: deduped.length,
     infrastructureExcluded: baseCandidates.filter((row) => Boolean(row.infrastructureReason)).length,
-    csvMatches: baseCandidates.filter((row) => Boolean(row.csvSeed)).length,
+    csvMatches: baseCandidates.filter((row) => row.authoritativeCore?.activeCore).length,
+    reliability85Wallets: baseCandidates.filter((row) => !row.infrastructureReason && (row.reliability ?? -1) >= 85).length,
     flowradarMatches: baseCandidates.filter((row) => row.flowradarMatch).length,
+    validatedHistoryWallets: baseCandidates.filter((row) => !row.infrastructureReason && validatedHistory(row)).length,
     liveEnriched: baseCandidates.filter((row) => Boolean(row.live)).length,
     smartProfiles: accepted.length,
-    uniqueEntities: new Set(accepted.map((row) => row.entityKey)).size,
+    smartHolders: accepted.length,
+    largeUnratedHolders: unrated.length,
+    uniqueEntities: new Set(nonInfrastructure.map((row) => row.entityKey)).size,
     profiles,
     processingTimeMs: Date.now() - startedAt,
     coverageWarnings
@@ -388,6 +438,18 @@ export function selectIndependentHolderProfiles<T extends { entityKey: string }>
   const seen = new Set<string>();
   const selected: T[] = [];
   for (const row of rows) {
+    if (seen.has(row.entityKey)) continue;
+    seen.add(row.entityKey);
+    selected.push(row);
+    if (selected.length >= limit) break;
+  }
+  return selected;
+}
+
+export function selectSmartAndUnratedHolderProfiles<T extends { entityKey: string }>(smart: T[], unrated: T[], limit: number): T[] {
+  const seen = new Set<string>();
+  const selected: T[] = [];
+  for (const row of [...smart, ...unrated]) {
     if (seen.has(row.entityKey)) continue;
     seen.add(row.entityKey);
     selected.push(row);
@@ -572,47 +634,57 @@ function pricedUsd(row: { amountUsd: Prisma.Decimal; valuedUsd: Prisma.Decimal |
 
 function passReasons(row: RankedHolder) {
   return holderQualificationReasons({
-    csvScore: row.csvSeed?.sourceScore,
-    seedScore: row.seed?.sourceScore,
+    currentCoreCsv: row.authoritativeCore?.activeCore === true,
+    sourceScore: row.authoritativeCore?.sourceScore,
     coreWallet: Boolean(row.wallet?.hasLineageRoot),
     flowradarStrong: row.flowradarStrong,
     completedPositions: row.local.completedPositions,
-    liveTraderEvidence: row.live?.traderEvidence === true
+    liveTraderEvidence: row.live?.traderEvidence === true,
+    evidenceClassification: evidenceBackedClassification(row)
   });
 }
 
 export function holderQualificationReasons(input: {
-  csvScore?: number | null;
-  seedScore?: number | null;
+  currentCoreCsv?: boolean;
+  sourceScore?: number | null;
   coreWallet?: boolean;
   flowradarStrong?: boolean;
   completedPositions?: number;
   liveTraderEvidence?: boolean;
+  evidenceClassification?: boolean;
 }) {
   const reasons: string[] = [];
-  if ((input.csvScore ?? -1) >= 85) reasons.push('csv_high_reliability');
-  else if ((input.seedScore ?? -1) >= 85) reasons.push('core_seed_high_reliability');
+  if (input.currentCoreCsv) reasons.push('authoritative_core_csv');
+  if (input.currentCoreCsv && (input.sourceScore ?? -1) >= 85) reasons.push('authoritative_core_source_score_85');
   if (input.coreWallet) reasons.push('core_wallet');
   if (input.flowradarStrong) reasons.push('persistent_flowradar_intelligence');
   if ((input.completedPositions ?? 0) > 0) reasons.push('locally_validated_history');
-  if (input.liveTraderEvidence) reasons.push('live_historical_trader');
+  if (input.evidenceClassification) reasons.push('evidence_backed_classification');
   return uniqueStrings(reasons);
 }
 
 function holderTags(row: RankedHolder, now: Date) {
-  const text = [row.seed?.sourceLabel, row.profile?.role, row.profile?.intelligenceStatus, ...(row.profile?.evidenceSignals ?? []), ...row.providerTags, ...(row.wallet?.classifications ?? [])].filter(nonNull).join(' ');
+  if (row.category === 'large_unrated_holder') return ['Large Holder'];
+  const verifiedText = [
+    row.profile?.role, row.profile?.intelligenceStatus, ...(row.profile?.evidenceSignals ?? []),
+    ...(row.wallet?.classifications ?? []), ...(row.authoritativeCore?.sourceClassifications ?? [])
+  ].filter(nonNull).join(' ');
   const lastActivity = latestDate(row.lastActivityAt, row.profile?.lastActivityAt ?? null, row.local.lastActivityAt);
-  const dormant = lastActivity ? now.getTime() - lastActivity.getTime() >= 30 * 86_400_000 : row.seed?.sourceStatus?.toLowerCase() === 'dormant';
+  const dormant = lastActivity ? now.getTime() - lastActivity.getTime() >= RECENT_TRADER_WINDOW_MS : row.authoritativeCore?.sourceStatus?.toLowerCase() === 'dormant';
+  const recentTrading = Boolean(
+    lastActivity && now.getTime() - lastActivity.getTime() < RECENT_TRADER_WINDOW_MS
+    && (row.live?.traderEvidence || row.local.buyCount + row.local.sellCount >= 2)
+  );
   const tags: string[] = [];
   if (dormant) tags.push('Dormant');
-  if (/insider/i.test(text)) tags.push('Insider');
-  if (/sniper/i.test(text)) tags.push('Sniper');
-  if (/(^|\W)kol($|\W)|renowned/i.test(text)) tags.push('KOL');
-  if ((row.profile?.historicalAlphaScore ?? 0) >= 65 || /smart_money|high[_ -]?pnl|alpha/i.test(text)) tags.push('Alpha');
+  if (/insider/i.test(verifiedText)) tags.push('Insider');
+  if (/sniper/i.test(verifiedText)) tags.push('Sniper');
+  if (/(^|\W)kol($|\W)|renowned/i.test(verifiedText)) tags.push('KOL');
+  if ((row.profile?.historicalAlphaScore ?? 0) >= 65 && (row.profile?.alphaSampleSize ?? 0) > 0 || /smart_money|high[_ -]?pnl|alpha/i.test(verifiedText)) tags.push('Alpha');
   if (row.wallet?.hasLineageRoot) tags.push('Core');
-  if ((row.seed?.sourceScore ?? 0) >= 85) tags.push('Seed Match');
-  if (row.live?.traderEvidence || row.local.completedPositions > 0) tags.push('Active Trader');
-  if ((row.supplyPercentage ?? 0) >= 1 || /whale/i.test(text)) tags.push('Whale');
+  if (row.authoritativeCore?.activeCore) tags.push('Core CSV');
+  if (recentTrading) tags.push('Active Trader');
+  if ((row.supplyPercentage ?? 0) >= WHALE_HOLDING_THRESHOLD_PERCENT) tags.push('Whale');
   return uniqueStrings(tags).slice(0, 3).length ? uniqueStrings(tags).slice(0, 3) : ['Smart Holder'];
 }
 
@@ -622,16 +694,52 @@ function finalScore(row: RankedHolder) {
   const sizeScore = Math.min(100, Math.sqrt(Math.max(0, row.supplyPercentage ?? 0)) * 25);
   const alpha = meaningfulScore(row.profile?.historicalAlphaScore) ?? 0;
   const sample = Math.min(100, row.local.completedPositions * 15 + (row.live?.uniqueTradeTokens ?? 0) * 5);
-  const classification = row.flowradarStrong ? 100 : row.live?.traderEvidence ? 75 : (row.seed?.sourceScore ?? 0) >= 85 ? 70 : 0;
-  return roundScore(reliability * 0.35 + holderRankScore * 0.15 + sizeScore * 0.10 + alpha * 0.15 + sample * 0.10 + classification * 0.15);
+  const classification = row.flowradarStrong ? 100 : row.live?.traderEvidence ? 75 : evidenceBackedClassification(row) ? 70 : 0;
+  const sourcePriority = row.authoritativeCore?.activeCore ? Math.min(100, row.authoritativeCore.sourceScore ?? 50) : 0;
+  return roundScore(reliability * 0.30 + holderRankScore * 0.10 + sizeScore * 0.05 + alpha * 0.20 + sample * 0.10 + classification * 0.15 + sourcePriority * 0.10);
 }
 
-function preliminaryScore(holder: ResolvedHolder, reliability: number | null, profile: ProfileMatch | null, wallet: WalletMatch | null) {
-  return roundScore((reliability ?? 0) * 0.45 + Math.max(0, 102 - holder.holderRank * 2) * 0.2 + (meaningfulScore(profile?.historicalAlphaScore) ?? 0) * 0.2 + (wallet?.hasLineageRoot ? 100 : 0) * 0.15);
+function preliminaryScore(holder: ResolvedHolder, core: SeedMatch | null, reliability: number | null, profile: ProfileMatch | null, wallet: WalletMatch | null) {
+  const sourcePriority = core?.activeCore ? Math.min(100, core.sourceScore ?? 50) : 0;
+  return roundScore((reliability ?? 0) * 0.30 + Math.max(0, 102 - holder.holderRank * 2) * 0.1 + (meaningfulScore(profile?.historicalAlphaScore) ?? 0) * 0.25 + (wallet?.hasLineageRoot ? 100 : 0) * 0.2 + sourcePriority * 0.15);
 }
 
 function phaseTwoValue(row: RankedHolder) {
-  return (row.seed?.sourceScore ?? 0) >= 70 || row.flowradarMatch || row.buyCount + row.sellCount > 0 || row.providerTags.some((tag) => /smart|sniper|whale|kol|top_holder/i.test(tag));
+  return row.authoritativeCore?.activeCore === true || row.flowradarMatch || row.buyCount + row.sellCount > 0 || row.providerTags.some((tag) => /smart|sniper|kol|top_holder/i.test(tag));
+}
+
+function preliminaryPriority(core: SeedMatch | null, flowradarStrong: boolean, wallet: WalletMatch | null) {
+  if (core?.activeCore && (core.sourceScore ?? -1) >= 85) return 500;
+  if (flowradarStrong || wallet?.hasLineageRoot) return 400;
+  if (core?.activeCore) return 220;
+  return 0;
+}
+
+function finalPriority(row: RankedHolder) {
+  if (row.authoritativeCore?.activeCore && (row.authoritativeCore.sourceScore ?? -1) >= 85) return 500;
+  if (row.flowradarStrong || row.wallet?.hasLineageRoot) return 400;
+  if (validatedHistory(row) && row.reliability !== null) return 300;
+  if (row.local.completedPositions > 0) return 250;
+  if (row.authoritativeCore?.activeCore) return 220;
+  if (evidenceBackedClassification(row)) return 200;
+  if (row.live?.traderEvidence) return 180;
+  return 0;
+}
+
+function holderSort(left: RankedHolder, right: RankedHolder) {
+  return right.rankingPriority - left.rankingPriority
+    || right.rankingScore - left.rankingScore
+    || left.holderRank - right.holderRank
+    || left.ownerAddress.localeCompare(right.ownerAddress);
+}
+
+function validatedHistory(row: RankedHolder) {
+  return row.local.completedPositions > 0;
+}
+
+function evidenceBackedClassification(row: RankedHolder) {
+  const classifications = [...(row.wallet?.classifications ?? []), ...(row.profile?.evidenceSignals ?? [])];
+  return classifications.some((label) => /insider|sniper|smart_money|high[_ -]?pnl|alpha|(^|\W)kol($|\W)/i.test(label));
 }
 
 function profileHoldings(row: RankedHolder, tokenAddress: string, tokenSymbol: string): TokenHolderPosition[] {
@@ -660,8 +768,7 @@ async function persistHolderReceipts(prisma: PrismaClient, tokenAddress: string,
       accountType: row.accountType,
       isOnCurve: row.isOnCurve,
       infrastructureReason: row.infrastructureReason,
-      csvMatch: row.csvSeed,
-      seedMatch: row.seed,
+      authoritativeCoreMatch: row.authoritativeCore,
       flowradarProfile: row.profile,
       entityKey: row.entityKey,
       liveEnrichment: row.live,
@@ -669,12 +776,14 @@ async function persistHolderReceipts(prisma: PrismaClient, tokenAddress: string,
       reliability: row.reliability,
       tags: row.tags,
       passReasons: row.passReasons,
+      holderCategory: row.category,
+      rankingPriority: row.rankingPriority,
       rankingScore: row.rankingScore,
       costBasisStatus: row.local.completedPositions > 0 ? 'locally_validated' : 'unverified_not_displayed',
       computedAt: now.toISOString()
     };
     const coverage = row.infrastructureReason ? 'infrastructure_excluded' : row.local.completedPositions > 0 ? 'local_history' : row.live ? 'provider_history_enriched' : 'holder_only';
-    const status = row.infrastructureReason ? 'excluded_infrastructure' : acceptedSet.has(row.ownerAddress) ? 'observation_only' : 'holder_observation';
+    const status = row.infrastructureReason ? 'excluded_infrastructure' : acceptedSet.has(row.ownerAddress) ? 'smart_holder_observation' : 'large_unrated_holder';
     const winRate = row.local.completedPositions ? row.local.winCount / row.local.completedPositions : null;
     const create = {
       chain: 'SOLANA' as const,
@@ -739,6 +848,30 @@ function bestSeed<T extends SeedMatch>(rows: T[]): SeedMatch | null {
   return [...rows].sort((a, b) => (b.sourceScore ?? -1) - (a.sourceScore ?? -1) || a.sourceFile.localeCompare(b.sourceFile))[0] ?? null;
 }
 
+function seedMatch(row: {
+  sourceFile: string; sourceScore: number | null; sourceTier: string | null; sourceStatus: string | null;
+  sourceLabel: string | null; sourceLastActiveAt: Date | null; rawJson: Prisma.JsonValue;
+}): SeedMatch {
+  const raw = objectValue(row.rawJson) ?? {};
+  const metadata = objectValue(raw._flowradarSourceMetadata) ?? {};
+  const status = row.sourceStatus?.toLowerCase() ?? null;
+  return {
+    sourceFile: row.sourceFile,
+    sourceScore: row.sourceScore,
+    sourceTier: row.sourceTier,
+    sourceStatus: row.sourceStatus,
+    sourceLabel: row.sourceLabel,
+    sourceLastActiveAt: row.sourceLastActiveAt,
+    sourceReliabilityScore: firstNumber(metadata.reliabilityScore, raw.reliabilityscore, raw.reliability_score, raw.reliability),
+    sourceCategory: stringValue(metadata.category) ?? stringValue(raw.category),
+    sourceType: stringValue(metadata.type) ?? stringValue(raw.type) ?? stringValue(raw.wallettype),
+    sourceClassifications: uniqueStrings([
+      ...stringArray(metadata.classifications), ...stringArray(raw.classifications), ...stringArray(raw.classification), ...stringArray(raw.tags)
+    ].map((value) => value.toLowerCase())),
+    activeCore: !status || !['inactive', 'removed', 'disabled', 'off'].includes(status)
+  };
+}
+
 function profileMatch(row: ProfileMatch): ProfileMatch { return row; }
 function walletMatch(row: { id: string; status: string; isWatched: boolean; lineageRoot: { id: string } | null; classifications: Array<{ label: string }> }): WalletMatch {
   return { id: row.id, status: row.status, isWatched: row.isWatched, hasLineageRoot: Boolean(row.lineageRoot), classifications: row.classifications.map((item) => item.label) };
@@ -746,12 +879,29 @@ function walletMatch(row: { id: string; status: string; isWatched: boolean; line
 function strongFlowradarProfile(profile: ProfileMatch | null, wallet: WalletMatch | null) {
   return Boolean(
     wallet?.hasLineageRoot || wallet && ['signal_eligible', 'public_kol', 'copytrader'].includes(wallet.status)
-    || profile && ((profile.sourceScore ?? 0) >= 85 || profile.evidenceScore >= 50 || profile.historicalAlphaScore >= 65 || ['S', 'A'].includes(profile.tier) || ['root_permanent', 'strong_link'].includes(profile.monitoringPriority))
-    || wallet?.classifications.some((label) => ['smart_money', 'sniper', 'whale'].includes(label))
+    || profile && substantiveProfile(profile) && (
+      profile.evidenceScore >= 50
+      || profile.historicalAlphaScore >= 65 && profile.alphaSampleSize > 0
+      || ['S', 'A'].includes(profile.tier) && profile.confidence > 0
+    )
+    || wallet?.classifications.some((label) => ['smart_money', 'sniper', 'insider', 'high_pnl', 'alpha'].includes(label))
   );
 }
+function substantiveFlowradarProfile(profile: ProfileMatch | null, wallet: WalletMatch | null) {
+  return Boolean(wallet?.hasLineageRoot || wallet && wallet.status !== 'observation_only' || substantiveProfile(profile));
+}
+function substantiveProfile(profile: ProfileMatch | null) {
+  if (!profile) return false;
+  const seedOnly = ['priority_core_wallet_seed', 'authoritative_core_wallet_csv'].includes(profile.discoverySource)
+    && ['priority_core_wallet_seed', 'authoritative_core_wallet_csv'].includes(profile.lastDiscoverySource);
+  return profile.evidenceScore > 0 || profile.independentSignals > 0 || profile.alphaSampleSize > 0
+    || profile.confidence > 0 || profile.evidenceSignals.length > 0 || !seedOnly;
+}
 function reliabilityScore(seed: SeedMatch | null, profile: ProfileMatch | null) {
-  const values = [seed?.sourceScore, profile?.sourceScore, meaningfulScore(profile?.evidenceScore), normalizedConfidence(profile?.confidence)].filter(isNumber).filter((value) => value > 0);
+  const profileValues = substantiveProfile(profile)
+    ? [meaningfulScore(profile?.evidenceScore), normalizedConfidence(profile?.confidence), normalizedConfidence(profile?.alphaConfidence)]
+    : [];
+  const values = [seed?.sourceReliabilityScore, ...profileValues].filter(isNumber).filter((value) => value > 0);
   return values.length ? Math.min(100, Math.max(...values)) : null;
 }
 

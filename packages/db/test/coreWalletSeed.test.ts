@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { prisma } from '../src/client';
 import {
+  AUTHORITATIVE_CORE_AUTHORITY,
   importPriorityCoreWalletSeeds,
   previewPriorityCoreWalletSeeds,
   type PriorityCoreSeedRow
@@ -50,6 +51,52 @@ describe('priority core wallet seeds', () => {
       'accepted_primary', 'accepted_duplicate_source', 'rejected_below_threshold', 'rejected_invalid_address'
     ]));
   });
+
+  it('preserves authoritative CSV metadata without promoting source score to evidence or Reliability', async () => {
+    const rows: PriorityCoreSeedRow[] = [{
+      ...row(HASH_A, 2, ADDRESS_A, 70, 'active'),
+      category: 'manual_core',
+      type: 'seed',
+      reliabilityScore: null,
+      classifications: ['insider'],
+      raw: { address: ADDRESS_A, score: '70', status: 'active', label: 'Current Core', category: 'manual_core' }
+    }];
+    const first = await importPriorityCoreWalletSeeds(prisma, rows, {
+      threshold: 0, authority: AUTHORITATIVE_CORE_AUTHORITY, now: NOW
+    });
+    expect(first).toMatchObject({
+      authority: AUTHORITATIVE_CORE_AUTHORITY,
+      acceptedRows: 1,
+      uniqueWallets: 1,
+      idempotentReplay: false,
+      guardrails: {
+        sourceScoreOwnershipEvidence: false,
+        sourceScoreSignalEligibility: false,
+        sourceScoreBuyCandidateTrigger: false
+      }
+    });
+    const receipt = await prisma.coreWalletSeedImport.findUniqueOrThrow({ where: { id: first.importId } });
+    expect(receipt.guardrailJson).toMatchObject({
+      sourceAuthority: AUTHORITATIVE_CORE_AUTHORITY,
+      authoritativeCoreMembership: true
+    });
+    const record = await prisma.coreWalletSeedRecord.findFirstOrThrow({ where: { importId: first.importId } });
+    expect(record).toMatchObject({ sourceScore: 70, sourceLabel: 'candidate-2', sourceStatus: 'active' });
+    expect(record.rawJson).toMatchObject({
+      category: 'manual_core',
+      _flowradarSourceMetadata: {
+        category: 'manual_core', type: 'seed', reliabilityScore: null, classifications: ['insider']
+      }
+    });
+    const profile = await prisma.walletIntelligenceProfile.findUniqueOrThrow({ where: { chain_address: { chain: 'SOLANA', address: ADDRESS_A } } });
+    expect(profile).toMatchObject({ role: 'authoritative_core_list_candidate', evidenceScore: 0, confidence: 0, historicalAlphaScore: 35 });
+
+    const replay = await importPriorityCoreWalletSeeds(prisma, rows, {
+      threshold: 0, authority: AUTHORITATIVE_CORE_AUTHORITY, now: new Date(NOW.getTime() + 60_000)
+    });
+    expect(replay.idempotentReplay).toBe(true);
+    expect(await prisma.coreWalletSeedRecord.count({ where: { importId: first.importId } })).toBe(1);
+  }, 30_000);
 
   it('imports observation-only candidates, creates only singleton possible memberships, and remains idempotent', async () => {
     await prisma.wallet.create({ data: {

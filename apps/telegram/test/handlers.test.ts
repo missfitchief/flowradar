@@ -436,12 +436,22 @@ describe('Telegram command handlers', () => {
     const report = {
       chain: 'SOLANA', tokenAddress: ADDRESS, tokenSymbol: 'ALPHA', holdersScanned: 50, ownersResolved: 50,
       uniqueOwnerWallets: 44, infrastructureExcluded: 12, csvMatches: 2, flowradarMatches: 3,
-      liveEnriched: 8, smartProfiles: 7, uniqueEntities: 6, processingTimeMs: 2_100, coverageWarnings: [],
+      liveEnriched: 8, smartProfiles: 2, smartHolders: 2, largeUnratedHolders: 9,
+      reliability85Wallets: 1, validatedHistoryWallets: 1, uniqueEntities: 11, processingTimeMs: 2_100, coverageWarnings: [],
       profiles: [{
+        category: 'smart_holder',
         holderRank: 7, walletAddress: 'GV6UUmNxz2RpKxmNAPadYKb7uQpszwqQAu3qLJxVdC52', entityKey: 'entity:one',
         relatedWalletCount: 1, tags: ['Dormant', 'Insider', 'Sniper'], wins: [], medianHoldMs: null,
-        reliability: 92, historicalAlpha: 88, rankingScore: 91, passReasons: ['csv_high_reliability'],
+        reliability: 92, historicalAlpha: 88, rankingScore: 91, passReasons: ['authoritative_core_csv'],
+        sourceLabel: 'Core alpha', sourceScore: 95,
         holdings: [{ symbol: 'ALPHA', tokenAddress: ADDRESS, usdValue: 31_000, supplyPercentage: 4.8 }]
+      }, {
+        category: 'large_unrated_holder',
+        holderRank: 3, walletAddress: 'Bj7P6x44VtYdoG2SrmqGB8T1J7kMkp5L4tw5hFq8aCNU', entityKey: 'entity:two',
+        relatedWalletCount: 0, tags: ['Large Holder'], wins: [], medianHoldMs: null,
+        reliability: null, historicalAlpha: null, rankingScore: 12, passReasons: ['large_unrated_holder'],
+        sourceLabel: null, sourceScore: null,
+        holdings: [{ symbol: 'ALPHA', tokenAddress: ADDRESS, usdValue: null, supplyPercentage: 3.19 }]
       }]
     };
     const service = {
@@ -452,13 +462,18 @@ describe('Telegram command handlers', () => {
     await createUpdateHandler(service, api, new Set(['123']))({ update_id: 98, message: { message_id: 98, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
 
     const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[1]!;
-    expect(text).toContain('50 holders scanned · 7 smart profiles');
-    expect(text).toContain('12 infrastructure excluded · 6 unique entities');
+    expect(text).toContain('50 holders scanned');
+    expect(text).toContain('2 smart holders · 9 unrated large holders');
+    expect(text).toContain('12 infrastructure excluded · 11 unique entities');
+    expect(text).toContain('SMART HOLDERS');
+    expect(text).toContain('LARGE UNRATED HOLDERS');
     expect(text).toContain('HOLDER #7');
     expect(text).toContain('Dormant · Insider · Sniper');
     expect(text).toContain('Wins: No verified history');
     expect(text).toContain('ALPHA 4.8%');
     expect(text).toContain('Reliability: 92/100');
+    expect(text).toContain('Reliability: Not rated');
+    expect(text).not.toContain('smart profiles');
     expect(text).not.toMatch(/provider|realized pnl|roi|trade_ownership_unverified/i);
     expect(keyboard?.inline_keyboard[0]?.map((button) => button.text)).toEqual(['Copy #1', 'Explorer ↗']);
     expect(service.investigateTokenHolders).toHaveBeenCalledWith(ADDRESS);
