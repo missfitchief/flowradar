@@ -8,6 +8,10 @@ $Node = (Get-Command node.exe -ErrorAction Stop).Source
 $Npm = (Get-Command npm.cmd -ErrorAction Stop).Source
 $Supervisor = Join-Path $PSScriptRoot 'flowradar-component-supervisor.mjs'
 $Startup = Join-Path $PSScriptRoot 'flowradar-startup.mjs'
+$LauncherSource = Join-Path $PSScriptRoot 'FlowRadar.HiddenLauncher.cs'
+$RuntimeBin = Join-Path $Repo '.runtime\bin'
+$Launcher = Join-Path $RuntimeBin 'FlowRadar.HiddenLauncher.exe'
+$LogDir = Join-Path $Repo '.runtime\logs'
 $User = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $TaskNames = [ordered]@{
   postgres = 'FlowRadar-PostgreSQL'
@@ -26,22 +30,48 @@ if (-not (Test-Path (Join-Path $Repo 'apps\web\.next\BUILD_ID'))) {
   } finally { Pop-Location }
 }
 
+New-Item -ItemType Directory -Path $RuntimeBin -Force | Out-Null
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+if ((-not (Test-Path $Launcher)) -or ((Get-Item $LauncherSource).LastWriteTimeUtc -gt (Get-Item $Launcher).LastWriteTimeUtc)) {
+  Remove-Item -LiteralPath $Launcher -Force -ErrorAction SilentlyContinue
+  Add-Type -Path $LauncherSource -OutputAssembly $Launcher -OutputType WindowsApplication
+}
+
+function Quote-TaskArgument([string]$Value) {
+  return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+function New-HiddenNodeAction([string]$Script, [string[]]$ScriptArguments, [string]$Role) {
+  $stdout = Join-Path $LogDir ("task-{0}.stdout.log" -f $Role)
+  $stderr = Join-Path $LogDir ("task-{0}.stderr.log" -f $Role)
+  $launcherLog = Join-Path $LogDir 'hidden-launcher.log'
+  $arguments = @('--cwd', $Repo, '--stdout', $stdout, '--stderr', $stderr, '--launcher-log', $launcherLog, '--', $Node, $Script) + $ScriptArguments
+  $argumentLine = ($arguments | ForEach-Object { Quote-TaskArgument $_ }) -join ' '
+  return New-ScheduledTaskAction -Execute $Launcher -Argument $argumentLine -WorkingDirectory $Repo
+}
+
+# Standard-user Windows cannot register S4U tasks without elevation. The
+# Windows-subsystem launcher keeps the task in the user's normal security
+# context but starts the existing node.exe directly with CreateNoWindow and
+# UseShellExecute=false. It waits for Node, so Task Scheduler still owns the
+# complete supervisor lifetime and its restart policy remains effective.
 $Principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
 $Settings = New-ScheduledTaskSettingsSet `
   -AllowStartIfOnBatteries `
   -DontStopIfGoingOnBatteries `
   -StartWhenAvailable `
   -ExecutionTimeLimit ([TimeSpan]::Zero) `
+  -Hidden `
   -MultipleInstances IgnoreNew `
   -RestartCount 999 `
   -RestartInterval (New-TimeSpan -Minutes 1)
 
 foreach ($entry in $TaskNames.GetEnumerator()) {
-  $action = New-ScheduledTaskAction -Execute $Node -Argument ('"{0}" {1}' -f $Supervisor, $entry.Key) -WorkingDirectory $Repo
+  $action = New-HiddenNodeAction -Script $Supervisor -ScriptArguments @($entry.Key) -Role $entry.Key
   Register-ScheduledTask -TaskName $entry.Value -Action $action -Principal $Principal -Settings $Settings -Force | Out-Null
 }
 
-$StartupAction = New-ScheduledTaskAction -Execute $Node -Argument ('"{0}"' -f $Startup) -WorkingDirectory $Repo
+$StartupAction = New-HiddenNodeAction -Script $Startup -ScriptArguments @() -Role 'startup'
 $LogonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $User
 $BootTrigger = New-ScheduledTaskTrigger -AtStartup
 $WatchdogTrigger = New-ScheduledTaskTrigger `
@@ -102,8 +132,11 @@ if ($StartNow) { Start-ScheduledTask -TaskName 'FlowRadar-Startup' }
 
 [pscustomobject]@{
   StartupTask = 'FlowRadar-Startup'
-  StartupCommand = ('"{0}" "{1}"' -f $Node, $Startup)
+  StartupCommand = ('"{0}" -- "{1}" "{2}"' -f $Launcher, $Node, $Startup)
   Principal = $User
+  LogonType = 'Interactive token through Windows hidden launcher'
+  Hidden = $true
+  NodeExecutable = $Node
   Trigger = $TriggerDescription
   Components = @($TaskNames.Values)
 } | ConvertTo-Json -Depth 4

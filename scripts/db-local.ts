@@ -231,7 +231,7 @@ async function startCluster(): Promise<void> {
   const result = spawnSync(
     pgCtl,
     ['-D', DATA_DIR, '-l', LOG_FILE, '-o', `-p ${LITE_PORT}`, 'start'],
-    { stdio: 'ignore' },
+    { stdio: 'ignore', windowsHide: true, shell: false },
   );
   if (result.status !== 0) {
     // Benign-race check: probePort() and pg_ctl start are not atomic, so two
@@ -375,7 +375,11 @@ async function stop(): Promise<void> {
   }
 
   const pgCtl = await resolvePgCtlPath();
-  const result = spawnSync(pgCtl, ['-D', DATA_DIR, 'stop'], { encoding: 'utf-8' });
+  const result = spawnSync(pgCtl, ['-D', DATA_DIR, 'stop'], {
+    encoding: 'utf-8',
+    windowsHide: true,
+    shell: false,
+  });
   const output = `${result.stdout}\n${result.stderr}`;
   if (result.status === 0) {
     console.log('[db-local] Postgres stopped.');

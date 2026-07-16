@@ -16,20 +16,33 @@ if (!lock) process.exit(0);
 let child = null;
 let stopping = false;
 let restartCount = 0;
+let stateSnapshot = {};
 const supervisorStartedAt = new Date().toISOString();
 
 function state(status, extra = {}) {
-  writeState(role, {
+  stateSnapshot = {
+    ...stateSnapshot,
     status, supervisorPid: process.pid, childPid: child?.pid ?? null,
-    supervisorStartedAt, restartCount, mockMode: false, repoRoot: REPO_ROOT, ...extra
-  });
+    supervisorStartedAt, restartCount, mockMode: false, repoRoot: REPO_ROOT,
+    heartbeatAt: new Date().toISOString(), ...extra
+  };
+  writeState(role, stateSnapshot);
 }
+
+// The watchdog uses this heartbeat together with the PID and command line. A
+// live PID alone is insufficient on Windows because PIDs can be reused and a
+// wedged supervisor can remain alive without supervising its child.
+const heartbeat = setInterval(() => {
+  if (!stopping && stateSnapshot.status) state(stateSnapshot.status);
+}, 15_000);
+heartbeat.unref();
 
 async function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   roleLog(role, `supervisor stopping signal=${signal}`);
   state('stopping');
+  clearInterval(heartbeat);
   if (child?.pid) stopProcessTree(child.pid);
   lock.release();
   process.exit(0);
@@ -37,7 +50,7 @@ async function shutdown(signal) {
 process.once('SIGINT', () => void shutdown('SIGINT'));
 process.once('SIGTERM', () => void shutdown('SIGTERM'));
 process.once('SIGHUP', () => void shutdown('SIGHUP'));
-process.once('exit', () => lock.release());
+process.once('exit', () => { clearInterval(heartbeat); lock.release(); });
 process.on('uncaughtException', (error) => { roleLog(role, `uncaught exception: ${error.message}`); state('failed', { lastError: error.message }); lock.release(); process.exit(1); });
 process.on('unhandledRejection', (error) => { const message = error instanceof Error ? error.message : String(error); roleLog(role, `unhandled rejection: ${message}`); state('failed', { lastError: message }); lock.release(); process.exit(1); });
 

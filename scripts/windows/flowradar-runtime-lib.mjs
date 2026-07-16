@@ -96,6 +96,21 @@ export function processCommandLine(pid) {
   catch { return ''; }
 }
 
+function supervisorSignature(role) {
+  return role === 'startup'
+    ? { script: 'flowradar-startup.mjs', roleArgument: null }
+    : { script: 'flowradar-component-supervisor.mjs', roleArgument: role };
+}
+
+export function roleSupervisorAlive(role, state = readState(role)) {
+  const pid = Number(state?.supervisorPid);
+  if (!processAlive(pid)) return false;
+  const command = processCommandLine(pid);
+  const expected = supervisorSignature(role);
+  return command.includes(expected.script)
+    && (!expected.roleArgument || command.includes(expected.roleArgument));
+}
+
 export function stopProcessTree(pid) {
   if (!processAlive(pid)) return;
   spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
@@ -107,7 +122,10 @@ export function acquireRoleLock(role) {
     let prior = null;
     try { prior = JSON.parse(fs.readFileSync(lockPath, 'utf8')); } catch { /* stale */ }
     const command = prior?.pid ? processCommandLine(Number(prior.pid)) : '';
-    if (Number(prior?.pid) !== process.pid && command.includes('flowradar-component-supervisor.mjs') && command.includes(role)) {
+    const expected = supervisorSignature(role);
+    const matchingSupervisor = command.includes(expected.script)
+      && (!expected.roleArgument || command.includes(expected.roleArgument));
+    if (Number(prior?.pid) !== process.pid && matchingSupervisor) {
       roleLog(role, `duplicate supervisor suppressed; active supervisor pid=${prior.pid}`);
       return null;
     }
@@ -126,7 +144,7 @@ export function acquireRoleLock(role) {
 
 export function cleanupStaleChild(role, signature) {
   const prior = readState(role);
-  if (!prior?.childPid || processAlive(prior.supervisorPid)) return;
+  if (!prior?.childPid || roleSupervisorAlive(role, prior)) return;
   const command = processCommandLine(Number(prior.childPid));
   if (command && command.includes(signature)) {
     roleLog(role, `stale child detected and stopped pid=${prior.childPid}`);
@@ -140,6 +158,8 @@ export function spawnLogged(role, executable, args, options = {}) {
     cwd: options.cwd ?? REPO_ROOT,
     env: options.env ?? runtimeEnv(),
     windowsHide: true,
+    shell: false,
+    detached: false,
     stdio: ['ignore', 'pipe', 'pipe']
   });
   for (const [streamName, stream] of [['stdout', child.stdout], ['stderr', child.stderr]]) {

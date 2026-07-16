@@ -3,23 +3,55 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
 import {
-  LOG_DIR, REPO_ROOT, STATE_DIR, TASKS, processAlive, readRootEnv, readState,
-  roleLog, safeTaskRun, sleep, tcpReady, waitFor, writeState
+  LOG_DIR, REPO_ROOT, TASKS, acquireRoleLock, processAlive, readRootEnv, readState,
+  roleSupervisorAlive, safeTaskRun, sleep, stopProcessTree, tcpReady, waitFor, writeState
 } from './flowradar-runtime-lib.mjs';
 
 const startupLog = path.join(LOG_DIR, 'startup.log');
 let telegramDiagnostics = null;
+const lock = acquireRoleLock('startup');
+if (!lock) process.exit(0);
+
+process.once('exit', () => lock.release());
 function log(message) {
   const line = `${new Date().toISOString()} ${message}\n`;
   fs.appendFileSync(startupLog, line, 'utf8');
 }
 
 async function startRole(role, readiness, timeoutMs = 120_000) {
+  const healthy = async () => {
+    const state = readState(role);
+    if (!state || !roleSupervisorAlive(role, state)) return false;
+    const heartbeatAt = Date.parse(state.heartbeatAt ?? state.updatedAt ?? '');
+    if (!Number.isFinite(heartbeatAt) || Date.now() - heartbeatAt > 45_000) return false;
+    return Boolean(await readiness(state));
+  };
+
+  if (await healthy()) {
+    const state = readState(role);
+    log(`healthy role=${role} supervisorPid=${state.supervisorPid} childPid=${state.childPid ?? 'n/a'}; task start skipped`);
+    return state;
+  }
+
+  const previous = readState(role);
+  if (roleSupervisorAlive(role, previous)) {
+    // Allow a transient child restart to recover before replacing the whole
+    // supervisor. This path is never taken for a healthy component.
+    const recovered = await waitFor(healthy, 15_000, 1_000);
+    if (recovered) {
+      const state = readState(role);
+      log(`recovered role=${role} supervisorPid=${state.supervisorPid}; task restart skipped`);
+      return state;
+    }
+    log(`stale or unhealthy role=${role} supervisorPid=${previous.supervisorPid}; replacing supervisor`);
+    stopProcessTree(Number(previous.supervisorPid));
+    await waitFor(() => !processAlive(Number(previous.supervisorPid)), 10_000, 250);
+  }
+
   log(`starting role=${role} task=${TASKS[role]}`);
   safeTaskRun(TASKS[role]);
   const ok = await waitFor(async () => {
-    const state = readState(role);
-    return Boolean(state && processAlive(state.supervisorPid) && await readiness(state));
+    return healthy();
   }, timeoutMs, 1_000);
   if (!ok) throw new Error(`${role} did not become ready within ${timeoutMs}ms`);
   const state = readState(role);
@@ -116,4 +148,6 @@ main().catch((error) => {
   log(`startup failed: ${message}`);
   writeState('startup', { status: 'failed', supervisorPid: process.pid, lastError: message });
   process.exitCode = 1;
+}).finally(() => {
+  lock.release();
 });
