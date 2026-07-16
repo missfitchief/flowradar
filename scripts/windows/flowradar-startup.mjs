@@ -1,12 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { PrismaClient } from '@prisma/client';
 import {
   LOG_DIR, REPO_ROOT, STATE_DIR, TASKS, processAlive, readRootEnv, readState,
   roleLog, safeTaskRun, sleep, tcpReady, waitFor, writeState
 } from './flowradar-runtime-lib.mjs';
 
 const startupLog = path.join(LOG_DIR, 'startup.log');
+let telegramDiagnostics = null;
 function log(message) {
   const line = `${new Date().toISOString()} ${message}\n`;
   fs.appendFileSync(startupLog, line, 'utf8');
@@ -28,7 +30,8 @@ async function startRole(role, readiness, timeoutMs = 120_000) {
 async function telegramHealth(state) {
   const env = readRootEnv();
   const token = env.TELEGRAM_BOT_TOKEN?.trim();
-  if (!token || !processAlive(state.childPid)) return false;
+  const databaseUrl = env.DATABASE_URL?.trim();
+  if (!token || !databaseUrl || !processAlive(state.childPid)) return false;
   const base = `https://api.telegram.org/bot${token}`;
   try {
     const [meResponse, webhookResponse] = await Promise.all([
@@ -39,10 +42,47 @@ async function telegramHealth(state) {
     const webhook = await webhookResponse.json();
     if (!me.ok || me.result?.username !== 'simbawalletfinderbot') return false;
     if (!webhook.ok || webhook.result?.url) return false;
+    const pollerCount = telegramPollerCount();
+    if (pollerCount !== 1) return false;
+
+    // The cursor only advances when Telegram has a new update. A fresh healthy
+    // heartbeat proves the active getUpdates loop completed successfully even
+    // when pending_update_count is zero, without starting a competing poller.
+    process.env.DATABASE_URL = databaseUrl;
+    const prisma = new PrismaClient();
+    let heartbeat;
+    try {
+      heartbeat = await prisma.runtimeHeartbeat.findUnique({ where: { component: 'telegram' } });
+    } finally {
+      await prisma.$disconnect();
+    }
+    const heartbeatAgeMs = heartbeat ? Date.now() - heartbeat.heartbeatAt.getTime() : Number.POSITIVE_INFINITY;
+    const metadata = heartbeat?.metadataJson && typeof heartbeat.metadataJson === 'object' && !Array.isArray(heartbeat.metadataJson)
+      ? heartbeat.metadataJson : {};
+    if (heartbeat?.status !== 'healthy' || heartbeat.pid !== state.childPid || heartbeatAgeMs > 60_000) return false;
+    if (typeof metadata.nextUpdateId !== 'string') return false;
+
     const logPath = path.join(LOG_DIR, 'telegram.log');
     const recent = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8').slice(-200_000) : '';
-    return !/409 Conflict/i.test(recent);
+    if (/409 Conflict/i.test(recent)) return false;
+    telegramDiagnostics = {
+      username: me.result.username,
+      webhookEmpty: true,
+      pendingUpdates: Number(webhook.result?.pending_update_count ?? 0),
+      pollerCount,
+      heartbeatAt: heartbeat.heartbeatAt.toISOString(),
+      nextUpdateId: metadata.nextUpdateId
+    };
+    return true;
   } catch { return false; }
+}
+
+function telegramPollerCount() {
+  const script = String.raw`@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like '*apps\telegram\src\index.ts*' }).Count`;
+  const output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8', windowsHide: true, timeout: 10_000
+  });
+  return Number.parseInt(output.trim(), 10) || 0;
 }
 
 async function main() {
@@ -64,6 +104,7 @@ async function main() {
     alchemyWebhookUpdated: states.tunnel.alchemyWebhookUpdated,
     remoteAddressCount: states.tunnel.remoteAddressCount,
     publicRouteStatus: states.tunnel.publicRouteStatus,
+    telegram: telegramDiagnostics,
     roles: Object.fromEntries(Object.entries(states).map(([role, state]) => [role, { supervisorPid: state.supervisorPid, childPid: state.childPid, status: state.status }]))
   };
   writeState('startup', receipt);
