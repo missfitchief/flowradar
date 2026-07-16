@@ -150,7 +150,9 @@ async function listAddresses(webhookId: string, auth: string, chain: ChainId) {
   for (let page = 0; page < 1_000; page++) {
     const url = new URL(LIST_URL);
     url.searchParams.set('webhook_id', webhookId);
-    url.searchParams.set('limit', '500');
+    // Notify's address-list endpoint currently rejects 500 with HTTP 400;
+    // its documented/default page size is 100. Keep paging via `after`.
+    url.searchParams.set('limit', '100');
     if (after) url.searchParams.set('after', after);
     const response = await fetch(url, { headers: { 'X-Alchemy-Token': auth }, signal: AbortSignal.timeout(20_000) });
     if (!response.ok) throw new Error(`Alchemy Notify address list failed with HTTP ${response.status}`);
