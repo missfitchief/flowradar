@@ -17,6 +17,7 @@ import { recordProviderHealth } from '../operations/production';
 import { syncAlchemyCoreWalletChange } from '../alchemy/subscriptions';
 import { toCsv, toJsonDocument } from './export';
 import { RAW_TOKEN_CANDIDATE_LIMIT, rankingReceiptFromJson, refreshTokenCandidateRanking, reportFromReceipts } from './tokenCandidateRanking';
+import { runTokenHolderIntelligence, type TokenHolderDataSource } from './tokenHolderIntelligence';
 import type {
   AlertInboxFilter, AlertInboxItem, BridgeRow, CapitalFlowRow, CoreWalletActivityRow, CoreWalletCapitalRow,
   CoreWalletListItem, OperatorPage, OperatorSessionState, OperatorWorkflow, ProfitableSort, ProfitableWalletRow,
@@ -32,6 +33,7 @@ const pendingWorkflowKey = (workflow: OperatorWorkflow) => `pending:${workflow}`
 
 export interface OperatorServiceOptions {
   tokenTopTraderProviders?: Partial<Record<ChainId, HistoricalTraderProvider>>;
+  tokenHolderSource?: Partial<TokenHolderDataSource>;
   walletCapitalScanner?: WalletCapitalScanProvider;
   walletBridgeScanner?: WalletBridgeScanProvider;
 }
@@ -304,6 +306,16 @@ export class OperatorService {
       rankings.push({ chain: ref.chain, ...(await refreshTokenCandidateRanking(this.prisma, { chain: ref.chain, tokenAddress: ref.address, now })) });
     }
     return { chains: refs.map((ref) => ref.chain), candidateCount, rankings };
+  }
+
+  /** Solana /token Holder Intelligence. This path deliberately starts from
+   * current holder balances; provider top-trader/PnL rows remain isolated in
+   * scanTokenTopPnl for legacy exports and EVM fallback. */
+  async investigateTokenHolders(addressInput: string) {
+    return runTokenHolderIntelligence(this.prisma, {
+      tokenAddress: addressInput,
+      source: this.options.tokenHolderSource
+    });
   }
 
   async tokenSummary(addressInput: string, page = 1, pageSize = 10, sort: TokenTraderSort = 'pnl') {

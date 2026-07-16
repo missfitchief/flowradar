@@ -431,6 +431,39 @@ describe('Telegram command handlers', () => {
     expect(keyboard?.inline_keyboard).toHaveLength(5);
   });
 
+  it('renders Solana holder intelligence with real holder rank and no provider-only PnL', async () => {
+    const api = apiMock();
+    const report = {
+      chain: 'SOLANA', tokenAddress: ADDRESS, tokenSymbol: 'ALPHA', holdersScanned: 50, ownersResolved: 50,
+      uniqueOwnerWallets: 44, infrastructureExcluded: 12, csvMatches: 2, flowradarMatches: 3,
+      liveEnriched: 8, smartProfiles: 7, uniqueEntities: 6, processingTimeMs: 2_100, coverageWarnings: [],
+      profiles: [{
+        holderRank: 7, walletAddress: 'GV6UUmNxz2RpKxmNAPadYKb7uQpszwqQAu3qLJxVdC52', entityKey: 'entity:one',
+        relatedWalletCount: 1, tags: ['Dormant', 'Insider', 'Sniper'], wins: [], medianHoldMs: null,
+        reliability: 92, historicalAlpha: 88, rankingScore: 91, passReasons: ['csv_high_reliability'],
+        holdings: [{ symbol: 'ALPHA', tokenAddress: ADDRESS, usdValue: 31_000, supplyPercentage: 4.8 }]
+      }]
+    };
+    const service = {
+      validateWorkflowTarget: vi.fn().mockResolvedValue(true), clearPendingSession: vi.fn(),
+      createSession: vi.fn().mockResolvedValue({ id: 'holder-session' }), investigateTokenHolders: vi.fn().mockResolvedValue(report)
+    } as unknown as OperatorService;
+
+    await createUpdateHandler(service, api, new Set(['123']))({ update_id: 98, message: { message_id: 98, from: { id: 123 }, chat: { id: 123, type: 'private' }, text: `/token ${ADDRESS}` } });
+
+    const [, text, keyboard] = vi.mocked(api.sendMessage).mock.calls[1]!;
+    expect(text).toContain('50 holders scanned · 7 smart profiles');
+    expect(text).toContain('12 infrastructure excluded · 6 unique entities');
+    expect(text).toContain('HOLDER #7');
+    expect(text).toContain('Dormant · Insider · Sniper');
+    expect(text).toContain('Wins: No verified history');
+    expect(text).toContain('ALPHA 4.8%');
+    expect(text).toContain('Reliability: 92/100');
+    expect(text).not.toMatch(/provider|realized pnl|roi|trade_ownership_unverified/i);
+    expect(keyboard?.inline_keyboard[0]?.map((button) => button.text)).toEqual(['Copy #1', 'Explorer ↗']);
+    expect(service.investigateTokenHolders).toHaveBeenCalledWith(ADDRESS);
+  });
+
   it('accepts a valid EVM contract in the direct /token flow', async () => {
     const api = apiMock();
     const service = {

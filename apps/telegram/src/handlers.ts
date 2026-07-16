@@ -8,6 +8,7 @@ import {
   type OperatorSessionState,
   type OperatorWorkflow,
   type ProfitableSort,
+  type TokenHolderIntelligenceReport,
   type WalletInvestigationResult
 } from '@flowradar/db';
 import { isAuthorized } from './auth';
@@ -21,7 +22,7 @@ const COMMANDS = [
   { command: 'list', description: 'Core wallet monitoring' }, { command: 'add', description: 'Add a Core wallet' },
   { command: 'remove', description: 'Remove a Core wallet' },
   { command: 'alerts', description: 'Production alert inbox' },
-  { command: 'wallet', description: 'Unified wallet investigation' }, { command: 'token', description: 'Token + top-PnL wallets' },
+  { command: 'wallet', description: 'Unified wallet investigation' }, { command: 'token', description: 'Token holder intelligence' },
   { command: 'profitable', description: 'Automatic profitable wallets' }, { command: 'entity', description: 'Investigation cluster wallets' },
   { command: 'flow', description: 'Investigation capital paths' }, { command: 'bridges', description: 'Verified investigation bridges' },
   { command: 'watch', description: 'Persist a wallet/entity watch' }, { command: 'recent', description: 'Recent relevant events' },
@@ -29,7 +30,7 @@ const COMMANDS = [
 ];
 const PENDING_PROMPTS: Partial<Record<OperatorWorkflow, string>> = {
   wallet: '👛 <b>WALLET INVESTIGATION</b>\n━━━━━━━━━━━━━━━━━━━━\nSend a wallet address.\n<i>Solana or EVM · this prompt expires in 10 minutes.</i>',
-  token: '🎯 <b>TOKEN INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\nSend a token contract address.\n<i>FlowRadar will run a live top-PnL scan.</i>',
+  token: '🎯 <b>TOKEN INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\nSend a token contract address.\n<i>FlowRadar will resolve and enrich the top holders.</i>',
   entity: '🧠 <b>ENTITY INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\nSend a wallet address or entity ID.',
   flow: '💸 <b>CAPITAL PATHS</b>\n━━━━━━━━━━━━━━━━━━━━\nSend a wallet address or entity ID.',
   bridges: '🌉 <b>BRIDGE INTELLIGENCE</b>\n━━━━━━━━━━━━━━━━━━━━\nSend a wallet address or entity ID.',
@@ -779,6 +780,15 @@ async function renderWorkflow(service: OperatorService, workflow: OperatorWorkfl
   if (INVESTIGATION_WORKFLOWS.has(workflow)) return renderPersistedInvestigation(service, state, sessionId);
   if (workflow === 'token') {
     const tokenAddress = required(state);
+    // Solana /token is Holder Intelligence. The legacy top-trader path stays
+    // available only for EVM, where this task did not add a holder provider.
+    if (!tokenAddress.startsWith('0x') && typeof service.investigateTokenHolders === 'function') {
+      const report = await service.investigateTokenHolders(tokenAddress);
+      return {
+        text: renderTokenHolderIntelligence(report),
+        keyboard: report.profiles.length ? tokenHolderKeyboard(report) : EMPTY_KEYBOARD
+      };
+    }
     await service.scanTokenTopPnl(tokenAddress);
     const value = await service.tokenSummary(tokenAddress, 1, 10, 'pnl');
     const rows = value.topPnl.items.slice(0, 5) as TokenPnlTelegramRow[];
@@ -1315,6 +1325,57 @@ function clearInvestigationHistory(state: OperatorSessionState) {
   state.investigationPreviousItem = undefined;
   state.investigationPreviousPage = undefined;
 }
+export function renderTokenHolderIntelligence(report: TokenHolderIntelligenceReport) {
+  const heading = [
+    '🎯 <b>TOKEN INTELLIGENCE</b>',
+    `<b>${h(report.tokenSymbol)}</b> · <code>${h(short(report.tokenAddress, 6))}</code>`,
+    '',
+    `${report.holdersScanned} holders scanned · ${report.smartProfiles} smart profiles`,
+    `${report.infrastructureExcluded} infrastructure excluded · ${report.uniqueEntities} unique entities`
+  ];
+  if (!report.profiles.length) return [
+    ...heading, '', '<b>No high-value holder profiles found.</b>',
+    `${report.ownersResolved} owner wallets resolved · ${report.csvMatches} CSV matches · ${report.flowradarMatches} FlowRadar matches`,
+    '<i>No holder passed the CSV/Core intelligence or live historical-trader threshold.</i>'
+  ].join('\n');
+  const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+  return [
+    ...heading,
+    ...report.profiles.flatMap((profile, index) => [
+      '',
+      `${medals[index] ?? '•'} <b>HOLDER #${profile.holderRank}</b>`,
+      `<code>${h(short(profile.walletAddress, 4))}</code>`,
+      `🏷 ${profile.tags.map(h).join(' · ')}`,
+      `🏆 Wins: ${profile.wins.length ? profile.wins.map((win) => `${h(win.symbol)} ${formatMultiple(win.multiple)}`).join(' · ') : 'No verified history'}`,
+      `💼 Holds: ${profile.holdings.map(formatHolderPosition).join(' · ')}`,
+      `⏱ Avg hold: ${formatHoldDuration(profile.medianHoldMs)}`,
+      `🛡 Reliability: ${profile.reliability == null ? 'Not rated' : `${Math.round(profile.reliability)}/100`}`
+    ])
+  ].join('\n');
+}
+
+function tokenHolderKeyboard(report: TokenHolderIntelligenceReport): InlineKeyboard {
+  return { inline_keyboard: report.profiles.map((profile, index) => [
+    { text: `Copy #${index + 1}`, copy_text: { text: profile.walletAddress } },
+    { text: 'Explorer ↗', url: walletExplorer('SOLANA', profile.walletAddress) }
+  ]) };
+}
+
+function formatHolderPosition(position: TokenHolderIntelligenceReport['profiles'][number]['holdings'][number]) {
+  if (position.supplyPercentage != null) return `${h(position.symbol)} ${holderPercentage(position.supplyPercentage)}`;
+  if (position.usdValue != null) return `${h(position.symbol)} ${compactUsd(position.usdValue)}`;
+  return h(position.symbol);
+}
+function holderPercentage(value: number) { return `${value >= 10 ? value.toFixed(1) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}%`; }
+function compactUsd(value: number) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 }).format(value); }
+function formatMultiple(value: number) { return `${value >= 10 ? Math.round(value) : value.toFixed(1)}x`; }
+function formatHoldDuration(value: number | null) {
+  if (value == null || value <= 0) return 'N/A';
+  const hours = Math.max(1, Math.round(value / 3_600_000));
+  const days = Math.floor(hours / 24);
+  return days ? `${days}d ${hours % 24}h` : `${hours}h`;
+}
+
 interface TokenPnlTelegramRow {
   chain: string;
   walletAddress: string;

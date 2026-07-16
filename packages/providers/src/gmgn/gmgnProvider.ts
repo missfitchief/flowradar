@@ -131,6 +131,22 @@ export async function fetchTokenHolders(tokenAddress: string, opts: GmgnFetchOpt
   return asRows(data, 'list', 'data');
 }
 
+/** portfolio holdings — current wallet holdings plus provider-observed position
+ * history. The caller decides which fields are safe to display; provider PnL
+ * remains a claim until independently reconstructed. */
+export async function fetchWalletHoldings(
+  walletAddress: string,
+  opts: GmgnFetchOptions & { cursor?: string; limit?: number } = {}
+): Promise<{ rows: Record<string, unknown>[]; next: string | null }> {
+  const argv = ['portfolio', 'holdings', '--chain', opts.chain ?? 'sol', '--wallet', walletAddress, '--limit', String(clampLimit(opts.limit, 100)), '--raw'];
+  if (opts.cursor) argv.push('--cursor', opts.cursor);
+  const data = await runGmgnCli(argv, { timeoutMs: opts.timeoutMs, cliPath: opts.cliPath });
+  const obj = data && typeof data === 'object' && !Array.isArray(data) ? data as Record<string, unknown> : {};
+  const rows = asRows(data, 'list', 'holdings');
+  const nextRaw = obj.next ?? (obj.data && typeof obj.data === 'object' ? (obj.data as Record<string, unknown>).next : undefined);
+  return { rows, next: typeof nextRaw === 'string' && nextRaw ? nextRaw : null };
+}
+
 /** portfolio activity — a wallet's buy/sell/transfer activity, cursor-paged.
  *  Returns { rows, next } so the caller can persist the cursor. */
 export async function fetchWalletActivity(

@@ -68,6 +68,7 @@ export * from './discovery/unifiedEntity';
 export * from './operator/types';
 export * from './operator/export';
 export * from './operator/service';
+export * from './operator/tokenHolderIntelligence';
 export * from './intelligence';
 export * from './investigation/types';
 export * from './investigation/intelligence';
