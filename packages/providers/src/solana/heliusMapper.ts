@@ -184,11 +184,20 @@ function buildNativeTransferLegs(tx: HeliusTransaction, walletAddress: string): 
 
 function buildTokenTransferLegs(tx: HeliusTransaction, walletAddress: string): TxLeg[] {
   const bridge = isBridgeSource(tx.source);
+  // Some valid Helius SWAP payloads omit events.swap but still expose the
+  // provider-classified type plus tokenTransfers. Preserve the provider's
+  // trade classification in that case so the downstream deterministic
+  // normalizer can emit token_buy/token_sell instead of a silent transfer.
+  // When events.swap is present, its explicit input/output legs remain the
+  // authoritative trade evidence and tokenTransfers stay ordinary receipts.
+  const providerSwapFallback = tx.type.toUpperCase() === 'SWAP' && !tx.events?.swap;
   return (tx.tokenTransfers ?? []).map((t) => {
     const decimals = findMintDecimals(tx.accountData, t.mint) ?? inferDecimalsFromUiAmount(t.tokenAmount);
     let kind: LegKind = 'token_transfer';
     if (bridge) {
       kind = t.fromUserAccount === walletAddress ? 'bridge_deposit' : 'bridge_withdrawal';
+    } else if (providerSwapFallback && (t.fromUserAccount === walletAddress || t.toUserAccount === walletAddress)) {
+      kind = 'swap_leg';
     }
     return {
       kind,
@@ -292,7 +301,8 @@ export function mapHeliusTransaction(tx: HeliusTransaction, walletAddress: strin
     txHash: tx.signature,
     blockOrSlot: BigInt(tx.slot),
     ts: new Date(tx.timestamp * 1000),
-    legs
+    legs,
+    status: tx.transactionError == null ? 'succeeded' : 'failed'
   };
 }
 

@@ -4,8 +4,27 @@
     {
       "name": "flowradar-web",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
       "port": 5188
+    },
+    {
+      "name": "flowradar-web-pilot",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "next",
+        "dev",
+        "-p",
+        "5190"
+      ],
+      "cwd": "apps/web",
+      "port": 5190,
+      "env": {
+        "DATABASE_URL": "postgresql://flowradar:flowradar@localhost:5439/flowradar_pilot?connection_limit=20&pool_timeout=30",
+        "MOCK_MODE": "false"
+      }
     }
   ]
 }

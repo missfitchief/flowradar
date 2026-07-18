@@ -13,3 +13,5 @@
 export * from './types';
 export * from './entry';
 export * from './outcome';
+export * from './universeClassify';
+export * from './repeatCandidates';

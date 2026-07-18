@@ -1,0 +1,99 @@
+{
+  "ts": "2026-07-12T02:21:55.484Z",
+  "cohort": {
+    "source": "wallet_behavior_profiles (SOLANA)",
+    "wallets": 22,
+    "anchors": 448
+  },
+  "task9": {
+    "batch": {
+      "observationsConsidered": 448,
+      "pathsWritten": 448,
+      "walletsProcessed": 22,
+      "errors": 0,
+      "errorReceipts": [],
+      "byStatus": {
+        "unknown_value_funding_only": 436,
+        "funded": 9,
+        "no_transfer_history": 3
+      }
+    },
+    "dbByStatus": {
+      "no_transfer_history": 3,
+      "funded": 9,
+      "unknown_value_funding_only": 436
+    }
+  },
+  "task10": {
+    "batch": {
+      "walletsConsidered": 22,
+      "walletsProcessed": 22,
+      "errors": 0,
+      "errorReceipts": [],
+      "entriesConsidered": 448,
+      "rowsWritten": 448,
+      "byPrimaryClass": {
+        "unknown": 348,
+        "still_holding": 58,
+        "transfer_to_linked": 3,
+        "transfer_to_service": 3,
+        "durable_hold": 36
+      },
+      "walletsWithTruncation": 0
+    },
+    "dbByPrimaryClass": {
+      "durable_hold": 36,
+      "transfer_to_linked": 3,
+      "still_holding": 58,
+      "unknown": 348,
+      "transfer_to_service": 3
+    }
+  },
+  "task11": {
+    "batch": {
+      "entitiesConsidered": 22,
+      "entitiesWritten": 22,
+      "errors": 0,
+      "errorReceipts": [],
+      "byStatus": {
+        "excluded_negative_evidence": 12,
+        "insufficient_evidence": 5,
+        "candidate": 5
+      },
+      "entityAdjustedCount": 0,
+      "groupingComplete": false,
+      "universeComplete": true
+    },
+    "dbByStatus": {
+      "candidate": 5,
+      "insufficient_evidence": 5,
+      "excluded_negative_evidence": 12
+    }
+  },
+  "task12": {
+    "batch": {
+      "entitiesConsidered": 22,
+      "entitiesWritten": 22,
+      "errors": 0,
+      "errorReceipts": [],
+      "byPattern": {
+        "insufficient_evidence": 22
+      },
+      "groupingComplete": false,
+      "universeComplete": true
+    },
+    "dbByPattern": {
+      "insufficient_evidence": 22
+    }
+  },
+  "idempotency": {
+    "identical": true,
+    "probeRows": {
+      "funding": 45,
+      "postEntry": 45,
+      "repeat": 5,
+      "dormantRunner": 5
+    }
+  },
+  "caveat": "observation-only shadow analytics over the pilot cohort; insufficient/unknown/one_off are honest states, never fabricated patterns"
+}

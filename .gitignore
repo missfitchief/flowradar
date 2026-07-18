@@ -12,4 +12,8 @@ coverage/
 *.tsbuildinfo
 db-backups/
 runs/
+.runtime/
 .superpowers-ledger.md
+
+# runner liveness file (session-local, never committed)
+data/runner-mining/AGENT_HEARTBEAT.txt

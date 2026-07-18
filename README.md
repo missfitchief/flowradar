@@ -1,8 +1,11 @@
 # FlowRadar
 
-FlowRadar is a local-first **Solana + BNB Chain wallet-intelligence dashboard and worker bot**. It surfaces early, "insider-like" token activity by tracking *profitable wallets* — capital rotation, wallet clusters, smart-wallet accumulation, fresh-wallet funding, bridge movement, and money flow — using only public on-chain and market data. It is **analytics only**: not financial advice, not a trading bot, and it never claims to identify or deanonymize real people. Every label it assigns is probabilistic (weak / possible / probable / strong), and nothing it discovers ever executes a transaction.
+Production backup, restore, health, cursor and recovery procedures are in
+[docs/PRODUCTION_OPERATIONS.md](docs/PRODUCTION_OPERATIONS.md).
 
-Token discovery is **wallet-driven by design**: FlowRadar watches wallets you track (imported, or promoted from candidate feeders) and lets *their* behavior surface tokens — it does not scan or rank every newly created token on chain.
+FlowRadar is a local-first **Solana + EVM wallet-intelligence system** (Ethereum, Base, Arbitrum and BSC). It surfaces early, "insider-like" token activity by tracking *profitable wallets* — capital rotation, wallet clusters, smart-wallet accumulation, fresh-wallet funding, bridge movement, and money flow — using only public on-chain and market data. It is **analytics only**: not financial advice, not a trading bot, and it never claims to identify or deanonymize real people. Every label it assigns is probabilistic (weak / possible / probable / strong), and nothing it discovers ever executes a transaction.
+
+Profitable-wallet discovery begins with a persisted historical-winner universe (all canonically covered Solana/EVM tokens known to have crossed $10M ATH plus explicit operator core tokens), then follows those entities' capital to surface later tokens. It does not scan the mempool, front-run, sign, swap or auto-promote discovered wallets; all automatic discoveries remain `observation_only`.
 
 ---
 
@@ -41,6 +44,22 @@ FULL mode is auto-detected when `REDIS_URL` is set **or** `DATABASE_URL` points 
 ```bash
 npm run verify              # typecheck (all workspaces) + vitest + next build
 ```
+
+### Automatic discovery and Telegram operator
+
+Production/operator commands are fail-closed and require `MOCK_MODE=false`:
+
+```bash
+npm run db:migrate
+npm run discovery:run       # sync universe, resume discovery, rebuild unified entities
+npm run operator:pilot      # read-only Solana/EVM/flow/bridge/export acceptance report
+npm run telegram            # long-polling Telegram operator bot
+npm run telegram:smoke      # getMe + command registration + authorized smoke message
+```
+
+Set `TELEGRAM_BOT_TOKEN` and comma-separated `TELEGRAM_ALLOWED_USER_IDS`. The bot refuses to start with an empty or malformed allowlist, rejects every other user, and never persists or logs the token. Commands are `/wallet`, `/token`, `/profitable`, `/entity`, `/flow`, `/bridges`, `/watch`, and `/recent`; large results use restart-safe pagination and CSV/JSON document export. Telegram handlers call the canonical read-only `OperatorService` and do not implement independent scoring or provider logic.
+
+Additional EVM historical/core members may be supplied through `FLOWRADAR_CORE_TOKENS_JSON`. If a chain has no local or verified provider coverage, its persisted universe rows remain `unavailable` or `retryable`; mock answers are never substituted in operator mode.
 
 > **Full test coverage needs the LITE database up.** The `packages/db` integration
 > tests self-skip when Postgres isn't reachable on `:5439`, so `npm run verify`

@@ -14,7 +14,7 @@ import { fmtAge, fmtUsd } from '@/lib/format';
 // Chain values are a fixed 2-member enum (@flowradar/db's ChainId) — spelled
 // out here as a literal union instead of importing the Prisma enum type so
 // this component stays a plain presentational leaf with no Prisma coupling.
-export type HotTokenChain = 'SOLANA' | 'BSC';
+export type HotTokenChain = 'SOLANA' | 'ETHEREUM' | 'BASE' | 'ARBITRUM' | 'BSC';
 
 // FlowSignalStatus's 5 values (@flowradar/db), same reasoning as above.
 export type HotTokenSignalStatus = 'watching' | 'hot' | 'profit_rotation' | 'exit_warning' | 'dead';
@@ -48,6 +48,9 @@ export interface HotTokenRow {
 
 const CHAIN_BADGE_CLASS: Record<HotTokenChain, string> = {
   SOLANA: 'border-transparent bg-violet-500/15 text-violet-300',
+  ETHEREUM: 'border-transparent bg-blue-500/15 text-blue-300',
+  BASE: 'border-transparent bg-sky-500/15 text-sky-300',
+  ARBITRUM: 'border-transparent bg-cyan-500/15 text-cyan-300',
   BSC: 'border-transparent bg-amber-500/15 text-amber-300',
 };
 

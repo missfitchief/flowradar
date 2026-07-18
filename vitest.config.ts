@@ -68,6 +68,14 @@ export default defineConfig({
           include: ['test/**/*.test.ts'],
           passWithNoTests: true
         }
+      },
+      {
+        test: {
+          name: 'telegram',
+          root: './apps/telegram',
+          include: ['test/**/*.test.ts'],
+          passWithNoTests: true
+        }
       }
     ]
   }

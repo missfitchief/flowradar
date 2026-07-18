@@ -30,12 +30,12 @@
 // Either way the cursor advance + the ingest layer's own dedupe keep re-polls
 // idempotent.
 
-import { ingestNormalizedTxs } from '@flowradar/db';
+import { advanceTimestampCursor, createMassTrackerSession, ingestNormalizedTxs, recordCursorFailure, recordProviderHealth, type MassTrackerSession } from '@flowradar/db';
 import { isRateLimitError } from '@flowradar/providers';
-import type { Chain } from '@flowradar/core';
+import { normalizeMassTransaction, type Chain } from '@flowradar/core';
 import type { JobContext } from '../context';
 
-const PROVIDER_NAME = 'mock';
+const LIVE_FAILURE_PROVIDER_NAME = 'wallet_activity_live';
 const PAGE_LIMIT = 500;
 const DEFAULT_MAX_BACKFILL_PAGES = 5;
 
@@ -44,10 +44,11 @@ const DEFAULT_MAX_BACKFILL_PAGES = 5;
  * default). Bounds a deep-history wallet's first backfill so it can never stall
  * the sequential cycle or grow memory without limit.
  */
-function maxBackfillPages(): number {
-  const raw = process.env.WALLET_ACTIVITY_MAX_PAGES;
+function maxBackfillPages(providerName?: string): number {
+  const alchemy = providerName === 'Alchemy';
+  const raw = alchemy ? process.env.ALCHEMY_POLLING_MAX_PAGES ?? process.env.WALLET_ACTIVITY_MAX_PAGES : process.env.WALLET_ACTIVITY_MAX_PAGES;
   const n = raw !== undefined ? Number(raw) : NaN;
-  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_BACKFILL_PAGES;
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : alchemy ? 1 : DEFAULT_MAX_BACKFILL_PAGES;
 }
 
 /**
@@ -62,9 +63,11 @@ function maxBackfillPages(): number {
  */
 const DEFAULT_MAX_WALLETS_PER_CYCLE = 200;
 function maxWalletsPerCycle(): number {
-  const raw = process.env.WALLET_ACTIVITY_MAX_WALLETS;
+  const alchemyConfigured = ['SOLANA', 'ETHEREUM', 'BASE', 'ARBITRUM', 'BSC']
+    .some((chain) => Boolean(process.env[`ALCHEMY_${chain}_RPC_URL`]?.trim()));
+  const raw = process.env.WALLET_ACTIVITY_MAX_WALLETS ?? (alchemyConfigured ? process.env.ALCHEMY_POLLING_MAX_WALLETS : undefined);
   const n = raw !== undefined ? Number(raw) : NaN;
-  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_WALLETS_PER_CYCLE;
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : alchemyConfigured ? 1 : DEFAULT_MAX_WALLETS_PER_CYCLE;
 }
 
 /**
@@ -80,18 +83,24 @@ export function selectPollWindow<T>(all: T[], budget: number, cycle: number): { 
   return { window: all.slice(windowIndex * budget, (windowIndex + 1) * budget), windows, windowIndex };
 }
 
-let pollCycleCounter = 0;
+const ROTATION_PROVIDER = 'wallet_activity_scheduler';
+const ROTATION_SCOPE = 'global_rotation';
 
 interface WalletPollResult {
   pagesFetched: number;
   txsIngested: number;
   backfillTruncated: boolean;
+  provider: string;
+  latencyMs: number;
 }
+
+type HealthOutcome = 'success' | 'error' | 'rate_limited' | 'timeout' | 'missing_key';
+interface HealthBucket { provider: string; chain: Chain; outcome: HealthOutcome; count: number; latencyMs: number; error?: unknown }
 
 export async function run(ctx: JobContext): Promise<void> {
   const { prisma, log } = ctx;
 
-  const allWallets = await prisma.wallet.findMany({
+  const fetchedWallets = await prisma.wallet.findMany({
     where: {
       // Phase 0 taxonomy (feat/pre-public-accumulation): excluded wallets
       // are never polled; observation_only wallets are ALWAYS pollable (the
@@ -106,9 +115,19 @@ export async function run(ctx: JobContext): Promise<void> {
     select: { id: true, address: true, chain: true },
     orderBy: { id: 'asc' } // stable order — rotation windows are deterministic
   });
+  // Alchemy Notify is the primary live transport. Keep the complete pollable
+  // universe in this deterministic rotation as a recovery path: when any
+  // Alchemy RPC is configured, maxWalletsPerCycle()/maxBackfillPages() default
+  // to one wallet and one page. That gives us a bounded multi-hour repair
+  // sweep without running an aggressive polling pipeline beside webhooks.
+  const allWallets = fetchedWallets;
+  const rotationState = await prisma.providerSyncState.findUnique({
+    where: { provider_chain_scope: { provider: ROTATION_PROVIDER, chain: 'SOLANA', scope: ROTATION_SCOPE } }
+  });
+  const persistedCycle = Number(rotationState?.cursor ?? 0);
+  const cycle = Number.isSafeInteger(persistedCycle) && persistedCycle >= 0 ? persistedCycle : 0;
   const budget = maxWalletsPerCycle();
-  const { window: wallets, windows, windowIndex } = selectPollWindow(allWallets, budget, pollCycleCounter);
-  pollCycleCounter += 1;
+  const { window: wallets, windows, windowIndex } = selectPollWindow(allWallets, budget, cycle);
   if (windows > 1) {
     log.info(
       `walletActivity budget: polling ${wallets.length}/${allWallets.length} wallets (window ${windowIndex + 1}/${windows}, budget ${budget}) — full set covered every ${windows} cycles`
@@ -120,6 +139,17 @@ export async function run(ctx: JobContext): Promise<void> {
   let walletsWithErrors = 0;
   let walletsRateLimited = 0;
   let walletsBackfillTruncated = 0;
+  const healthBuckets = new Map<string, HealthBucket>();
+  const addHealth = (provider: string, chain: Chain, outcome: HealthOutcome, latencyMs: number, error?: unknown) => {
+    const key = `${provider}:${chain}:${outcome}`;
+    const current = healthBuckets.get(key) ?? { provider, chain, outcome, count: 0, latencyMs: 0 };
+    current.count += 1; current.latencyMs += latencyMs; if (error) current.error = error;
+    healthBuckets.set(key, current);
+  };
+  const massTracker = await createMassTrackerSession(prisma, {
+    enrollReceivers: true,
+    metadata: { job: 'walletActivity', mode: process.env.MOCK_MODE === 'false' ? 'live' : 'mock' }
+  });
 
   // Sequential by design: each wallet is awaited before the next, so the
   // provider's shared rate limiter (one instance per cached provider) meters
@@ -129,57 +159,86 @@ export async function run(ctx: JobContext): Promise<void> {
   // provider error — including a provider throttle (429) that survived the
   // adapter's own backoff/retries — is caught and recorded per-wallet, never
   // rethrown, so it can't abort the rest of the cycle.
-  for (const wallet of wallets) {
-    try {
-      const result = await pollAndIngestWallet(ctx, wallet.address, wallet.chain);
-      totalIngestedTxs += result.txsIngested;
-      totalPagesFetched += result.pagesFetched;
-      if (result.backfillTruncated) {
-        walletsBackfillTruncated += 1;
-        // Not silent: we hit the page cap and deliberately stopped this poll;
-        // the advanced cursor means the next cycle continues from newer activity.
-        log.info(`walletActivity: bounded backfill truncated for ${wallet.address}`, {
+  try {
+    for (const wallet of wallets) {
+      try {
+        const result = await pollAndIngestWallet(ctx, wallet.address, wallet.chain, massTracker);
+        addHealth(result.provider, wallet.chain, 'success', result.latencyMs);
+        totalIngestedTxs += result.txsIngested;
+        totalPagesFetched += result.pagesFetched;
+        if (result.backfillTruncated) {
+          walletsBackfillTruncated += 1;
+          log.info(`walletActivity: bounded backfill truncated for ${wallet.address}`, {
+            chain: wallet.chain,
+            pagesFetched: result.pagesFetched,
+            txsIngested: result.txsIngested,
+            maxPages: maxBackfillPages()
+          });
+        }
+      } catch (err) {
+        massTracker.recordProviderError();
+        walletsWithErrors += 1;
+        const rateLimited = isRateLimitError(err);
+        if (rateLimited) walletsRateLimited += 1;
+        await recordSyncFailure(prisma, wallet.chain, wallet.address, err);
+        addHealth(
+          LIVE_FAILURE_PROVIDER_NAME, wallet.chain,
+          rateLimited ? 'rate_limited' : /timeout|timed out|abort/i.test(err instanceof Error ? err.message : String(err)) ? 'timeout' : /No live .*provider configured/i.test(err instanceof Error ? err.message : String(err)) ? 'missing_key' : 'error',
+          0, err
+        );
+        log.error(`walletActivity: failed to poll wallet ${wallet.address}`, {
           chain: wallet.chain,
-          pagesFetched: result.pagesFetched,
-          txsIngested: result.txsIngested,
-          maxPages: maxBackfillPages()
+          kind: rateLimited ? 'rate_limited' : 'provider_error',
+          error: err instanceof Error ? err.message : String(err)
         });
       }
-    } catch (err) {
-      walletsWithErrors += 1;
-      const rateLimited = isRateLimitError(err);
-      if (rateLimited) walletsRateLimited += 1;
-      await recordSyncFailure(prisma, wallet.chain, wallet.address, err);
-      log.error(`walletActivity: failed to poll wallet ${wallet.address}`, {
-        chain: wallet.chain,
-        // Honest classification: a provider throttle is rate_limited, not an
-        // auth_error or unknown failure (live-validation finding 2026-07-07).
-        kind: rateLimited ? 'rate_limited' : 'provider_error',
-        error: err instanceof Error ? err.message : String(err)
+    }
+    const trackerMetrics = await massTracker.complete();
+    for (const health of healthBuckets.values()) {
+      await recordProviderHealth(prisma, {
+        provider: health.provider, chain: health.chain, capability: 'walletActivity',
+        scope: `${health.count} wallets`, outcome: health.outcome,
+        latencyMs: health.count ? health.latencyMs / health.count : 0, error: health.error
       });
     }
+    await prisma.providerSyncState.upsert({
+      where: { provider_chain_scope: { provider: ROTATION_PROVIDER, chain: 'SOLANA', scope: ROTATION_SCOPE } },
+      create: { provider: ROTATION_PROVIDER, chain: 'SOLANA', scope: ROTATION_SCOPE, cursor: String(cycle + 1), lastSyncAt: new Date() },
+      update: { cursor: String(cycle + 1), lastSyncAt: new Date(), lastError: null, failCount: 0 }
+    });
+    log.info('walletActivity cycle complete', {
+      walletsPolled: wallets.length, txsIngested: totalIngestedTxs,
+      pagesFetched: totalPagesFetched, walletsWithErrors, walletsRateLimited,
+      walletsBackfillTruncated, massTrackerRunId: trackerMetrics.runId,
+      massEvents: trackerMetrics.inputEvents, massEventsPerSec: trackerMetrics.throughputPerSec,
+      massPeakHeapBytes: trackerMetrics.peakHeapBytes, massRetries: trackerMetrics.retryAttempts
+    });
+  } catch (error) {
+    await massTracker.fail(error);
+    throw error;
   }
-
-  log.info('walletActivity cycle complete', {
-    walletsPolled: wallets.length,
-    txsIngested: totalIngestedTxs,
-    pagesFetched: totalPagesFetched,
-    walletsWithErrors,
-    walletsRateLimited,
-    walletsBackfillTruncated
-  });
 }
 
-async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chain): Promise<WalletPollResult> {
+async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chain, massTracker: MassTrackerSession): Promise<WalletPollResult> {
   const { prisma, providers } = ctx;
+  const startedAt = Date.now();
+
+  const activityProvider = providers(chain, 'walletActivity');
+  const providerName = activityProvider.providerName ?? 'unknown';
+  // Registry-level keyless fallbacks intentionally return MockProvider so
+  // generic development jobs can boot. A MOCK_MODE=false production worker
+  // must never turn that fallback into fake on-chain evidence or alerts.
+  if (process.env.MOCK_MODE === 'false' && /mock/i.test(providerName)) {
+    throw new Error(`No live walletActivity provider configured for ${chain}; refusing MockProvider in production`);
+  }
+  const syncProvider = process.env.MOCK_MODE === 'false' ? providerName.toLowerCase() : 'mock';
 
   const syncState = await prisma.providerSyncState.findUnique({
-    where: { provider_chain_scope: { provider: PROVIDER_NAME, chain, scope: address } }
+    where: { provider_chain_scope: { provider: syncProvider, chain, scope: address } }
   });
   const since = syncState?.cursor ? new Date(syncState.cursor) : undefined;
 
-  const activityProvider = providers(chain, 'walletActivity');
-  const maxPages = maxBackfillPages();
+  const maxPages = maxBackfillPages(providerName);
 
   let cursor: string | undefined;
   let pagesFetched = 0;
@@ -209,6 +268,14 @@ async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chai
       // memory. ingestNormalizedTxs is additive and dedupes, so per-page ingest
       // yields the identical DB state as one whole-history ingest.
       await ingestNormalizedTxs(prisma, chain, address, result.txs);
+      const historicalBackfill = !syncState?.cursor;
+      await massTracker.ingest(result.txs.flatMap((tx) => {
+        const observedAt = historicalBackfill ? tx.ts : new Date();
+        return normalizeMassTransaction(tx, { chain, provider: providerName, observedAt }, address).map((event) => ({
+          ...event,
+          metadata: { ...event.metadata, historicalBackfill, alchemyRpc: providerName === 'Alchemy' }
+        }));
+      }));
       txsIngested += result.txs.length;
       for (const tx of result.txs) {
         if (!latestTs || tx.ts.getTime() > latestTs.getTime()) latestTs = tx.ts;
@@ -233,42 +300,16 @@ async function pollAndIngestWallet(ctx: JobContext, address: string, chain: Chai
   // already processed.
   const nextCursor = latestTs ? new Date(latestTs.getTime() + 1).toISOString() : (syncState?.cursor ?? null);
 
-  await prisma.providerSyncState.upsert({
-    where: { provider_chain_scope: { provider: PROVIDER_NAME, chain, scope: address } },
-    create: {
-      provider: PROVIDER_NAME,
-      chain,
-      scope: address,
-      cursor: nextCursor,
-      lastSyncAt: new Date(),
-      lastError: null,
-      failCount: 0
-    },
-    update: {
-      cursor: nextCursor,
-      lastSyncAt: new Date(),
-      lastError: null,
-      failCount: 0
-    }
+  await advanceTimestampCursor(prisma, {
+    provider: syncProvider, chain, scope: address, nextCursor,
+    eventCount: txsIngested, syncedAt: new Date()
   });
 
-  return { pagesFetched, txsIngested, backfillTruncated };
+  return { pagesFetched, txsIngested, backfillTruncated, provider: providerName, latencyMs: Date.now() - startedAt };
 }
 
 async function recordSyncFailure(prisma: JobContext['prisma'], chain: Chain, address: string, err: unknown): Promise<void> {
   const message = err instanceof Error ? err.message : String(err);
-  await prisma.providerSyncState.upsert({
-    where: { provider_chain_scope: { provider: PROVIDER_NAME, chain, scope: address } },
-    create: {
-      provider: PROVIDER_NAME,
-      chain,
-      scope: address,
-      lastError: message,
-      failCount: 1
-    },
-    update: {
-      lastError: message,
-      failCount: { increment: 1 }
-    }
-  });
+  const failureProvider = process.env.MOCK_MODE === 'false' ? LIVE_FAILURE_PROVIDER_NAME : 'mock';
+  await recordCursorFailure(prisma, { provider: failureProvider, chain, scope: address, error: message });
 }

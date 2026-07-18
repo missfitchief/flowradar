@@ -15,7 +15,7 @@ import type { Settings } from './settings';
 // ---------------------------------------------------------------------------
 
 /** Mirrors schema.prisma `enum ChainId`. */
-export type Chain = 'SOLANA' | 'BSC';
+export type Chain = 'SOLANA' | 'ETHEREUM' | 'BASE' | 'ARBITRUM' | 'BSC';
 
 /** Mirrors schema.prisma `enum TradeAction` (WalletTokenTrade.action). */
 export type TradeAction = 'BUY' | 'SELL' | 'TRANSFER_IN' | 'TRANSFER_OUT' | 'LP_ADD' | 'LP_REMOVE';
@@ -112,6 +112,8 @@ export interface NormalizedTx {
   blockOrSlot: bigint;
   ts: Date;
   legs: TxLeg[];
+  /** Additive provider execution status; legacy producers may omit it. */
+  status?: 'succeeded' | 'failed';
 }
 
 // ---------------------------------------------------------------------------

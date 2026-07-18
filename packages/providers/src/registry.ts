@@ -46,6 +46,7 @@ import { createHeliusRiskProvider } from './solana/risk';
 import { createDexScreenerProvider } from './market/dexscreener';
 import { createBscScanActivityProvider } from './bsc/bscscan';
 import { createGoPlusRiskProvider } from './bsc/goplus';
+import { alchemyRpcEnvName, alchemyRpcUrl, createAlchemyWalletActivityProvider } from './alchemy/rpc';
 
 const ALL_CAPABILITIES: ProviderCapability[] = [
   'walletActivity',
@@ -54,7 +55,7 @@ const ALL_CAPABILITIES: ProviderCapability[] = [
   'risk',
   'walletDiscovery'
 ];
-const ALL_CHAINS: Chain[] = ['SOLANA', 'BSC'];
+const ALL_CHAINS: Chain[] = ['SOLANA', 'ETHEREUM', 'BASE', 'ARBITRUM', 'BSC'];
 
 /**
  * Live-adapter env var each capability depends on, per Spec §5 (used only for
@@ -143,7 +144,8 @@ type LiveCacheKey =
   | 'solana:risk'
   | 'marketData:dexscreener'
   | 'bsc:walletActivity'
-  | 'bsc:risk';
+  | 'bsc:risk'
+  | `alchemy:${Chain}:walletActivity`;
 
 // NOTE: this cache is sticky across a HELIUS_API_KEY (or any live key) rotation
 // WITHIN a running process — once a live provider is constructed under one key,
@@ -312,6 +314,17 @@ export function getProvider<C extends ProviderCapability>(
     return getDexScreenerMarketProvider() as unknown as ProviderCapabilityMap[C];
   }
 
+  if (capability === 'walletActivity' && alchemyRpcUrl(chain)) {
+    const cacheKey: LiveCacheKey = `alchemy:${chain}:walletActivity`;
+    const cached = liveProviderCache.get(cacheKey);
+    if (cached) return cached as ProviderCapabilityMap[C];
+    const alchemy = createAlchemyWalletActivityProvider(chain);
+    if (alchemy) {
+      liveProviderCache.set(cacheKey, alchemy);
+      return alchemy as unknown as ProviderCapabilityMap[C];
+    }
+  }
+
   if (chain === 'SOLANA') {
     const resolved = getSolanaHeliusOrMockFallback(capability);
     if (resolved) return resolved;
@@ -362,6 +375,14 @@ export function getProviderStatuses(): ProviderStatus[] {
           capability,
           mode: 'live',
           note: 'Live DexScreener adapter active (keyless, ~300 req/min (default, unconfirmed)) — holderCount is not provided by this API and is always null.'
+        });
+        continue;
+      }
+
+      if (capability === 'walletActivity' && alchemyRpcUrl(chain)) {
+        statuses.push({
+          name: 'Alchemy', chain, capability, mode: 'live',
+          note: `Live Alchemy RPC adapter active via ${alchemyRpcEnvName(chain)}; Address Activity webhook is primary for active monitoring subscriptions when configured.`
         });
         continue;
       }
@@ -426,6 +447,7 @@ export function getProviderStatuses(): ProviderStatus[] {
 }
 
 function liveKeyEnvVarFor(chain: Chain, capability: ProviderCapability): string {
+  if (capability === 'walletActivity' && (chain === 'ETHEREUM' || chain === 'BASE' || chain === 'ARBITRUM')) return alchemyRpcEnvName(chain);
   if (chain === 'BSC' && (capability === 'walletActivity' || capability === 'tokenMetadata')) {
     return 'BSCSCAN_API_KEY';
   }
@@ -437,6 +459,7 @@ function liveKeyEnvVarFor(chain: Chain, capability: ProviderCapability): string 
 
 function liveAdapterNameFor(chain: Chain, capability: ProviderCapability): string {
   if (capability === 'marketData') return 'DexScreener';
+  if (capability === 'walletActivity' && alchemyRpcUrl(chain)) return 'Alchemy';
   if (chain === 'BSC') {
     if (capability === 'risk') return 'GoPlus';
     return 'BscScan';

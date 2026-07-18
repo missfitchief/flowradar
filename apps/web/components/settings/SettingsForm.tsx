@@ -54,7 +54,7 @@ import {
 
 export interface ProviderStatusRow {
   name: string;
-  chain: 'SOLANA' | 'BSC';
+  chain: 'SOLANA' | 'ETHEREUM' | 'BASE' | 'ARBITRUM' | 'BSC';
   capability: string;
   mode: 'live' | 'mock' | 'missing_key' | 'stub';
   note?: string;

@@ -144,6 +144,27 @@ async function bootstrapChains(): Promise<void> {
         explorerAddressUrl: 'https://solscan.io/account/{address}'
       },
       {
+        id: 'ETHEREUM',
+        name: 'Ethereum',
+        nativeSymbol: 'ETH',
+        explorerTxUrl: 'https://etherscan.io/tx/{hash}',
+        explorerAddressUrl: 'https://etherscan.io/address/{address}'
+      },
+      {
+        id: 'BASE',
+        name: 'Base',
+        nativeSymbol: 'ETH',
+        explorerTxUrl: 'https://basescan.org/tx/{hash}',
+        explorerAddressUrl: 'https://basescan.org/address/{address}'
+      },
+      {
+        id: 'ARBITRUM',
+        name: 'Arbitrum One',
+        nativeSymbol: 'ETH',
+        explorerTxUrl: 'https://arbiscan.io/tx/{hash}',
+        explorerAddressUrl: 'https://arbiscan.io/address/{address}'
+      },
+      {
         id: 'BSC',
         name: 'BNB Smart Chain',
         nativeSymbol: 'BNB',
@@ -152,7 +173,7 @@ async function bootstrapChains(): Promise<void> {
       }
     ]
   });
-  log('bootstrapped Chain rows (SOLANA, BSC).');
+  log('bootstrapped Chain rows (SOLANA, ETHEREUM, BASE, ARBITRUM, BSC).');
 }
 
 async function bootstrapSettings(): Promise<Settings> {
@@ -1523,13 +1544,21 @@ async function runSelfCheck(
   // check's own comment already anticipated: "28 world tokens plus any
   // quote-asset stubs ingest correctly auto-creates"), not a magic constant
   // that silently drifts whenever the token universe legitimately grows.
-  const flowSnapshotCount = await prisma.tokenFlowSnapshot.count();
+  // Task 0 (snapshot dedup): signal detection now records a REAL status
+  // transition as its own row (trigger-time snapshot) instead of rewriting the
+  // latest row in place, so a signal-firing token legitimately carries MORE
+  // than one row after the seed's score->detect sequence. The invariant is
+  // therefore per-TOKEN coverage (every scoreable token has snapshots, no
+  // token missed), not a raw row-count equality.
+  const tokensWithFlowSnapshots = (
+    await prisma.tokenFlowSnapshot.groupBy({ by: ['tokenId'] })
+  ).length;
   const tokensWithMarketData = await prisma.token.count({ where: { marketSnapshots: { some: {} } } });
   rows.push({
-    check: `flow snapshots == tokens-with-market-data count (one snapshot per scoreable token, no dupes)`,
+    check: `tokens with flow snapshots == tokens-with-market-data count (every scoreable token covered)`,
     expected: String(tokensWithMarketData),
-    actual: String(flowSnapshotCount),
-    pass: flowSnapshotCount === tokensWithMarketData
+    actual: String(tokensWithFlowSnapshots),
+    pass: tokensWithFlowSnapshots === tokensWithMarketData
   });
 
   const csvImportJob = await prisma.importJob.findFirst({
@@ -1547,11 +1576,19 @@ async function runSelfCheck(
   const novaAddress = world.meta.scenarios.nova.tokenAddress;
   const rugzAddress = world.meta.scenarios.rugz.tokenAddress;
 
-  const topFlowSnapshots = await prisma.tokenFlowSnapshot.findMany({
+  // Task 0 (snapshot dedup): a token may now carry >1 row (signal transitions
+  // persist as their own rows), so rank TOKENS by their best row — raw-row
+  // ranking would let one token fill several leaderboard slots.
+  const rankedRows = await prisma.tokenFlowSnapshot.findMany({
     orderBy: { flowScore: 'desc' },
-    take: 5,
     include: { token: { select: { symbol: true, address: true } } }
   });
+  const seenTokens = new Set<string>();
+  const topFlowSnapshots = rankedRows.filter((s) => {
+    if (seenTokens.has(s.tokenId)) return false;
+    seenTokens.add(s.tokenId);
+    return true;
+  }).slice(0, 5);
 
   // Recalibrated 2026-07-05 (controller): after the window-anchor fix QUIET
   // legitimately scores ~even with NOVA (88.0 vs 87.9). The demo guarantee is
@@ -2241,11 +2278,13 @@ async function printSummaryTable(): Promise<void> {
     prisma.alert.count()
   ]);
 
-  const top5 = await prisma.tokenFlowSnapshot.findMany({
+  // Per-token best row (transition rows would otherwise duplicate a token).
+  const rankedAll = await prisma.tokenFlowSnapshot.findMany({
     orderBy: { flowScore: 'desc' },
-    take: 5,
     include: { token: { select: { symbol: true } } }
   });
+  const seenTop = new Set<string>();
+  const top5 = rankedAll.filter((s) => (seenTop.has(s.tokenId) ? false : (seenTop.add(s.tokenId), true))).slice(0, 5);
 
   console.log('Seed summary:');
   console.log(`  wallets:              ${wallets}`);

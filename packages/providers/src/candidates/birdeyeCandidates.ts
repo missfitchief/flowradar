@@ -89,6 +89,7 @@ const TOKEN_TOP_TRADERS_PATH = '/defi/v2/tokens/top_traders';
 // same conservative-default-with-a-note approach as solanaTracker.ts.
 const DEFAULT_RPS = 2;
 const MAX_TOP_TRADERS_LIMIT = 10; // doc-verified hard cap (1-10) for top_traders
+const BIRDEYE_REQUEST_TIMEOUT_MS = 30_000;
 
 function chainHeader(chain: Chain): string {
   return chain === 'BSC' ? 'bsc' : 'solana';
@@ -130,8 +131,14 @@ export function mapBirdeyeWalletPnlSummary(json: BirdeyeWalletPnlResponse): Bird
 /** Doc-verified `/defi/v2/tokens/top_traders` response shape (fields this adapter reads). */
 interface BirdeyeTopTraderItem {
   owner: string;
+  tags?: string[];
   trade?: number;
+  tradeBuy?: number;
+  tradeSell?: number;
+  volumeBuyUsd?: number;
+  volumeSellUsd?: number;
   totalPnl?: number;
+  unrealizedPnl?: number;
   realizedPnl?: number;
 }
 
@@ -146,7 +153,17 @@ export function mapBirdeyeTopTrader(item: BirdeyeTopTraderItem, chain: Chain): T
     walletAddress: item.owner,
     chain,
     pnlUsd: item.realizedPnl ?? item.totalPnl,
-    tradeCount: item.trade
+    tradeCount: item.trade,
+    // Provider-CLAIMED detail (additive; claims stay claims — never local truth).
+    realizedPnlUsd: item.realizedPnl ?? null,
+    unrealizedPnlUsd: item.unrealizedPnl ?? null,
+    totalPnlUsd: item.totalPnl ?? null,
+    volumeBuyUsd: item.volumeBuyUsd ?? null,
+    volumeSellUsd: item.volumeSellUsd ?? null,
+    tradeBuy: item.tradeBuy ?? null,
+    tradeSell: item.tradeSell ?? null,
+    tags: item.tags ?? [],
+    raw: item
   };
 }
 
@@ -169,7 +186,8 @@ export async function getBirdeyeWalletPnl(
   url.searchParams.set('duration', 'all');
 
   const response = await fetch(url.toString(), {
-    headers: { 'X-API-KEY': apiKey, 'x-chain': chainHeader(chain), Accept: 'application/json' }
+    headers: { 'X-API-KEY': apiKey, 'x-chain': chainHeader(chain), Accept: 'application/json' },
+    signal: AbortSignal.timeout(BIRDEYE_REQUEST_TIMEOUT_MS)
   });
   if (!response.ok) return null;
 
@@ -195,13 +213,17 @@ export function createBirdeyeTokenTopTraders(env: BirdeyeCandidatesEnv): TokenTo
       const limit = Math.max(1, Math.min(opts.limit ?? MAX_TOP_TRADERS_LIMIT, MAX_TOP_TRADERS_LIMIT));
       const url = new URL(TOKEN_TOP_TRADERS_PATH, BIRDEYE_API_BASE);
       url.searchParams.set('address', tokenAddress);
-      url.searchParams.set('time_frame', '24h');
-      url.searchParams.set('sort_by', 'volume');
+      // Doc-verified caps: time_frame maxes at 24h — a PRESENT-window view
+      // (callers analyzing historical tokens must treat results as
+      // current-window evidence, never a historical leaderboard).
+      url.searchParams.set('time_frame', opts.timeFrame ?? '24h');
+      url.searchParams.set('sort_by', opts.sortBy ?? 'volume');
       url.searchParams.set('sort_type', 'desc');
       url.searchParams.set('limit', String(limit));
 
       const response = await fetch(url.toString(), {
-        headers: { 'X-API-KEY': apiKey, 'x-chain': chainHeader(chain), Accept: 'application/json' }
+        headers: { 'X-API-KEY': apiKey, 'x-chain': chainHeader(chain), Accept: 'application/json' },
+        signal: AbortSignal.timeout(BIRDEYE_REQUEST_TIMEOUT_MS)
       });
       if (!response.ok) {
         const bodyText = await response.text().catch(() => '<no response body>');

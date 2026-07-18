@@ -46,9 +46,10 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { DEFAULT_SETTINGS, parseSettings } from '@flowradar/core';
 import type { Chain, Settings } from '@flowradar/core';
-import { prisma } from '@flowradar/db';
+import { prisma, recordRuntimeHeartbeat } from '@flowradar/db';
 import { createMockWorld, MockProvider } from '@flowradar/providers';
 import { createRunner } from './runner/index';
 import { createConsoleLogger, defaultProviderResolver } from './context';
@@ -78,6 +79,9 @@ import * as tokenTopTraderBackfill from './jobs/tokenTopTraderBackfill';
 import * as duneQuery from './jobs/duneQuery';
 import * as socialIngest from './jobs/socialIngest';
 import * as externalConfluence from './jobs/externalConfluence';
+import * as trackedActivation from './jobs/trackedActivation';
+import * as productionOperations from './jobs/productionOperations';
+import * as runtimeHeartbeat from './jobs/runtimeHeartbeat';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const HOUR_MS = 60 * 60 * 1000;
@@ -167,10 +171,19 @@ function intervalMsFor(settingsSec: number, fast: boolean): number {
 async function main(): Promise<void> {
   loadEnv();
   const bootLog = createConsoleLogger('worker');
+  const processStartedAt = new Date();
+  bootLog.info('runtime identity', {
+    pid: process.pid, cwd: process.cwd(), mockMode: process.env.MOCK_MODE ?? null,
+    databaseFingerprint: secretFingerprint(process.env.DATABASE_URL)
+  });
 
   ensureLiteDatabase(bootLog);
 
   const settings = await readOrCreateSettings(bootLog);
+  await recordRuntimeHeartbeat(prisma, {
+    component: 'worker', status: 'starting', startedAt: processStartedAt,
+    metadata: { mockMode: isMockMode(), durableQueue: Boolean(process.env.REDIS_URL) }
+  });
   const providers = buildProviderResolver(bootLog);
 
   const fast = process.env.WORKER_FAST === '1';
@@ -181,6 +194,7 @@ async function main(): Promise<void> {
   const runner = createRunner();
 
   const jobs: { name: string; run: (ctx: JobContext) => Promise<void>; intervalSec: number }[] = [
+    { name: 'runtimeHeartbeat', run: runtimeHeartbeat.run, intervalSec: 30 },
     { name: 'walletActivity', run: walletActivity.run, intervalSec: settings.intervals.walletActivitySec },
     { name: 'marketDataHot', run: marketDataHot.run, intervalSec: settings.intervals.marketDataHotSec },
     { name: 'marketDataNormal', run: marketDataNormal.run, intervalSec: settings.intervals.marketDataNormalSec },
@@ -227,6 +241,20 @@ async function main(): Promise<void> {
       name: 'monitoringScheduler',
       run: monitoringScheduler.run,
       intervalSec: settings.intervals.walletActivitySec
+    },
+    // Permanent intelligence lifecycle: consumes newly persisted funding,
+    // bridge, LP, execution and buy events, records dormant awakenings, and
+    // emits only cluster-level WATCH/STRONG/HIGH signals. Buy Candidates need
+    // a second, passing token-quality assessment.
+    {
+      name: 'trackedActivation',
+      run: trackedActivation.run,
+      intervalSec: settings.intervals.walletActivitySec
+    },
+    {
+      name: 'productionOperations',
+      run: productionOperations.run,
+      intervalSec: 300
     },
     // stealthAccumulation (P2, 2026-07-11): SHADOW-ONLY lifecycle snapshots
     // from the pure stealth engine over recent trade cohorts. Writes only
@@ -307,6 +335,10 @@ async function main(): Promise<void> {
       const startedAt = Date.now();
       try {
         await job.run({ prisma, settings, providers, log });
+        await recordRuntimeHeartbeat(prisma, {
+          component: `job:${job.name}`, status: 'healthy', startedAt: processStartedAt, success: true,
+          metadata: { durationMs: Date.now() - startedAt, expectedIntervalMs: intervalMs }
+        }).catch(() => undefined);
       } catch (err) {
         // Belt-and-suspenders: every job's own run() is written to catch its
         // own per-item errors and never rethrow (Task 5 brief decision 3),
@@ -315,6 +347,10 @@ async function main(): Promise<void> {
         // runner's own catch (InlineRunner/BullMqRunner both log unhandled
         // job errors, but without the structured "name/duration" line below).
         log.error(`${job.name} threw unexpectedly`, { error: err instanceof Error ? err.message : String(err) });
+        await recordRuntimeHeartbeat(prisma, {
+          component: `job:${job.name}`, status: 'degraded', startedAt: processStartedAt, error: err,
+          metadata: { durationMs: Date.now() - startedAt, expectedIntervalMs: intervalMs }
+        }).catch(() => undefined);
       } finally {
         const durationMs = Date.now() - startedAt;
         log.info(`${job.name} run finished`, { durationMs });
@@ -339,12 +375,19 @@ async function main(): Promise<void> {
 
   await runner.start();
   bootLog.info('worker started — runner is now ticking scheduled jobs');
+  await productionOperations.run({ prisma, settings, providers, log: createConsoleLogger('productionOperations') }).catch((error) => {
+    bootLog.error('initial production operations pass failed', { error: error instanceof Error ? error.message : String(error) });
+  });
 
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     bootLog.info(`received ${signal} — shutting down`);
+    await recordRuntimeHeartbeat(prisma, {
+      component: 'worker', status: 'stopping', startedAt: processStartedAt,
+      metadata: { signal }
+    }).catch(() => undefined);
     await runner.stop();
     await prisma.$disconnect();
     bootLog.info('shutdown complete');
@@ -353,6 +396,10 @@ async function main(): Promise<void> {
 
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+}
+
+function secretFingerprint(value: string | undefined) {
+  return value ? createHash('sha256').update(value).digest('hex').slice(0, 12) : 'missing';
 }
 
 main().catch((err) => {

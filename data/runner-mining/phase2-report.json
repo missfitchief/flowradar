@@ -1,0 +1,33 @@
+{
+  "ts": "2026-07-11T21:47:52.520Z",
+  "enrichment": {
+    "attempted": 928,
+    "enriched": 249,
+    "noOhlcv": 0,
+    "noSupply": 0,
+    "providerErrors": 679,
+    "skippedFresh": 0,
+    "requestsUsed": 1856
+  },
+  "classification": {
+    "insufficient_history": 10058,
+    "verified_above_10m": 378,
+    "conflicting_evidence": 52
+  },
+  "confirmedRunners": 379,
+  "remainingHighAthRunners_ge_10B": 32,
+  "verifiedNonRunners": 0,
+  "conflictingEvidence": 52,
+  "controls": {
+    "runners": 379,
+    "matchedTier1": 0,
+    "matchedTier2": 379,
+    "noValidControl": 0
+  },
+  "earlyBuyers": {
+    "mintsProcessed": 400,
+    "entriesPersisted": 0,
+    "byBand": {},
+    "unknownMcapSkipped": 1815
+  }
+}

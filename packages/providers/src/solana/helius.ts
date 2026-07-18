@@ -180,7 +180,7 @@ async function fetchHeliusTransactions(
       url.searchParams.set('before-signature', opts.before);
     }
 
-    const response = await fetch(url.toString());
+    const response = await fetch(url.toString(), { signal: AbortSignal.timeout(30_000) });
 
     if (response.status === 429) {
       // Drain the body so the socket can be reused and no stream is left open.

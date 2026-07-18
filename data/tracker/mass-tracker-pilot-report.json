@@ -1,0 +1,212 @@
+{
+  "generatedAt": "2026-07-13T13:54:13.416Z",
+  "datasetTruth": "real rows already persisted by live providers/pilots; no synthetic transaction generation",
+  "runId": "real-local-2026-07-13T13-25-02-839Z",
+  "requested": {
+    "maxEdges": 250000,
+    "maxBuys": 50000,
+    "batchSize": 1000
+  },
+  "sourceCounts": {
+    "money_flow_edges": 250000,
+    "wallet_token_trades": 5805
+  },
+  "chains": {
+    "SOLANA": 255805,
+    "BSC": 0
+  },
+  "observedRange": {
+    "from": "2023-09-08T17:13:01.000Z",
+    "to": "2026-07-11T16:45:13.000Z"
+  },
+  "metrics": {
+    "runId": "real-local-2026-07-13T13-25-02-839Z",
+    "inputEvents": 255805,
+    "persistedEvents": 93000,
+    "duplicateEvents": 162805,
+    "relevantEvents": 12903,
+    "receiversEnrolled": 969,
+    "bridgePairsVerified": 0,
+    "batches": 256,
+    "retryAttempts": 0,
+    "providerErrors": 0,
+    "peakHeapBytes": 172437288,
+    "throughputPerSec": 146.5759036903974
+  },
+  "traceMetrics": {
+    "entitiesConsidered": 30,
+    "eventsLoaded": 5187,
+    "verifiedBridgesLoaded": 0,
+    "tracesBuilt": 0,
+    "tracesPersisted": 0,
+    "truncatedEntities": []
+  },
+  "traceSamples": [
+    {
+      "traceId": "lineage:cmrfcg3l8003jwr2s8tvisop7:legacy-edge:cmrff1fib012awrxckjbte3c3>legacy-buy:cmrgalw2i9tylwrjgt6gh2hts",
+      "sourceEntityKey": "lineage:cmrfcg3l8003jwr2s8tvisop7",
+      "sourceRole": "operator_root",
+      "sourceWallet": "8ERSQd7AALCy6qfWobNX9ojVqCpVotCoyW3fn9ats3KH",
+      "terminalWallet": "85N6ZCLnPwseRoZumu7fjQaE5MKoTSnBRnZtCj78ie24",
+      "tokenBought": "Cm6fNnMk7NfzStP9CZpsQA2v3jjzbcYGAxdJySmHpump",
+      "route": "direct_transfer",
+      "eventIds": [
+        "legacy-edge:cmrff1fib012awrxckjbte3c3",
+        "legacy-buy:cmrgalw2i9tylwrjgt6gh2hts"
+      ],
+      "fundingToBuyDelaySec": 360502,
+      "confidence": 85,
+      "grantsEligibility": false
+    },
+    {
+      "traceId": "lineage:cmrfcg3l8003jwr2s8tvisop7:legacy-edge:cmrff1fib012awrxckjbte3c3>legacy-buy:cmrgalx8d9u0lwrjgehu4gvjn",
+      "sourceEntityKey": "lineage:cmrfcg3l8003jwr2s8tvisop7",
+      "sourceRole": "operator_root",
+      "sourceWallet": "8ERSQd7AALCy6qfWobNX9ojVqCpVotCoyW3fn9ats3KH",
+      "terminalWallet": "85N6ZCLnPwseRoZumu7fjQaE5MKoTSnBRnZtCj78ie24",
+      "tokenBought": "Cm6fNnMk7NfzStP9CZpsQA2v3jjzbcYGAxdJySmHpump",
+      "route": "direct_transfer",
+      "eventIds": [
+        "legacy-edge:cmrff1fib012awrxckjbte3c3",
+        "legacy-buy:cmrgalx8d9u0lwrjgehu4gvjn"
+      ],
+      "fundingToBuyDelaySec": 360463,
+      "confidence": 85,
+      "grantsEligibility": false
+    },
+    {
+      "traceId": "lineage:cmrfcg3l8003jwr2s8tvisop7:legacy-edge:cmrff1fib012awrxckjbte3c3>legacy-buy:cmrgalxev9u1dwrjgxlhihyxj",
+      "sourceEntityKey": "lineage:cmrfcg3l8003jwr2s8tvisop7",
+      "sourceRole": "operator_root",
+      "sourceWallet": "8ERSQd7AALCy6qfWobNX9ojVqCpVotCoyW3fn9ats3KH",
+      "terminalWallet": "85N6ZCLnPwseRoZumu7fjQaE5MKoTSnBRnZtCj78ie24",
+      "tokenBought": "Cm6fNnMk7NfzStP9CZpsQA2v3jjzbcYGAxdJySmHpump",
+      "route": "direct_transfer",
+      "eventIds": [
+        "legacy-edge:cmrff1fib012awrxckjbte3c3",
+        "legacy-buy:cmrgalxev9u1dwrjgxlhihyxj"
+      ],
+      "fundingToBuyDelaySec": 360445,
+      "confidence": 85,
+      "grantsEligibility": false
+    },
+    {
+      "traceId": "lineage:cmrfcg3l8003jwr2s8tvisop7:legacy-edge:cmrff1fib012awrxckjbte3c3>legacy-buy:cmrgalzgg9ucrwrjgm2t2j9wx",
+      "sourceEntityKey": "lineage:cmrfcg3l8003jwr2s8tvisop7",
+      "sourceRole": "operator_root",
+      "sourceWallet": "8ERSQd7AALCy6qfWobNX9ojVqCpVotCoyW3fn9ats3KH",
+      "terminalWallet": "85N6ZCLnPwseRoZumu7fjQaE5MKoTSnBRnZtCj78ie24",
+      "tokenBought": "Cm6fNnMk7NfzStP9CZpsQA2v3jjzbcYGAxdJySmHpump",
+      "route": "direct_transfer",
+      "eventIds": [
+        "legacy-edge:cmrff1fib012awrxckjbte3c3",
+        "legacy-buy:cmrgalzgg9ucrwrjgm2t2j9wx"
+      ],
+      "fundingToBuyDelaySec": 182326,
+      "confidence": 85,
+      "grantsEligibility": false
+    },
+    {
+      "traceId": "lineage:cmrfcg3jp000rwr2siabhg5is:legacy-edge:cmrgaybsqbv2fwrjgfwmtokby>legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm>legacy-buy:cmrgmzblmfjfuwrc4kizuvaxo",
+      "sourceEntityKey": "lineage:cmrfcg3jp000rwr2siabhg5is",
+      "sourceRole": "linked_wallet",
+      "sourceWallet": "6TYDxGmVxkBPBmEfnmLXx6jVff9LknsjRHqdTjVyZmG8",
+      "terminalWallet": "7ym2cGHEDqarAeRjZ43PKCg2EvyAyXbJi57r6csJ8tKZ",
+      "tokenBought": "CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump",
+      "route": "multi_hop_transfer",
+      "eventIds": [
+        "legacy-edge:cmrgaybsqbv2fwrjgfwmtokby",
+        "legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm",
+        "legacy-buy:cmrgmzblmfjfuwrc4kizuvaxo"
+      ],
+      "fundingToBuyDelaySec": 208062,
+      "confidence": 75,
+      "grantsEligibility": false
+    },
+    {
+      "traceId": "lineage:cmrfcg3jp000rwr2siabhg5is:legacy-edge:cmrgaybsqbv2fwrjgfwmtokby>legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm>legacy-buy:cmrgmzceifjmgwrc4i7brra3r",
+      "sourceEntityKey": "lineage:cmrfcg3jp000rwr2siabhg5is",
+      "sourceRole": "linked_wallet",
+      "sourceWallet": "6TYDxGmVxkBPBmEfnmLXx6jVff9LknsjRHqdTjVyZmG8",
+      "terminalWallet": "7ym2cGHEDqarAeRjZ43PKCg2EvyAyXbJi57r6csJ8tKZ",
+      "tokenBought": "CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump",
+      "route": "multi_hop_transfer",
+      "eventIds": [
+        "legacy-edge:cmrgaybsqbv2fwrjgfwmtokby",
+        "legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm",
+        "legacy-buy:cmrgmzceifjmgwrc4i7brra3r"
+      ],
+      "fundingToBuyDelaySec": 192485,
+      "confidence": 75,
+      "grantsEligibility": false
+    },
+    {
+      "traceId": "lineage:cmrfcg3jp000rwr2siabhg5is:legacy-edge:cmrgaybsqbv2fwrjgfwmtokby>legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm>legacy-buy:cmrgmzctwfjqxwrc4q6iamqp4",
+      "sourceEntityKey": "lineage:cmrfcg3jp000rwr2siabhg5is",
+      "sourceRole": "linked_wallet",
+      "sourceWallet": "6TYDxGmVxkBPBmEfnmLXx6jVff9LknsjRHqdTjVyZmG8",
+      "terminalWallet": "7ym2cGHEDqarAeRjZ43PKCg2EvyAyXbJi57r6csJ8tKZ",
+      "tokenBought": "CFPkPq1eYPR8GLzEo59wUbbMioX4bshaTQiSGzTSpump",
+      "route": "multi_hop_transfer",
+      "eventIds": [
+        "legacy-edge:cmrgaybsqbv2fwrjgfwmtokby",
+        "legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm",
+        "legacy-buy:cmrgmzctwfjqxwrc4q6iamqp4"
+      ],
+      "fundingToBuyDelaySec": 160212,
+      "confidence": 75,
+      "grantsEligibility": false
+    },
+    {
+      "traceId": "lineage:cmrfcg3jp000rwr2siabhg5is:legacy-edge:cmrgaybsqbv2fwrjgfwmtokby>legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm>legacy-buy:cmrgmzd6wfjugwrc4rfw87uyq",
+      "sourceEntityKey": "lineage:cmrfcg3jp000rwr2siabhg5is",
+      "sourceRole": "linked_wallet",
+      "sourceWallet": "6TYDxGmVxkBPBmEfnmLXx6jVff9LknsjRHqdTjVyZmG8",
+      "terminalWallet": "7ym2cGHEDqarAeRjZ43PKCg2EvyAyXbJi57r6csJ8tKZ",
+      "tokenBought": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "route": "multi_hop_transfer",
+      "eventIds": [
+        "legacy-edge:cmrgaybsqbv2fwrjgfwmtokby",
+        "legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm",
+        "legacy-buy:cmrgmzd6wfjugwrc4rfw87uyq"
+      ],
+      "fundingToBuyDelaySec": 104192,
+      "confidence": 75,
+      "grantsEligibility": false
+    },
+    {
+      "traceId": "lineage:cmrfcg3jp000rwr2siabhg5is:legacy-edge:cmrgaybsqbv2fwrjgfwmtokby>legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm>legacy-buy:cmrgmzdczfjvwwrc4ebhribq1",
+      "sourceEntityKey": "lineage:cmrfcg3jp000rwr2siabhg5is",
+      "sourceRole": "linked_wallet",
+      "sourceWallet": "6TYDxGmVxkBPBmEfnmLXx6jVff9LknsjRHqdTjVyZmG8",
+      "terminalWallet": "7ym2cGHEDqarAeRjZ43PKCg2EvyAyXbJi57r6csJ8tKZ",
+      "tokenBought": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "route": "multi_hop_transfer",
+      "eventIds": [
+        "legacy-edge:cmrgaybsqbv2fwrjgfwmtokby",
+        "legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm",
+        "legacy-buy:cmrgmzdczfjvwwrc4ebhribq1"
+      ],
+      "fundingToBuyDelaySec": 104178,
+      "confidence": 75,
+      "grantsEligibility": false
+    },
+    {
+      "traceId": "lineage:cmrfcg3jp000rwr2siabhg5is:legacy-edge:cmrgaybsqbv2fwrjgfwmtokby>legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm>legacy-buy:cmrgmzdi4fjx6wrc4ej0d8las",
+      "sourceEntityKey": "lineage:cmrfcg3jp000rwr2siabhg5is",
+      "sourceRole": "linked_wallet",
+      "sourceWallet": "6TYDxGmVxkBPBmEfnmLXx6jVff9LknsjRHqdTjVyZmG8",
+      "terminalWallet": "7ym2cGHEDqarAeRjZ43PKCg2EvyAyXbJi57r6csJ8tKZ",
+      "tokenBought": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "route": "multi_hop_transfer",
+      "eventIds": [
+        "legacy-edge:cmrgaybsqbv2fwrjgfwmtokby",
+        "legacy-edge:cmrgmzea7fk4nwrc4fpn2oydm",
+        "legacy-buy:cmrgmzdi4fjx6wrc4ej0d8las"
+      ],
+      "fundingToBuyDelaySec": 104173,
+      "confidence": 75,
+      "grantsEligibility": false
+    }
+  ]
+}

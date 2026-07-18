@@ -26,11 +26,13 @@ export * from './rules/index';
 export * from './window/aggregate';
 export * from './alerts/templates';
 export * from './alerts/cooldown';
+export * from './alerts/coreConfluence';
 export * from './cluster/linkConfidence';
 export * from './cluster/unionFind';
 export * from './cluster/clusterer';
 export * from './rotation/matcher';
 export * from './flow/sankeyBuilder';
+export * from './flow/snapshotPersistence';
 export * from './backtest/evaluate';
 export * from './backtest/summarize';
 export * from './backtest/replay';
@@ -44,11 +46,16 @@ export * from './candidates/validate';
 export * from './candidates/sourceCategory';
 export * from './behavior/reconstruct';
 export * from './behavior/holdClassifier';
+export * from './behavior/receipts';
 export * from './social/index';
 export * from './confluence/index';
 export * from './stealth/index';
 export * from './runnermining/index';
 export * from './risk/freshness';
+export * from './dormancy/meaningfulActivity';
+export * from './dormancy/dormancy';
+export * from './postentry/postEntryBehavior';
+export * from './tracker/index';
 
 // Graph module: the unused sketch GraphNode/GraphEdge/RawGraphEdge that used
 // to live in ./types (never implemented or consumed — confirmed by repo-wide

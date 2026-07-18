@@ -16,7 +16,28 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@flowradar/db', () => ({
-  ingestNormalizedTxs: vi.fn(async () => {})
+  ingestNormalizedTxs: vi.fn(async () => {}),
+  recordProviderHealth: vi.fn(async () => {}),
+  recordCursorFailure: vi.fn(async () => {}),
+  advanceTimestampCursor: vi.fn(async (prisma, input) => {
+    await prisma.providerSyncState.upsert({
+      where: { provider_chain_scope: { provider: input.provider, chain: input.chain, scope: input.scope } },
+      create: { cursor: input.nextCursor }, update: { cursor: input.nextCursor }
+    });
+    return { decision: 'advanced', cursor: input.nextCursor };
+  }),
+  createMassTrackerSession: vi.fn(async () => ({
+    runId: 'worker-test-run',
+    ingest: vi.fn(async () => {}),
+    recordProviderError: vi.fn(),
+    complete: vi.fn(async () => ({
+      runId: 'worker-test-run', inputEvents: 0, persistedEvents: 0,
+      duplicateEvents: 0, relevantEvents: 0, receiversEnrolled: 0,
+      bridgePairsVerified: 0, batches: 0, retryAttempts: 0,
+      providerErrors: 0, peakHeapBytes: 0, throughputPerSec: 0
+    })),
+    fail: vi.fn(async () => {})
+  }))
 }));
 
 import { ingestNormalizedTxs } from '@flowradar/db';
@@ -39,9 +60,7 @@ interface FakeWallet {
 }
 
 function makeTx(seq = 0): NormalizedTx {
-  // Only `.ts` (a Date) is read by walletActivity (cursor advance); the rest of
-  // the shape is irrelevant because ingestNormalizedTxs is mocked out.
-  return { ts: new Date(1_000 + seq) } as unknown as NormalizedTx;
+  return { txHash: `tx-${seq}`, blockOrSlot: BigInt(seq), ts: new Date(1_000 + seq), legs: [] };
 }
 
 /**
@@ -156,6 +175,7 @@ function makeCtx(wallets: FakeWallet[], provider: unknown) {
 beforeEach(() => {
   ingestMock.mockClear();
   delete process.env.WALLET_ACTIVITY_MAX_PAGES;
+  delete process.env.WALLET_ACTIVITY_MAX_WALLETS;
 });
 afterEach(() => {
   delete process.env.WALLET_ACTIVITY_MAX_PAGES;
@@ -368,5 +388,27 @@ describe('walletActivity — per-cycle wallet budget (overnight 2026-07-11)', ()
     const r = selectPollWindow(all, 200, 7);
     expect(r.window).toEqual(all);
     expect(r.windows).toBe(1);
+  });
+});
+
+describe('walletActivity - production evidence guard', () => {
+  it('refuses the registry MockProvider when MOCK_MODE=false', async () => {
+    const previous = process.env.MOCK_MODE;
+    process.env.MOCK_MODE = 'false';
+    try {
+      const provider = { providerName: 'MockProvider', getWalletTransactions: vi.fn() };
+      const { ctx, log } = makeCtx([{ id: 'core', address: 'CoreWallet', chain: 'SOLANA' }], provider);
+
+      await run(ctx);
+
+      expect(provider.getWalletTransactions).not.toHaveBeenCalled();
+      expect(log.error).toHaveBeenCalledWith(
+        expect.stringContaining('CoreWallet'),
+        expect.objectContaining({ kind: 'provider_error', error: expect.stringContaining('refusing MockProvider') })
+      );
+    } finally {
+      if (previous === undefined) delete process.env.MOCK_MODE;
+      else process.env.MOCK_MODE = previous;
+    }
   });
 });

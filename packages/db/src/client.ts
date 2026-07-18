@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { config as loadDotenv } from 'dotenv';
@@ -11,6 +11,32 @@ import { LIVE_LITE_DATABASE_URL, resolveDatabaseUrlForEnv } from './testDb';
 // scripts/db-local.ts (source of truth for the running cluster).
 const LITE_DEFAULT_DATABASE_URL = LIVE_LITE_DATABASE_URL;
 
+/**
+ * Git-worktree-aware .env fallback: linked worktrees don't share the main
+ * checkout's untracked .env, so runs launched from a worktree used to see
+ * every provider as "missing key" even though the repository IS configured.
+ * A worktree's `.git` is a FILE containing `gitdir: <main>/.git/worktrees/<name>`
+ * — resolve the MAIN worktree root from it and return its .env path.
+ * Values are only ever loaded via dotenv's fill-missing-only semantics and
+ * are never printed or copied anywhere.
+ */
+function mainWorktreeEnvPath(repoRoot: string): string | null {
+  try {
+    const dotGit = path.join(repoRoot, '.git');
+    if (!existsSync(dotGit) || !statSync(dotGit).isFile()) return null;
+    const m = /gitdir:\s*(.+)/.exec(readFileSync(dotGit, 'utf8'));
+    if (!m) return null;
+    const gitDir = path.resolve(repoRoot, m[1].trim()); // <main>/.git/worktrees/<name>
+    const worktreesDir = path.dirname(gitDir); // <main>/.git/worktrees
+    if (path.basename(worktreesDir) !== 'worktrees') return null;
+    const mainRoot = path.dirname(path.dirname(worktreesDir)); // <main>
+    const candidate = path.join(mainRoot, '.env');
+    return existsSync(candidate) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
 function loadEnvFromRepoRoot(): void {
   // packages/db/src -> repo root is two levels up.
   const here = path.dirname(fileURLToPath(import.meta.url));
@@ -19,6 +45,12 @@ function loadEnvFromRepoRoot(): void {
   // Root .env may not exist (LITE mode works from defaults alone) — only load if present.
   if (existsSync(envPath)) {
     loadDotenv({ path: envPath });
+  }
+  // Worktree fallback fills in ONLY variables still missing (dotenv never
+  // overrides existing process.env) — explicit DATABASE_URL etc. always win.
+  const mainEnv = mainWorktreeEnvPath(repoRoot);
+  if (mainEnv) {
+    loadDotenv({ path: mainEnv });
   }
 }
 
